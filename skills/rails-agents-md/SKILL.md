@@ -4,6 +4,14 @@ description: |
   Create and audit AGENTS.md files for Rails applications. Ensures apps
   provide the deploy, branch, and testing information that agent preludes
   and cross-app tooling depend on.
+triggers:
+  - rails-agents-md
+  - /rails-agents-md
+  - create AGENTS.md
+  - audit AGENTS.md
+  - missing AGENTS.md
+  - update AGENTS.md
+  - AGENTS.md spec
 version: 1.0.0
 ---
 
@@ -19,7 +27,7 @@ Create and audit AGENTS.md files for Rails applications.
 
 ## Process
 
-@references/guide.md
+Open `@references/guide.md` and follow it. Do not proceed without it.
 
 ## Template & Rubric
 

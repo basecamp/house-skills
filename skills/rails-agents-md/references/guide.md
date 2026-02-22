@@ -5,8 +5,13 @@
 1. **Discover the repo's default branch:**
 
    ```bash
+   # Ensure origin/HEAD is set (may be missing in CI or shallow clones)
+   git remote set-head origin --auto 2>/dev/null
    git symbolic-ref --short refs/remotes/origin/HEAD | sed 's#^origin/##'
    ```
+
+   If `origin/HEAD` is not set and `set-head --auto` fails (no network), fall
+   back to the app's AGENTS.md `Default branch:` line or the registry table.
 
 2. **Discover deploy destinations:**
 
