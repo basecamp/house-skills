@@ -9,11 +9,15 @@ Copy this to `.claude/ralph-lisa-loop-session.md` at initialization. Replace bra
 session_id: [auto-generated UUID or timestamp]
 artifact_path: [path to plan or code being reviewed]
 mode: plan
+plan_only: false
 rope_length: 3
 status: active
 current_round: 1
 open_findings_count: 0
 open_disputes_count: 0
+reviewer_backend: null
+review_channel_status: null
+reasoning_effort: xhigh
 codex_plan_thread_id: null
 codex_impl_thread_id: null
 codex_plan_session_id: null
@@ -22,14 +26,16 @@ max_rounds: 20
 total_rounds_all_phases: 0
 total_disputes_opened_all_phases: 0
 total_rejections_all_phases: 0
+compacted_through_round: 0
+compaction_count: 0
 original_prompt: |
   [the user's initial prompt, verbatim]
 ---
 
 <!-- CONTINUATION BLOCK — injected by stop hook, kept compact -->
-You are running the ralph-lisa loop. Read this file for state and follow the
-ralph-lisa-loop skill guide. Take the next action for your current mode and round.
-Mode: plan. Round: 1. Open findings: 0. Open disputes: 0.
+ralph-lisa-loop | mode=plan | round=1 | findings=0 | disputes=0 | status=active
+Read .claude/ralph-lisa-loop-session.md. Follow the ralph-lisa-loop skill guide.
+Next: [specific next action, e.g., "Self-review for round 1"]
 <!-- END CONTINUATION BLOCK -->
 
 <!-- ROUND LOG — grows each round, NOT injected by stop hook -->
@@ -62,6 +68,7 @@ Mode: plan. Round: 1. Open findings: 0. Open disputes: 0.
 
 ### Gate Check
 Derived open findings: 0. Derived open disputes: 0. Cache match: yes.
+Review channel: mcp. Reasoning effort: xhigh. Policy compliant: yes.
 
 ---
 
@@ -80,11 +87,15 @@ Contains resolved disputes and rejected-with-reason findings from plan phase.]
 | `session_id` | string | Unique identifier for this session |
 | `artifact_path` | string | Path to the artifact under review |
 | `mode` | enum | `plan` or `implement` |
+| `plan_only` | bool | If true, skip implementation phase after plan converges |
 | `rope_length` | int 0-5 | Interruption threshold (see guide) |
 | `status` | enum | `active`, `awaiting_human`, `complete` |
 | `current_round` | int | Current round number within this phase |
 | `open_findings_count` | int | **Cache** — must match record-derived count |
 | `open_disputes_count` | int | **Cache** — must match record-derived count |
+| `reviewer_backend` | enum/null | `mcp` or `exec` — set at startup, null before preflight |
+| `review_channel_status` | enum/null | `mcp_ready`, `mcp_degraded`, `exec_opt_in`, `blocked` |
+| `reasoning_effort` | string | Reasoning effort for all Codex calls (default: `xhigh`) |
 | `codex_plan_thread_id` | string/null | MCP thread ID for plan-phase reviews |
 | `codex_impl_thread_id` | string/null | MCP thread ID for implement-phase reviews |
 | `codex_plan_session_id` | string/null | `codex exec` session ID for plan-phase reviews (fallback) |
@@ -93,6 +104,8 @@ Contains resolved disputes and rejected-with-reason findings from plan phase.]
 | `total_rounds_all_phases` | int | **Immutable cumulative** — survives phase transition |
 | `total_disputes_opened_all_phases` | int | **Immutable cumulative** — survives phase transition |
 | `total_rejections_all_phases` | int | **Immutable cumulative** — survives phase transition |
+| `compacted_through_round` | int | Last round included in compaction (0 = no compaction yet) |
+| `compaction_count` | int | Number of times compaction has been performed |
 | `original_prompt` | string | User's initial prompt, verbatim |
 
 ### Continuation Block
@@ -101,6 +114,12 @@ The text between `<!-- CONTINUATION BLOCK -->` and `<!-- END CONTINUATION BLOCK 
 - Extracted by the stop hook and re-injected as the continuation prompt
 - Fixed-size (~200 bytes) regardless of session length
 - Updated by Claude each round with current mode, round, and derived counts
+- Line 1 is machine-parseable state: `ralph-lisa-loop | mode=X | round=N | findings=N | disputes=N | status=X`
+- Line 3 is the specific next action (updated each synthesis step)
+
+### Compaction
+
+When `current_round > 6`, old rounds (1 through current-3) are compacted into a cumulative summary. See the Context Management section in the guide. The `compacted_through_round` field tracks the last compacted round; `compaction_count` tracks how many times compaction has been performed. Compaction is lossless for gating — all finding/dispute states carry forward.
 
 ### Finding States
 
