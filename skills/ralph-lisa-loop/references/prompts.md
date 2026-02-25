@@ -4,6 +4,14 @@ Reusable prompts for each phase and role in the ralph-lisa loop. Claude selects 
 
 ---
 
+## Review Style
+
+Codex reads files directly — prompts reference paths, not pasted content. Claude parses
+Codex's response into structured findings (IDs, severity, state). The persona sets the
+behavioral bar; Claude imposes the protocol structure.
+
+---
+
 ## Plan Kickoff (Claude)
 
 Use when initializing plan mode. Claude develops its own plan from the user's prompt.
@@ -68,29 +76,36 @@ L (nice to have).
 
 ---
 
-## Reviewer Persona (Codex, All Review Rounds)
+## Reviewer Persona (Codex)
 
-Base persona prepended to all review prompts sent to Codex.
+Pass as `developer-instructions` on MCP calls (or prepend to `prompt` if
+`developer-instructions` is not supported). Keeping persona separate from review
+content gives it priority attention in the model.
 
+**developer-instructions value:**
 ```
-You are a rigorous code and design reviewer. Your job is to find problems,
-not to praise. Be direct, specific, and evidence-based.
+You are a ruthless reviewer and expert guide, not an implementor. Be proactive
+and generous in suggestions — go deep on every inquiry and take the next step.
 
-Behavior:
-- Every finding must have a severity label: H (blocks shipping, incorrect/unsafe),
-  M (should fix, quality/maintainability), L (nice to have, polish/style)
-- Every finding must include: what's wrong, where (specific reference), and
-  what to do about it
-- Do not repeat findings from previous rounds — only raise new issues or
-  escalate unresolved ones
-- If you genuinely find nothing wrong, say "No findings" — but only if true
-- If you disagree with a prior decision, state your position with evidence
+Label concerns by severity: H (blocks shipping), M (should fix), L (nice to have).
+Reference previous findings by ID when re-evaluating. If a fix is insufficient,
+re-raise with evidence. If you genuinely find nothing wrong, say "No findings."
+```
 
-Output format:
-For each finding:
-- [H/M/L]: {claim}
-  Evidence: {specific reference}
-  Required action: {what to do}
+**Claude's parsing responsibility**: Claude reads Codex's response and maps it into
+the protocol's finding structure (F-{seq} IDs, state, evidence, required action).
+Codex produces natural review output; Claude imposes the schema.
+
+**Example MCP call:**
+```
+mcp__codex__codex(
+  developer-instructions="[reviewer persona text above]",
+  prompt="[review prompt: path references, open findings, open disputes]",
+  cwd="[project dir]",
+  config={"model_reasoning_effort": "xhigh", "model_reasoning_summary": "detailed", "model_supports_reasoning_summaries": true},
+  sandbox="read-only",
+  approval-policy="never"
+)
 ```
 
 ---
@@ -98,75 +113,54 @@ For each finding:
 ## Plan Review (Codex, Plan Round 2+)
 
 Use for plan-phase reviews after Round 1 (which uses Independent Ideation above).
+Reviewer persona is passed via `developer-instructions`, not inlined here.
 
 ```
-{reviewer_persona}
-
-Review the updated plan below. Focus on:
-- Correctness: Will this approach work? Are there gaps?
-- Completeness: Are edge cases covered?
-- Feasibility: Can this be implemented as described?
-- Risks: What could go wrong?
-
-Updated plan:
-{artifact_content_or_diff}
-
-Changes since last round:
-{change_summary}
+Updated plan at {artifact_path}.
 
 Open findings (must be addressed or disputed):
 {open_findings_with_ids}
 
 Open disputes (your position requested):
 {open_disputes_with_ids}
-
-Respond with findings only. No preamble. Severity-labeled.
 ```
 
 ---
 
 ## Implementation Review (Codex, Implement Rounds)
 
-Use for implement-phase reviews.
+Use for implement-phase reviews. Reviewer persona is passed via `developer-instructions`.
 
+For `codex exec` fallback, `codex exec review --uncommitted "[focus areas]"` is a
+first-class option that automatically includes the diff.
+
+**First implementation round:**
 ```
-{reviewer_persona}
-
-Review the implementation changes below against the converged plan.
-
-Focus on:
-- Correctness: Does the code do what the plan says?
-- Edge cases: Missing error handling, boundary conditions
-- Security: Injection, XSS, auth issues
-- Consistency: Does it match existing patterns in the codebase?
-
-Implementation changes:
-{diff_or_summary}
+Plan at {artifact_path}. Review uncommitted changes against it.
 
 Open findings (must be addressed or disputed):
 {open_findings_with_ids}
+```
 
-Respond with findings only. No preamble. Severity-labeled.
+**Subsequent implementation rounds:**
+```
+Updated implementation. Review uncommitted changes against the plan at {artifact_path}.
+
+Open findings (must be addressed or disputed):
+{open_findings_with_ids}
 ```
 
 ---
 
-## Delta-Only Continuation (Codex, Round N)
+## Continuation (Codex, Round N)
 
-Wrapper for Round 2+ reviews in both modes. Emphasizes delta discipline.
+Round 2+ prompts. Codex has full thread context — keep it short. Claude summarizes
+what changed and what's open. Codex reads files and diffs itself.
 
 ```
-This is Round {n} of the review loop. You have reviewed this artifact before.
+{what_changed_this_round}
 
-IMPORTANT: Do NOT repeat findings from previous rounds. Only report:
-- NEW issues not previously raised
-- Previously raised issues that were NOT adequately fixed (reference the finding ID)
-- Disagreements with decisions made since your last review
-
-If all previous findings have been adequately addressed and you find no new issues,
-respond with: "No findings."
-
-{mode_specific_review_prompt}
+Open findings: {open_findings_summary_or_none}
 ```
 
 ---
@@ -212,3 +206,27 @@ If salience >= threshold: set status=awaiting_human, present to mediator
 If salience < threshold: log salience score and rationale, continue without interrupt
   (finding remains OPEN — still must be fixed or mediator-approved for rejection)
 ```
+
+---
+
+## Round Header Protocol
+
+Each round's External Review section should begin with a human-readable header line.
+This is for session readability — eval parses the Gate Check audit line, not this.
+
+```
+Channel: mcp | Effort: xhigh | Policy: plan-phase default
+```
+
+Variations:
+```
+Channel: exec | Effort: xhigh
+Channel: self-review-only | Effort: n/a | Policy: fallback (MCP+exec both failed)
+```
+
+The Gate Check section uses a separate eval-parseable format:
+```
+Review channel: mcp. Reasoning effort: xhigh. Policy compliant: yes.
+```
+
+Keep these distinct — `Channel:` for External Review headers, `Review channel:` for Gate Check audit lines.

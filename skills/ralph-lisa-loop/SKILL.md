@@ -23,11 +23,20 @@ triggers:
   - plan-implement cycle
   - plan then implement
   - plan then build
+  # Plan-only
+  - plan only
+  - just plan
+  - design review
+  - RFC review
   # Development / implementation
   - build this
   - implement this
   - implement with expert
   - build with expert review
+  # Implement-only
+  - just implement
+  - just build
+  - skip planning
   # Codex review
   - codex review
   - get codex to review
@@ -41,10 +50,14 @@ triggers:
 
 # ralph-lisa-loop
 
-## Before you begin
+## Preflight
 
-Check whether the stop hook is installed. Read `~/.claude/settings.json` and look
-for a `Stop` hook entry pointing to this skill's `scripts/stop-hook.sh`.
+Do not enter the round loop until all preflight checks pass.
+
+### Step 1: Stop hook check
+
+Read `~/.claude/settings.json` and look for a `Stop` hook entry pointing to this
+skill's `scripts/stop-hook.sh`.
 
 If the hook is NOT installed, tell the user:
 
@@ -72,7 +85,52 @@ If the user agrees, add this entry to `~/.claude/settings.json` under `hooks.Sto
 Replace `SKILL_SCRIPTS_DIR` with the absolute path to this skill's `scripts/`
 directory (resolve from the skill installation location).
 
+If the user declines the hook, proceed in Manual tier (the user will type
+"continue" between rounds). Note the tier in the session's first round summary.
+
 If the hook IS already installed, proceed without mentioning it.
+
+### Step 2: Codex reviewer channel check
+
+Probe whether the Codex MCP tools are callable (search available tools for
+`mcp__codex__codex`, or attempt a lightweight call). Don't inspect how it's
+configured — it could be project `.mcp.json`, user-wide MCP settings, or
+another harness entirely.
+
+- If `mcp__codex__codex` is available → record `reviewer_backend: mcp` and `review_channel_status: mcp_ready` in session, proceed.
+- If unavailable → check `which codex` for CLI fallback.
+  - If codex CLI exists → offer to configure MCP:
+    > Codex MCP isn't available in this session. I can add it for you:
+    >
+    > 1. **User-level** — available in all projects
+    > 2. **Project-level** — scoped to this repo
+    > 3. **Skip** — use `codex exec` CLI fallback (slower, session-based persistence)
+    >
+    > Which do you prefer?
+
+    For options 1 or 2, run the appropriate command, then stop — do not enter
+    the round loop. Tell the user to restart Claude Code and re-invoke the skill.
+    Preflight will re-run and find MCP available.
+    ```bash
+    # User-level
+    claude mcp add --scope user --transport stdio codex -- codex mcp-server
+
+    # Project-level
+    claude mcp add --scope project --transport stdio codex -- codex mcp-server
+    ```
+
+    If the user chooses "skip" (option 3), record `reviewer_backend: exec` and
+    `review_channel_status: exec_opt_in`, proceed with the downgrade logged.
+  - If no codex CLI at all → hard stop:
+    > The ralph-lisa loop requires Codex as reviewer. Install: `npm i -g @openai/codex`
+    > Then either restart (I'll offer to configure MCP) or ensure the CLI is in your PATH.
+
+### Step 3: Reasoning policy initialization
+
+Confirm rope length and inform the user of the reasoning policy (no action
+needed from them):
+
+> Reasoning policy: xhigh for all rounds, with detailed reasoning summaries.
 
 ## Protocol
 

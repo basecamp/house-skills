@@ -5,12 +5,21 @@
 # Validates the structural integrity of a ralph-lisa-loop session file.
 # Run after session completes to verify protocol compliance.
 #
-# Usage: eval.sh [session-path]
+# Usage: eval.sh [session-path] [--mid-session]
 #   Default: .claude/ralph-lisa-loop-session.md
+#   --mid-session: run structural checks only (1, 2, 11, 12), skip completion checks
 
 # Do NOT use set -e — all checks must run even if earlier ones fail.
 
-SESSION="${1:-.claude/ralph-lisa-loop-session.md}"
+SESSION=".claude/ralph-lisa-loop-session.md"
+MID_SESSION=false
+for arg in "$@"; do
+  if [[ "$arg" == "--mid-session" ]]; then
+    MID_SESSION=true
+  elif [[ "$arg" != -* ]]; then
+    SESSION="$arg"
+  fi
+done
 
 fail_count=0
 warn_count=0
@@ -58,7 +67,9 @@ report 1 "Session file exists" "PASS"
 rounds=$(grep -c "^## Round" "$SESSION" 2>/dev/null) || true
 report 2 "Round count" "PASS" "$rounds rounds"
 
-# ── Checks 3-8: Per-round section counts ────────────────────────────────
+# ── Checks 3-8: Per-round section counts (skip in mid-session) ───────────
+
+if [[ "$MID_SESSION" == false ]]; then
 
 check_section() {
   local num="$1" label="$2" pattern="$3"
@@ -87,13 +98,17 @@ else
   report 9 "Finding IDs present" "WARN" "no F-{n} IDs in finding ledger rows"
 fi
 
-# ── Check 10: Final status ──────────────────────────────────────────────
+fi  # end skip in mid-session (checks 3-9)
+
+# ── Check 10: Final status (skip in mid-session) ─────────────────────────
 
 status=$(yaml_field "$SESSION" "status")
-if [[ "$status" == "complete" ]]; then
-  report 10 "Final status = complete" "PASS"
-else
-  report 10 "Final status = complete" "WARN" "status=$status"
+if [[ "$MID_SESSION" == false ]]; then
+  if [[ "$status" == "complete" ]]; then
+    report 10 "Final status = complete" "PASS"
+  else
+    report 10 "Final status = complete" "WARN" "status=$status"
+  fi
 fi
 
 # ── Check 11: Continuation block well-formed ────────────────────────────
@@ -123,6 +138,10 @@ elif echo "$last_gate" | grep -q "Cache match: yes"; then
 else
   report 12 "Cache consistency" "FAIL" "$last_gate"
 fi
+
+# ── Checks 13-17: Completion-only checks (skip in mid-session) ──────────
+
+if [[ "$MID_SESSION" == false ]]; then
 
 # ── Check 13: No open findings ──────────────────────────────────────────
 
@@ -239,10 +258,185 @@ else
   report 17 "Round summaries have gate data" "WARN" "$gate_section_count sections, $gate_data_count with data"
 fi
 
+# ── Check 18: Reviewer backend set ──────────────────────────────────────
+
+backend=$(yaml_field "$SESSION" "reviewer_backend")
+if [[ -n "$backend" && "$backend" != "null" ]]; then
+  report 18 "Reviewer backend set" "PASS" "backend=$backend"
+else
+  report 18 "Reviewer backend set" "FAIL" "reviewer_backend is missing or null"
+fi
+
+# ── Shared: Extract audit lines from Gate Check sections only ────────────
+
+# Gate Check sections start with "### Gate Check" and end at any markdown heading
+# (## or ###). The /^##/ pattern matches both. Extract "Review channel:" lines only
+# from within these sections.
+gate_check_audit_lines=$(awk '
+  /^### Gate Check/ { in_gate = 1; next }
+  /^##/ { in_gate = 0 }
+  in_gate && /^Review channel:/ { print NR ":" $0 }
+' "$SESSION" 2>/dev/null || true)
+
+# ── Check 19: Review audit presence ────────────────────────────────────
+
+# Validate each Gate Check section has a complete audit line with all three tokens.
+audit_full_count=0
+audit_partial_count=0
+while IFS= read -r line; do
+  [[ -z "$line" ]] && continue
+  content="${line#*:}"  # strip line number prefix
+  has_channel=false; has_effort=false; has_policy=false
+  echo "$content" | grep -q "Review channel:" && has_channel=true
+  echo "$content" | grep -q "Reasoning effort:" && has_effort=true
+  echo "$content" | grep -q "Policy compliant:" && has_policy=true
+  if [[ "$has_channel" == true && "$has_effort" == true && "$has_policy" == true ]]; then
+    ((audit_full_count++)) || true
+  elif [[ "$has_channel" == true || "$has_effort" == true || "$has_policy" == true ]]; then
+    ((audit_partial_count++)) || true
+  fi
+done <<< "$gate_check_audit_lines"
+
+# Note: this is aggregate validation (total audit lines >= total gate sections).
+# A section with 2 audit lines and another with 0 would still pass. Acceptable
+# since the protocol writes exactly one audit line per Gate Check section.
+if [[ "$gate_section_count" -gt 0 && "$audit_full_count" -ge "$gate_section_count" ]]; then
+  report 19 "Review audit presence" "PASS" "$audit_full_count complete entries"
+elif [[ "$gate_section_count" -eq 0 ]]; then
+  report 19 "Review audit presence" "WARN" "no Gate Check sections"
+elif [[ "$audit_partial_count" -gt 0 ]]; then
+  report 19 "Review audit presence" "WARN" "$audit_partial_count partial entries (missing channel/effort/policy tokens)"
+else
+  report 19 "Review audit presence" "WARN" "$gate_section_count rounds, $audit_full_count with full audit trail"
+fi
+
+# ── Check 20: Reasoning policy compliance ────────────────────────────────
+
+# All rounds should use xhigh reasoning effort.
+# Per-line channel awareness: in mcp_degraded sessions, skip MCP rounds (effort
+# uncontrollable) but still check exec rounds (effort set via -c flag).
+# Self-review-only rounds have no external effort — always skip.
+# Uses the section-scoped gate_check_audit_lines from above.
+channel_status_for_20=$(yaml_field "$SESSION" "review_channel_status")
+policy_violations=0
+skipped_rounds=0
+
+while IFS= read -r match; do
+  [[ -z "$match" ]] && continue
+  content="${match#*:}"  # strip line number prefix
+  channel=$(echo "$content" | sed 's/.*Review channel:[[:space:]]*//' | sed 's/\..*//')
+  effort=$(echo "$content" | sed 's/.*Reasoning effort:[[:space:]]*//' | sed 's/\..*//')
+
+  # Skip rounds where effort is not controllable
+  if [[ "$channel" == "self-review-only" ]]; then
+    ((skipped_rounds++)) || true
+    continue
+  fi
+  if [[ "$channel_status_for_20" == "mcp_degraded" && "$channel" == "mcp" ]]; then
+    ((skipped_rounds++)) || true
+    continue
+  fi
+
+  if [[ "$effort" != "xhigh" ]]; then
+    ((policy_violations++)) || true
+  fi
+done <<< "$gate_check_audit_lines"
+
+if [[ "$policy_violations" -eq 0 && "$skipped_rounds" -gt 0 ]]; then
+  report 20 "Reasoning policy compliance" "PASS" "$skipped_rounds rounds skipped (effort not controllable)"
+elif [[ "$policy_violations" -eq 0 ]]; then
+  report 20 "Reasoning policy compliance" "PASS"
+else
+  report 20 "Reasoning policy compliance" "WARN" "$policy_violations rounds not using xhigh ($skipped_rounds skipped)"
+fi
+
+# ── Check 21: Review channel status valid ────────────────────────────────
+
+channel_status=$(yaml_field "$SESSION" "review_channel_status")
+case "$channel_status" in
+  mcp_ready|mcp_degraded|exec_opt_in)
+    report 21 "Review channel status valid" "PASS" "status=$channel_status"
+    ;;
+  blocked)
+    report 21 "Review channel status valid" "FAIL" "status=blocked (session should not complete in blocked state)"
+    ;;
+  null|"")
+    report 21 "Review channel status valid" "FAIL" "review_channel_status is missing or null (preflight should set this)"
+    ;;
+  *)
+    report 21 "Review channel status valid" "FAIL" "unknown status: $channel_status"
+    ;;
+esac
+
+# ── Check 22: Compaction integrity ───────────────────────────────────────
+
+# If compaction occurred, verify cumulative ledgers exist and contain valid IDs.
+# State comparison not feasible (compacted round rows are gone).
+compacted_through=$(yaml_field "$SESSION" "compacted_through_round")
+if [[ "$compacted_through" =~ ^[0-9]+$ && "$compacted_through" -gt 0 ]]; then
+  # Structural: verify compacted section exists with cumulative ledgers
+  has_compacted_section=$(grep -c "^## Rounds 1-" "$SESSION" 2>/dev/null) || true
+  has_cumulative_findings=$(grep -c "^### Cumulative Finding Ledger" "$SESSION" 2>/dev/null) || true
+  has_cumulative_disputes=$(grep -c "^### Cumulative Dispute Ledger" "$SESSION" 2>/dev/null) || true
+
+  if [[ "$has_compacted_section" -lt 1 || "$has_cumulative_findings" -lt 1 || "$has_cumulative_disputes" -lt 1 ]]; then
+    report 22 "Compaction integrity" "WARN" "compacted_through_round=$compacted_through but missing cumulative ledger sections"
+  else
+    # Semantic: verify finding and dispute IDs from compacted rounds appear in
+    # the cumulative ledgers. State comparison is not feasible after compaction
+    # (compacted round rows are gone, recent rounds may have updated state).
+    # Single awk — safe against malformed input.
+    compaction_result=$(awk -F'|' '
+      function trim(s) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
+
+      /^### Cumulative Finding Ledger/ { section = "cf"; next }
+      /^### Cumulative Dispute Ledger/ { section = "cd"; next }
+      /^### Finding Ledger/ { section = "fl"; next }
+      /^### Dispute Ledger/ { section = "dl"; next }
+      /^##/ { section = "" }
+
+      section == "cf" { id = trim($2); if (id ~ /^F-[0-9]+$/) cumul_f[id] = 1 }
+      section == "cd" { id = trim($2); fid = trim($3); if (id ~ /^D-F-[0-9]+$/) { cumul_d[id] = 1; cumul_d_ref[id] = fid } }
+      section == "fl" { id = trim($2); if (id ~ /^F-[0-9]+$/) seen_f[id] = 1 }
+      section == "dl" { id = trim($2); if (id ~ /^D-F-[0-9]+$/) seen_d[id] = 1 }
+
+      END {
+        drift = ""
+        # Dispute referential integrity: every cumulative dispute finding_id
+        # column should reference a finding in cumulative or recent rounds.
+        for (id in cumul_d) {
+          fid = cumul_d_ref[id]
+          if (fid == "" || (!(fid in cumul_f) && !(fid in seen_f))) drift = drift " " id "(orphan-ref)"
+        }
+        # Finding ID cross-reference is not feasible: compacted round rows
+        # are replaced by the cumulative, so cumulative IS the authoritative
+        # record. Nothing to cross-reference against.
+        if (drift == "") print "ok"
+        else print "drift:" drift
+      }
+    ' "$SESSION" 2>/dev/null)
+
+    if [[ "$compaction_result" == "ok" ]]; then
+      report 22 "Compaction integrity" "PASS" "compacted through round $compacted_through, cumulative ledger IDs valid"
+    else
+      report 22 "Compaction integrity" "WARN" "$compaction_result"
+    fi
+  fi
+else
+  report 22 "Compaction integrity" "PASS" "no compaction performed"
+fi
+
+fi  # end completion-only checks (13-22)
+
 # ── Summary ─────────────────────────────────────────────────────────────
 
-echo ""
-echo "=== Results: $fail_count FAIL, $warn_count WARN ==="
+if [[ "$MID_SESSION" == true ]]; then
+  echo ""
+  echo "=== Mid-Session Results: $fail_count FAIL, $warn_count WARN (structural checks only) ==="
+else
+  echo ""
+  echo "=== Results: $fail_count FAIL, $warn_count WARN ==="
+fi
 
 if [[ "$fail_count" -gt 0 ]]; then
   exit 1

@@ -68,6 +68,8 @@ When salience < rope threshold, the system continues without interrupting — bu
 
 1. Create session file from `@session-template.md` → `.claude/ralph-lisa-loop-session.md`
    - Set `artifact_path`, `mode` (plan|implement), `rope_length`, `original_prompt`
+   - Set `reviewer_backend` and `review_channel_status` from preflight results
+   - Set `plan_only: true` if user triggered a plan-only mode
    - Generate `session_id` (timestamp or UUID)
 2. If mode=plan: run parallel ideation (see below), then enter round loop
 3. If mode=implement: read converged plan and decisions ledger, begin implementation, enter round loop
@@ -93,11 +95,11 @@ The independence guarantee: the Round 1 Codex prompt contains the task descripti
    - Be genuinely critical — don't softball
 
 2. External Review
-   - Claude sends artifact to Codex via mcp__codex__codex-reply (or codex exec fallback)
-   - Use delta-only continuation prompt for Round 2+ (see prompts.md)
-   - Codex reviews, returns findings with H/M/L labels
-   - Claude assigns finding IDs to Codex's findings (F-{next_seq})
-   - Claude checks for supersedes/duplicate relationships with existing findings
+   - Claude sends review prompt to Codex (MCP thread or codex exec fallback)
+   - Prompts reference file paths — Codex reads artifacts directly
+   - Use continuation prompt for Round 2+ (see prompts.md)
+   - Claude parses response into structured findings: assigns IDs (F-{next_seq}),
+     H/M/L labels, supersedes/duplicate relationships
 
 3. Reconciliation
    - Map agreements and disagreements between self-review and external review
@@ -119,7 +121,7 @@ The independence guarantee: the Round 1 Codex prompt contains the task descripti
    - Derive: open_findings, open_disputes, rejection_integrity (see Close Gate)
    - Cache match? (fail closed on mismatch, log warning)
    - Gate passes? → close phase (or transition if plan mode)
-   - Gate fails? → next round with delta-only context
+   - Gate fails? → next round
 ```
 
 ### Status Transitions
@@ -151,13 +153,14 @@ Claude MUST check for `status: awaiting_human` at the start of each turn. If `aw
 
 On plan-mode close gate passing:
 
-1. Verify cumulative counters are current (they are updated event-driven — see below)
-2. Update session: `mode=implement`, `current_round=1`
-3. **Compile decisions ledger**: extract all resolved disputes and rejected-with-reason findings into `## Implementation Decisions` section. Read-only context, not gating state.
-4. Clear finding and dispute ledgers for the implementation phase (fresh start)
-5. Start new Codex MCP thread for implementation reviews (record `codex_impl_thread_id`)
-6. Notify human: "Plan converged after N rounds. Transitioning to implementation."
-7. Claude reads converged plan + decisions ledger, begins implementation
+1. Check `plan_only` flag. If true → skip implementation entirely: attestation + archive + set `status: complete`. Notify: "Plan converged after N rounds. Plan-only mode — no implementation phase."
+2. Verify cumulative counters are current (they are updated event-driven — see below)
+3. Update session: `mode=implement`, `current_round=1`
+4. **Compile decisions ledger**: extract all resolved disputes and rejected-with-reason findings into `## Implementation Decisions` section. Read-only context, not gating state.
+5. Clear finding and dispute ledgers for the implementation phase (fresh start)
+6. Start new Codex MCP thread for implementation reviews (record `codex_impl_thread_id`)
+7. Notify human: "Plan converged after N rounds. Transitioning to implementation."
+8. Claude reads converged plan + decisions ledger, begins implementation
 
 ### Completion
 
@@ -263,6 +266,9 @@ Every round synthesis MUST include:
 - New disputes / resolved disputes (by ID)
 - Derived gate counts (recomputed from records)
 - Cache mismatch check (compare derived to YAML cache)
+- Review channel used (mcp|exec|self-review-only)
+- Reasoning effort used (should be xhigh; note if degraded)
+- If channel diverged from policy: why
 
 ---
 
@@ -285,8 +291,12 @@ Every round synthesis MUST include:
 **Plan-phase Round 1** (independent ideation):
 ```
 mcp__codex__codex(
-  prompt="[independent ideation prompt from prompts.md — task only, NO Claude draft]",
-  cwd="[project dir]"
+  developer-instructions="[reviewer persona from prompts.md]",
+  prompt="[independent ideation prompt — task only, NO Claude draft]",
+  cwd="[project dir]",
+  config={"model_reasoning_effort": "xhigh", "model_reasoning_summary": "detailed", "model_supports_reasoning_summaries": true},
+  sandbox="read-only",
+  approval-policy="never"
 ) → threadId → save as codex_plan_thread_id
 ```
 
@@ -294,15 +304,19 @@ mcp__codex__codex(
 ```
 mcp__codex__codex-reply(
   threadId="[codex_plan_thread_id]",
-  prompt="[delta-only continuation + plan review prompt from prompts.md]"
+  prompt="[continuation + plan review prompt from prompts.md]"
 )
 ```
 
 **Implement-phase Round 1** (new thread):
 ```
 mcp__codex__codex(
-  prompt="[reviewer persona + implementation review prompt from prompts.md]",
-  cwd="[project dir]"
+  developer-instructions="[reviewer persona from prompts.md]",
+  prompt="[implementation review prompt from prompts.md]",
+  cwd="[project dir]",
+  config={"model_reasoning_effort": "xhigh", "model_reasoning_summary": "detailed", "model_supports_reasoning_summaries": true},
+  sandbox="read-only",
+  approval-policy="never"
 ) → threadId → save as codex_impl_thread_id
 ```
 
@@ -310,32 +324,143 @@ mcp__codex__codex(
 ```
 mcp__codex__codex-reply(
   threadId="[codex_impl_thread_id]",
-  prompt="[delta-only continuation + implementation review prompt from prompts.md]"
+  prompt="[continuation + implementation review prompt from prompts.md]"
 )
 ```
 
 ### codex exec Fallback
 
-When Codex MCP is not configured, fall back to `codex exec` with session continuation:
+When Codex MCP is not available and the user has opted into exec mode at the startup gate, fall back to `codex exec`.
+
+Output goes to `.claude/ralph-lisa-codex-response.txt` (project-local, not /tmp).
 
 **Plan-phase Round 1** (new session):
 ```bash
 codex exec "[independent ideation prompt — task only, NO Claude draft]" \
-  -o /tmp/ralph-lisa-loop-review.txt \
-  --json 2>/dev/null | grep session_id
-# Save session_id → codex_plan_session_id in session file
+  -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' -s read-only \
+  -C "[project dir]" --json \
+  -o .claude/ralph-lisa-codex-response.txt
+# Parse session_id from JSON output → save as codex_plan_session_id in session file
 ```
 
 **Round 2+** (resume prior session):
 ```bash
 codex exec resume "$codex_plan_session_id" \
-  "[delta-only continuation prompt]" \
-  -o /tmp/ralph-lisa-loop-review.txt
+  "[continuation prompt]" \
+  -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' -s read-only \
+  -o .claude/ralph-lisa-codex-response.txt
 ```
 
 **Implement-phase** — same pattern: new session for Round 1, `exec resume` for Round 2+. Save session ID as `codex_impl_session_id`.
 
+**Implementation shortcut**: For implementation rounds, `codex exec review --uncommitted "[focus areas]"` is a first-class code review that automatically includes the diff. Claude can use this instead of manually constructing diff prompts.
+
 Session continuation preserves Codex's context across rounds — the reviewer remembers prior findings, decisions, and artifact state. This is the direct analog of MCP thread persistence.
+
+---
+
+## Codex Configuration
+
+### Reasoning Policy
+
+Always `xhigh`. Review depth is worth the cost — both plan and implementation phases
+benefit from maximum reasoning. Reasoning summaries (`detailed`) give Claude visibility
+into Codex's chain of thought, improving reconciliation quality.
+
+### MCP Call Parameters
+
+Set on every initial `mcp__codex__codex` call (persists per thread — `codex-reply` inherits):
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `config` | `{"model_reasoning_effort": "xhigh", "model_reasoning_summary": "detailed", "model_supports_reasoning_summaries": true}` | Maximum depth + visible reasoning |
+| `sandbox` | `"read-only"` | Reviewer reads, doesn't modify |
+| `approval-policy` | `"never"` | Non-interactive |
+| `developer-instructions` | Reviewer persona from prompts.md | Role separation from content |
+
+Pass the reviewer persona via `developer-instructions` rather than stuffing it into
+`prompt`. Developer messages get priority attention in the model. Keep `prompt` for
+path references and open findings.
+
+Don't override `model` — the user's codex config owns model selection.
+
+### Graceful Degradation
+
+Not all MCP configurations support `config`, `developer-instructions`, or `sandbox` parameters. On the first MCP call, if parameters cause an error:
+- Retry with persona stuffed into `prompt` instead of `developer-instructions`
+- If `config` is unsupported, note the degradation in the session (`review_channel_status: mcp_degraded`) and log it in round summaries
+- The round header still records what was attempted vs what succeeded
+
+### Exec Fallback Parameters
+
+For `codex exec` fallback: `-c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' -s read-only`.
+
+---
+
+## Parsing Codex Output
+
+The reviewer persona is behavioral — Codex produces natural review output, not rigid
+schema. Claude is responsible for mapping each response into the protocol's finding
+structure. This section defines that mapping.
+
+**For each concern Codex raises:**
+
+1. **Identify**: extract the claim (what's wrong), evidence (where), and suggested action
+2. **Severity**: use Codex's H/M/L label if present. If unlabeled, Claude infers:
+   - Security, correctness, data loss → H
+   - Quality, maintainability, missing tests → M
+   - Style, naming, polish → L
+3. **ID**: assign the next `F-{seq}` in the global sequence
+4. **Dedup**: check against open findings:
+   - **Same issue, still open**: Codex references an existing ID or clearly identifies the
+     same concern → keep the existing finding ID, it stays open. No new finding.
+   - **Refined/reworded**: Codex raises a substantially reformulated version of a prior
+     concern → new ID with `supersedes: F-{old}`, old finding resolved.
+   - **Duplicate**: identical concern already tracked → mark as `duplicate_of`
+5. **Ambiguity**: if a concern is vague, include it as a finding with a note requesting
+   clarification in the next review round. Err toward inclusion — dropping a real issue
+   is worse than carrying a soft finding for one round.
+
+**"No findings" validation**: if Codex responds with "No findings" or equivalent, Claude
+must scan the full response for implicit suggestions, hedged concerns, or unlabeled
+recommendations. If any substantive feedback exists, extract it as findings. Only accept
+a clean bill of health when the response genuinely contains no actionable content.
+
+---
+
+## Context Management
+
+- **Active window**: Read full YAML frontmatter + continuation block + last 3 rounds in detail. Earlier rounds: skim for finding/dispute ledger state only.
+- **Compaction trigger at round > 6**: Replace rounds 1 through (current-3) with compacted summary:
+  ```
+  ## Rounds 1-{N} (Compacted)
+  ### Cumulative Finding Ledger
+  [merged ledger showing final state of all findings from compacted rounds]
+  ### Cumulative Dispute Ledger
+  [merged ledger showing final state of all disputes from compacted rounds]
+  ### Key Decisions
+  [bullet list of significant decisions from compacted rounds]
+  ```
+- Preserve recent 3 rounds in full. Preserve Implementation Decisions section.
+- **Compaction is lossless for gating**: Finding/dispute state carries forward. Eval checks 3-8 (section counts) may mismatch — those are WARN-level.
+- **Never compact most recent 3 rounds**: Needed for continuation review prompts and stall detection.
+
+---
+
+## Error Recovery
+
+| Failure | Recovery |
+|---------|----------|
+| Codex MCP call fails (timeout/error) | Retry once → fall back to `codex exec` for this round → fall back to self-review-only with M-priority finding logged. Retry MCP next round. |
+| MCP thread lost | Start new thread, update session file `codex_*_thread_id` |
+| Session file corrupted | Check `.claude/ralph-lisa-loop-history/` → reconstruct from continuation block → inform user, offer restart |
+| Context compacted mid-round | Stop hook re-injects continuation block. Claude reads session, checks which round sections exist, resumes from next missing section. |
+| codex exec fails | Read stderr for diagnostics. Self-review-only for this round. |
+
+Any fallback to a different review channel must be recorded in the round summary:
+```
+Review channel: exec (MCP call failed: timeout after 30s, retried once)
+```
 
 ---
 
@@ -346,6 +471,8 @@ Session continuation preserves Codex's context across rounds — the reviewer re
 | **Manual** | Skill guide + prompts + session template. Claude follows protocol, human types "continue" between rounds. | Loop continuation |
 | **Semi-auto** | Stop hook registered. Loop continues automatically. `awaiting_human` respected. | Hook registration (one-time) |
 | **Full-auto** | Stop hook + Codex MCP configured. Zero human input during execution; attestation at close unless attestation-exempt. | MCP server setup (one-time) |
+
+The startup preflight in SKILL.md determines the actual tier. Full-auto requires both stop hook AND `reviewer_backend: mcp`. If MCP is unavailable and user opted for exec fallback, tier caps at Semi-auto and this is logged in the session.
 
 ### Stop Hook Setup
 
@@ -378,7 +505,12 @@ Run against `.claude/ralph-lisa-loop-session.md` after session completes:
 scripts/eval.sh [session-path]
 # Default: .claude/ralph-lisa-loop-session.md
 # Exit 0 = all checks pass, exit 1 = any FAIL
+
+scripts/eval.sh [session-path] --mid-session
+# Runs structural checks only (1, 2, 11, 12). Skips completion-only checks.
 ```
+
+Run `scripts/eval.sh` at completion (before attestation). Any FAIL blocks closure. Mid-session validation every 5th round with `--mid-session` flag.
 
 | # | Check | FAIL/WARN | What it verifies |
 |---|-------|-----------|------------------|
@@ -399,6 +531,11 @@ scripts/eval.sh [session-path]
 | 15 | Rejection integrity | FAIL | Each `rejected_with_reason` has rationale, `mediator` approval, round |
 | 16 | Session archived | WARN | Archive file exists at history path |
 | 17 | Round summaries have gate data | WARN | Each Gate Check section has `Derived open findings:` line |
+| 18 | Reviewer backend set | FAIL | `reviewer_backend` field present and non-null |
+| 19 | Review audit presence | WARN | Gate Check sections collectively contain audit lines with `Review channel:` + `Reasoning effort:` + `Policy compliant:` |
+| 20 | Reasoning policy compliance | WARN | All rounds show xhigh |
+| 21 | Review channel status valid | FAIL | `review_channel_status` is a valid enum and non-null at completion |
+| 22 | Compaction integrity | WARN | If compacted, cumulative sections exist and dispute references valid |
 
 ---
 
@@ -406,9 +543,9 @@ scripts/eval.sh [session-path]
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Reviewers keep repeating | No delta-only constraint | Use delta-only continuation prompt, enforce no repeats |
+| Reviewer raises same finding repeatedly | Inadequately fixed, or finding is stale | Check if fix evidence is sufficient — if so, resolve with evidence; if not, fix it. Stall detection (3+ rounds) triggers escalation |
 | Convergence stalls | Disagreements not mediated | Force explicit dispute resolution, check stall detection |
-| Low signal feedback | Wrong reviewer context | Include richer context in review prompt |
+| Low signal feedback | Codex lacks context | Verify artifact path is accessible, check sandbox=read-only allows file reads |
 | Too many findings, no progress | Everything open, nothing resolved | Prioritize H findings, batch L findings |
 | Reviewer contradicts themselves | No evidence requirement | Require evidence field in findings |
 | MCP thread lost | Thread ID not recorded | Record in session file, fall back to codex exec |
@@ -422,3 +559,11 @@ scripts/eval.sh [session-path]
 | Attestation skipped at high rope | Attestation-exempt criteria not checked | Verify all four criteria against immutable counters |
 | Phase transition with open disputes | Gate check missed | Gate blocks transition if any dispute state=open |
 | Rejected finding without metadata | Gate not checking rejection fields | Gate verifies rationale + approved_by + approved_round |
+| Codex MCP unavailable, no fallback | Neither MCP nor CLI installed | Startup gate blocks, offers install instructions |
+| Silent degradation to codex exec | MCP not callable, CLI present | Startup gate warns, requires explicit opt-in to exec |
+| Codex MCP timeout | Network/server issue | Retry once → exec fallback → self-review only |
+| Session file unreadable | Disk error or manual edit broke YAML | Reconstruct from archive or continuation block |
+| Context compacted mid-round | Token limit hit | Resume from continuation block + section check |
+| Thread ID stale | MCP server restarted | Start new thread, update session |
+| Session file too large | 10+ rounds without compaction | Compact old rounds per Context Management |
+| Reasoning effort not xhigh | MCP degradation or config error | Eval check 20 flags non-compliant rounds |
