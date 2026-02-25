@@ -63,6 +63,7 @@ MODE="$(yaml_field mode)"
 ROUND="$(yaml_field current_round)"
 OPEN_FINDINGS="$(yaml_field open_findings_count)"
 OPEN_DISPUTES="$(yaml_field open_disputes_count)"
+MAX_ROUNDS="$(yaml_field max_rounds)"
 
 # ── Decision logic ──────────────────────────────────────────────────────
 
@@ -121,7 +122,10 @@ json_escape() {
   fi
 }
 
-REASON=$(json_escape "[ralph-lisa-loop] ${CONTINUATION}")
+# Build progress prefix for UI visibility
+PROGRESS="[Round ${ROUND}/${MAX_ROUNDS:-?} | ${OPEN_FINDINGS:-0} findings | ${OPEN_DISPUTES:-0} disputes | ${MODE}]"
+
+REASON=$(json_escape "[ralph-lisa-loop] ${PROGRESS} ${CONTINUATION}")
 printf '{"decision":"block","reason":%s}\n' "$REASON"
 
 exit 2
