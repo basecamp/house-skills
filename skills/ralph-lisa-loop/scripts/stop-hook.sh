@@ -123,7 +123,13 @@ json_escape() {
 }
 
 # Build progress prefix for UI visibility
-PROGRESS="[Round ${ROUND}/${MAX_ROUNDS:-?} | ${OPEN_FINDINGS:-0} findings | ${OPEN_DISPUTES:-0} disputes | ${MODE}]"
+# yaml_field returns literal "null" for unset YAML values — normalize to empty
+[[ "$ROUND" == "null" ]] && ROUND=""
+[[ "$MAX_ROUNDS" == "null" ]] && MAX_ROUNDS=""
+[[ "$OPEN_FINDINGS" == "null" ]] && OPEN_FINDINGS=""
+[[ "$OPEN_DISPUTES" == "null" ]] && OPEN_DISPUTES=""
+[[ "$MODE" == "null" ]] && MODE=""
+PROGRESS="[Round ${ROUND:-?}/${MAX_ROUNDS:-?} | ${OPEN_FINDINGS:-0} findings | ${OPEN_DISPUTES:-0} disputes | ${MODE:-unknown}]"
 
 REASON=$(json_escape "[ralph-lisa-loop] ${PROGRESS} ${CONTINUATION}")
 printf '{"decision":"block","reason":%s}\n' "$REASON"

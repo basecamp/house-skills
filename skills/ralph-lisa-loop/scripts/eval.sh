@@ -269,8 +269,9 @@ fi
 
 # ── Shared: Extract audit lines from Gate Check sections only ────────────
 
-# Gate Check sections start with "### Gate Check" and end at the next "###" or "##"
-# heading. Extract "Review channel:" lines only from within these sections.
+# Gate Check sections start with "### Gate Check" and end at any markdown heading
+# (## or ###). The /^##/ pattern matches both. Extract "Review channel:" lines only
+# from within these sections.
 gate_check_audit_lines=$(awk '
   /^### Gate Check/ { in_gate = 1; next }
   /^##/ { in_gate = 0 }
@@ -372,7 +373,7 @@ esac
 # If compaction occurred, verify cumulative ledgers exist and contain valid IDs.
 # State comparison not feasible (compacted round rows are gone).
 compacted_through=$(yaml_field "$SESSION" "compacted_through_round")
-if [[ -n "$compacted_through" && "$compacted_through" != "0" ]]; then
+if [[ "$compacted_through" =~ ^[0-9]+$ && "$compacted_through" -gt 0 ]]; then
   # Structural: verify compacted section exists with cumulative ledgers
   has_compacted_section=$(grep -c "^## Rounds 1-" "$SESSION" 2>/dev/null) || true
   has_cumulative_findings=$(grep -c "^### Cumulative Finding Ledger" "$SESSION" 2>/dev/null) || true
