@@ -44,7 +44,8 @@ query {
           state
           body
           author { login }
-          comments(first: 20) {
+          comments(first: 50) {
+            pageInfo { hasNextPage endCursor }
             nodes { body path line }
           }
         }
@@ -54,7 +55,8 @@ query {
         nodes {
           id
           isResolved
-          comments(last: 20) {
+          comments(last: 50) {
+            pageInfo { hasPreviousPage startCursor }
             nodes { body path line author { login } }
           }
         }
