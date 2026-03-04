@@ -98,6 +98,8 @@ Replace `APP` with the app's Loki identifier (same as Prometheus identifier).
 | `authentication_identity_id` | User ID — empty means unauthenticated request |
 | `http_response_status_code` | HTTP status (string — use regex `=~ "4..\|5.."` for error filtering) |
 | `url_full` | Full URL including account ID prefix — use for BC4 account filtering |
+| `account_queenbee_id` | Queenbee account ID — present in BC4 logs |
+| `transaction_id` | Rails request ID (UUID) — NOT an OTel trace ID |
 
 ### Query patterns
 
@@ -163,18 +165,44 @@ Use `unit: ms` in field config. Add p95 as a second target for context.
 
 ## 3. Tempo Traces
 
-### Key queries
+### Finding traces
+
+Use `mcp__grafana__tempo_traceql-search` to search for traces:
 
 ```traceql
-{resource.service.name="APP"}                            # All traces
-{resource.service.name="APP" && duration > 500ms}        # Slow requests
-{resource.service.name="APP" && status=error}            # Failed requests
+{resource.service.name="APP" && duration > 2s}           # Slow requests
+{resource.service.name="APP" && status=error}             # Failed requests
 ```
 
 Replace `APP` with the app's service name (matches Loki identifier).
 
+The search returns trace IDs, root span names, duration, and span counts. Pick traces with manageable span counts (<300) for detailed inspection.
+
+### Inspecting a trace
+
+Use `mcp__grafana__tempo_get-trace` with the trace ID from the search.
+
+**Response structure:** `data.trace.resourceSpans[].scopeSpans[].spans[]`. Each span has `name`, `startTimeUnixNano`, `endTimeUnixNano`, and `attributes`.
+
+**Critical: large traces overflow.** A trace with 3696 spans produces 1MB+ of JSON and will be truncated. For traces with >500 spans, prefer the TraceQL search with structural queries to pinpoint slow spans directly rather than fetching the full trace.
+
+**Parsing pattern for extracted traces:**
+```python
+# Sort spans by duration, show the slowest
+for span in all_spans:
+    dur_ns = int(span['endTimeUnixNano']) - int(span['startTimeUnixNano'])
+    dur_ms = dur_ns / 1e6
+```
+
+### Connecting Loki → Tempo
+
+Loki logs have a `transaction_id` field — this is the **Rails request ID** (UUID), not an OTel trace ID. There is currently no direct Loki → Tempo correlation field. Use TraceQL search by endpoint and time window instead:
+```traceql
+{resource.service.name="APP" && name="GET /endpoint" && duration > 1s}
+```
+
 ### Tool
-Use Tempo MCP tools (via Grafana proxy) with datasource UID `6PouH8j4z`.
+Use `mcp__grafana__tempo_traceql-search` and `mcp__grafana__tempo_get-trace` with datasource UID `6PouH8j4z`.
 
 ---
 
@@ -231,6 +259,9 @@ Run after completing an investigation.
 | BC4 account ID not found in `url_path` | BC4 strips account prefix at router; `url_path` is `/projects/...` not `/2914079/projects/...` | Use `url_full =~ ".*ACCOUNT_ID.*"` instead |
 | 302s look like errors but aren't | Unauthenticated bots/link-unfurlers always get 302 to login | Check `authentication_identity_id` — empty means unauthenticated, not broken |
 | Missed account-specific errors | Searched Loki before Sentry for account errors | Use `sentry issue list basecamp/PROJECT --query "url:*ACCOUNT_ID*"` first for account errors |
+| Tempo get-trace returns 1MB+ / truncated | Trace has thousands of spans | Use TraceQL structural queries or pick a trace with <300 spans |
+| Tried to correlate Loki `transaction_id` to Tempo | `transaction_id` is Rails request ID, not OTel trace ID | Use TraceQL search by endpoint + time window instead |
+| Tempo search returns no results | Wrong `resource.service.name` | Use the Loki/Prometheus identifier (e.g., `bc4`, `hey`) |
 | Sentry auth fails | Not logged in | Run `sentry auth login` |
 | "No such project" in Sentry | Using wrong project name | Check Sentry column in App Identifiers table |
 
@@ -239,6 +270,27 @@ Run after completing an investigation.
 ## Exemplars
 
 Study before using:
+
+### Exemplar 4: Tempo trace drill-down for slow BC4 request (2026-03-04)
+
+**Question:** "Why is GET /my/readings slow in BC4?"
+
+**Process:**
+1. Used `mcp__grafana__tempo_traceql-search` with `{resource.service.name="bc4" && duration > 2s}` — found 20 slow traces
+2. Picked trace `7f9711c9271e5f5fe34ce6378fec592e` (259 spans, 2993ms) — manageable size
+3. Fetched full trace with `mcp__grafana__tempo_get-trace` — 81KB, parseable
+4. Extracted slowest spans with Python: `render_collection.action_view` (1642ms) + `SolidCache::Entry.upsert_all` (repeated, ~1.5s total)
+5. Also attempted 3696-span trace — 1MB+, truncated, unusable
+
+**Result:** `/my/readings` bottleneck is collection rendering (1642ms) + SolidCache bulk writes. Not a DB query issue.
+
+**Key learnings:**
+- `transaction_id` in Loki is Rails request ID, not OTel trace ID — no direct Loki→Tempo correlation
+- Trace JSON structure: `data.trace.resourceSpans[].scopeSpans[].spans[]`
+- Large traces (>500 spans) overflow — filter by span count in search results before fetching
+- `account_queenbee_id` exists as a Loki field in BC4 logs (discovered from raw log inspection)
+
+---
 
 ### Exemplar 3: Find error for BC4 account 2914079 (2026-03-04)
 
