@@ -1,0 +1,23 @@
+skills/ralph-lisa-loop/references/guide.md
+  2fcea08686fdba28 284,430-435
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.8",
+  "base_commit_sha": "e79a7dfe13dd6eec1e9d82b734e5b9a9edacfaa8",
+  "prompts": {
+    "2fcea08686fdba28": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6287f611-ba87-4e58-b350-5fc6216be6a0",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 18,
+      "overriden_lines": 0
+    }
+  }
+}
