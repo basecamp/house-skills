@@ -35,24 +35,27 @@ original_prompt: |
 <!-- CONTINUATION BLOCK — injected by stop hook, kept compact -->
 ralph-lisa-loop | mode=plan | round=1 | findings=0 | disputes=0 | status=active
 Read .claude/ralph-lisa-loop-session.md. Follow the ralph-lisa-loop skill guide.
-Next: [specific next action, e.g., "Self-review for round 1"]
+Next: [specific next action, e.g., "Dispatch planner subagent for round 1"]
 <!-- END CONTINUATION BLOCK -->
 
 <!-- ROUND LOG — grows each round, NOT injected by stop hook -->
 
 ## Round 1
 
+### Implement
+[Worker subagent dispatched. Summary of changes made, files touched, findings addressed.]
+
 ### Self-Review
-[Claude's critical self-review of the artifact. Produce findings with H/M/L labels.]
+[Self-review subagent dispatched. Structured findings with H/M/L labels.]
 
 ### External Review
-[Codex's review response. Claude assigns finding IDs.]
+[Codex's review response. Orchestrator assigns finding IDs.]
 
 ### Reconciliation
-[Map agreements and disagreements. Open disputes where implementor disagrees.]
+[Map agreements and disagreements. Open disputes where orchestrator disagrees.]
 
 ### Synthesis
-[Address agreed findings. Update artifact. Document what changed.]
+[Decide which findings to address next round. Compose fix instructions.]
 
 ### Finding Ledger
 
@@ -113,20 +116,20 @@ Contains resolved disputes and rejected-with-reason findings from plan phase.]
 The text between `<!-- CONTINUATION BLOCK -->` and `<!-- END CONTINUATION BLOCK -->` is:
 - Extracted by the stop hook and re-injected as the continuation prompt
 - Fixed-size (~200 bytes) regardless of session length
-- Updated by Claude each round with current mode, round, and derived counts
+- Updated by the orchestrator each round with current mode, round, and derived counts
 - Line 1 is machine-parseable state: `ralph-lisa-loop | mode=X | round=N | findings=N | disputes=N | status=X`
 - Line 3 is the specific next action (updated each synthesis step)
 
 ### Compaction
 
-When `current_round > 6`, old rounds (1 through current-3) are compacted into a cumulative summary. See the Context Management section in the guide. The `compacted_through_round` field tracks the last compacted round; `compaction_count` tracks how many times compaction has been performed. Compaction is lossless for gating — all finding/dispute states carry forward.
+When `current_round > 8`, old rounds (1 through current-3) are compacted into a cumulative summary. See the Context Management section in the guide. The `compacted_through_round` field tracks the last compacted round; `compaction_count` tracks how many times compaction has been performed. Compaction is lossless for gating — all finding/dispute states carry forward.
 
 ### Finding States
 
 ```
 open ──────────────► resolved         (fix evidence provided)
   │
-  ├──────────────► disputed          (implementor disagrees)
+  ├──────────────► disputed          (worker disagrees)
   │                   │
   │                   └──► resolved  (mediator decides)
   │

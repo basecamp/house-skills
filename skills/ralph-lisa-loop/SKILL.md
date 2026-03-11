@@ -1,11 +1,11 @@
 ---
 name: ralph-lisa-loop
 description: |
-  Automated plan-implement loop with expert review. Claude implements, Codex reviews,
-  the human steers. A single rope-length knob (0-5) controls interruption frequency.
-  Closure requires zero open findings and zero unresolved disputes at any rope level.
-  Use for any planning, development, or implementation task that benefits from
-  structured review. The default workflow for building anything non-trivial.
+  Automated plan-implement loop with expert review. Orchestrator dispatches subagents
+  for planning/implementation and self-review, Codex for external review. The human steers.
+  A single rope-length knob (0-5) controls interruption frequency. Subagent architecture
+  keeps the orchestrator's context window lean for completing tasks in a single session.
+  Use for any planning, development, or implementation task that benefits from structured review.
 triggers:
   # Direct invocations
   - /ralph-lisa-loop
@@ -136,20 +136,25 @@ needed from them):
 
 Open `@references/guide.md` and follow it. Do not proceed without it.
 
-Automated plan-implement loop with Codex as reviewer. Use when you want:
+Automated plan-implement loop with subagent workers and Codex as reviewer. The
+orchestrator dispatches subagents for planning/implementation and self-review, Codex for
+external review. Use when you want:
 - Plans stress-tested through parallel ideation then iterative convergence
 - Implementation reviewed each round with zero-finding close gate
 - Adjustable autonomy via rope-length (0 = approve everything, 5 = full auto)
 - Walk-away execution with all decisions tracked in a session file
+- Context-efficient execution that completes in a single context window
 
 The guide contains:
-- Core protocol: single workflow, two modes (plan/implement)
+- Core protocol: orchestrator + three subagent types (planner/implementor worker, self-reviewer, Codex external reviewer)
+- Round mechanics: implement, self-review, external review, reconciliation, synthesis, gate check
+- Subagent dispatch patterns and prompt templates
+- Plan context loading rules
 - Rope-length semantics and salience scoring
-- Round mechanics: self-review, external review, reconciliation, synthesis
 - Finding and dispute tracking with stable IDs
 - Close gate derivation and anti-gaming constraints
 - Phase transition (plan -> implement) with decisions ledger
-- Parallel ideation protocol (Round 1 independence)
+- Parallel ideation protocol (Round 1 independence via subagents)
 - Session file format and continuation block structure
 - Stop hook integration for loop enforcement
 - Prompt pack reference (`@references/prompts.md`)

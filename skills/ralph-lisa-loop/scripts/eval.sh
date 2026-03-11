@@ -7,7 +7,7 @@
 #
 # Usage: eval.sh [session-path] [--mid-session]
 #   Default: .claude/ralph-lisa-loop-session.md
-#   --mid-session: run structural checks only (1, 2, 11, 12), skip completion checks
+#   --mid-session: run structural checks only (1, 2, 12, 13), skip completion checks
 
 # Do NOT use set -e — all checks must run even if earlier ones fail.
 
@@ -67,7 +67,7 @@ report 1 "Session file exists" "PASS"
 rounds=$(grep -c "^## Round" "$SESSION" 2>/dev/null) || true
 report 2 "Round count" "PASS" "$rounds rounds"
 
-# ── Checks 3-8: Per-round section counts (skip in mid-session) ───────────
+# ── Checks 3-9: Per-round section counts (skip in mid-session) ───────────
 
 if [[ "$MID_SESSION" == false ]]; then
 
@@ -82,36 +82,37 @@ check_section() {
   fi
 }
 
-check_section 3 "Self-Review" "Self-Review"
-check_section 4 "External Review" "External Review"
-check_section 5 "Reconciliation" "Reconciliation"
-check_section 6 "Synthesis" "Synthesis"
-check_section 7 "Finding Ledger" "Finding Ledger"
-check_section 8 "Gate Check" "Gate Check"
+check_section 3 "Implement" "Implement"
+check_section 4 "Self-Review" "Self-Review"
+check_section 5 "External Review" "External Review"
+check_section 6 "Reconciliation" "Reconciliation"
+check_section 7 "Synthesis" "Synthesis"
+check_section 8 "Finding Ledger" "Finding Ledger"
+check_section 9 "Gate Check" "Gate Check"
 
-# ── Check 9: Finding IDs present ────────────────────────────────────────
+# ── Check 10: Finding IDs present ───────────────────────────────────────
 
 # Anchor to finding-ledger rows (| F-{n} |) to avoid matching dispute IDs (D-F-{n})
 if grep -qE "^\|[[:space:]]*F-[0-9]+" "$SESSION" 2>/dev/null; then
-  report 9 "Finding IDs present" "PASS"
+  report 10 "Finding IDs present" "PASS"
 else
-  report 9 "Finding IDs present" "WARN" "no F-{n} IDs in finding ledger rows"
+  report 10 "Finding IDs present" "WARN" "no F-{n} IDs in finding ledger rows"
 fi
 
-fi  # end skip in mid-session (checks 3-9)
+fi  # end skip in mid-session (checks 3-10)
 
-# ── Check 10: Final status (skip in mid-session) ─────────────────────────
+# ── Check 11: Final status (skip in mid-session) ─────────────────────────
 
 status=$(yaml_field "$SESSION" "status")
 if [[ "$MID_SESSION" == false ]]; then
   if [[ "$status" == "complete" ]]; then
-    report 10 "Final status = complete" "PASS"
+    report 11 "Final status = complete" "PASS"
   else
-    report 10 "Final status = complete" "WARN" "status=$status"
+    report 11 "Final status = complete" "WARN" "status=$status"
   fi
 fi
 
-# ── Check 11: Continuation block well-formed ────────────────────────────
+# ── Check 12: Continuation block well-formed ────────────────────────────
 
 has_start=$(grep -c "<!-- CONTINUATION BLOCK" "$SESSION" 2>/dev/null) || true
 has_end=$(grep -c "<!-- END CONTINUATION BLOCK" "$SESSION" 2>/dev/null) || true
@@ -120,30 +121,30 @@ if [[ "$has_start" -ge 1 && "$has_end" -ge 1 ]]; then
     | grep -v '^<!--' \
     | tr -d '[:space:]')
   if [[ -n "$content" ]]; then
-    report 11 "Continuation block well-formed" "PASS"
+    report 12 "Continuation block well-formed" "PASS"
   else
-    report 11 "Continuation block well-formed" "FAIL" "markers present but content empty"
+    report 12 "Continuation block well-formed" "FAIL" "markers present but content empty"
   fi
 else
-  report 11 "Continuation block well-formed" "FAIL" "missing markers (start=$has_start end=$has_end)"
+  report 12 "Continuation block well-formed" "FAIL" "missing markers (start=$has_start end=$has_end)"
 fi
 
-# ── Check 12: Cache consistency ─────────────────────────────────────────
+# ── Check 13: Cache consistency ─────────────────────────────────────────
 
 last_gate=$(grep "^Derived open findings:" "$SESSION" 2>/dev/null | tail -1)
 if [[ -z "$last_gate" ]]; then
-  report 12 "Cache consistency" "FAIL" "no gate check line found"
+  report 13 "Cache consistency" "FAIL" "no gate check line found"
 elif echo "$last_gate" | grep -q "Cache match: yes"; then
-  report 12 "Cache consistency" "PASS"
+  report 13 "Cache consistency" "PASS"
 else
-  report 12 "Cache consistency" "FAIL" "$last_gate"
+  report 13 "Cache consistency" "FAIL" "$last_gate"
 fi
 
-# ── Checks 13-17: Completion-only checks (skip in mid-session) ──────────
+# ── Checks 14-18: Completion-only checks (skip in mid-session) ──────────
 
 if [[ "$MID_SESSION" == false ]]; then
 
-# ── Check 13: No open findings ──────────────────────────────────────────
+# ── Check 14: No open findings ──────────────────────────────────────────
 
 # Parse finding ledger rows (id starts with F-) and derive latest state per ID.
 # A finding may appear in multiple rounds; the last occurrence wins.
@@ -164,12 +165,12 @@ open_findings=$(awk -F'|' '
   }
 ' "$SESSION" 2>/dev/null)
 if [[ "${open_findings:-0}" -eq 0 ]]; then
-  report 13 "No open/disputed findings" "PASS"
+  report 14 "No open/disputed findings" "PASS"
 else
-  report 13 "No open/disputed findings" "FAIL" "$open_findings found"
+  report 14 "No open/disputed findings" "FAIL" "$open_findings found"
 fi
 
-# ── Check 14: No open disputes ──────────────────────────────────────────
+# ── Check 15: No open disputes ──────────────────────────────────────────
 
 # Parse dispute ledger rows (id starts with D-F-) and derive latest state per ID.
 # A dispute may appear in multiple rounds; the last occurrence wins.
@@ -190,12 +191,12 @@ open_disputes=$(awk -F'|' '
   }
 ' "$SESSION" 2>/dev/null)
 if [[ "${open_disputes:-0}" -eq 0 ]]; then
-  report 14 "No open disputes" "PASS"
+  report 15 "No open disputes" "PASS"
 else
-  report 14 "No open disputes" "FAIL" "$open_disputes found"
+  report 15 "No open disputes" "FAIL" "$open_disputes found"
 fi
 
-# ── Check 15: Rejection integrity ───────────────────────────────────────
+# ── Check 16: Rejection integrity ───────────────────────────────────────
 
 # Parse finding ledger rows with state=rejected_with_reason and validate metadata.
 # Track latest snapshot per finding ID; later rows overwrite earlier ones.
@@ -228,43 +229,43 @@ rejected_total=$(echo "$rejection_results" | awk '{print $1}')
 rejection_fail=$(echo "$rejection_results" | awk '{print $2}')
 
 if [[ "${rejection_fail:-0}" -gt 0 ]]; then
-  report 15 "Rejection integrity" "FAIL" "$rejection_fail of $rejected_total rejected findings with invalid metadata"
+  report 16 "Rejection integrity" "FAIL" "$rejection_fail of $rejected_total rejected findings with invalid metadata"
 elif [[ "${rejected_total:-0}" -eq 0 ]]; then
-  report 15 "Rejection integrity" "PASS" "no rejections"
+  report 16 "Rejection integrity" "PASS" "no rejections"
 else
-  report 15 "Rejection integrity" "PASS" "$rejected_total rejections verified"
+  report 16 "Rejection integrity" "PASS" "$rejected_total rejections verified"
 fi
 
-# ── Check 16: Session archived ──────────────────────────────────────────
+# ── Check 17: Session archived ──────────────────────────────────────────
 
 sid=$(yaml_field "$SESSION" "session_id")
 session_dir=$(dirname "$SESSION")
 archive_path="${session_dir}/ralph-lisa-loop-history/session-${sid}.md"
 if [[ -f "$archive_path" ]]; then
-  report 16 "Session archived" "PASS"
+  report 17 "Session archived" "PASS"
 else
-  report 16 "Session archived" "WARN" "not found: $archive_path"
+  report 17 "Session archived" "WARN" "not found: $archive_path"
 fi
 
-# ── Check 17: Round summaries have gate data ────────────────────────────
+# ── Check 18: Round summaries have gate data ────────────────────────────
 
 gate_data_count=$(grep -c "^Derived open findings:" "$SESSION" 2>/dev/null) || true
 gate_section_count=$(grep -c "^### Gate Check" "$SESSION" 2>/dev/null) || true
 if [[ "$gate_section_count" -gt 0 && "$gate_data_count" -ge "$gate_section_count" ]]; then
-  report 17 "Round summaries have gate data" "PASS" "$gate_data_count entries"
+  report 18 "Round summaries have gate data" "PASS" "$gate_data_count entries"
 elif [[ "$gate_section_count" -eq 0 ]]; then
-  report 17 "Round summaries have gate data" "WARN" "no Gate Check sections"
+  report 18 "Round summaries have gate data" "WARN" "no Gate Check sections"
 else
-  report 17 "Round summaries have gate data" "WARN" "$gate_section_count sections, $gate_data_count with data"
+  report 18 "Round summaries have gate data" "WARN" "$gate_section_count sections, $gate_data_count with data"
 fi
 
-# ── Check 18: Reviewer backend set ──────────────────────────────────────
+# ── Check 19: Reviewer backend set ──────────────────────────────────────
 
 backend=$(yaml_field "$SESSION" "reviewer_backend")
 if [[ -n "$backend" && "$backend" != "null" ]]; then
-  report 18 "Reviewer backend set" "PASS" "backend=$backend"
+  report 19 "Reviewer backend set" "PASS" "backend=$backend"
 else
-  report 18 "Reviewer backend set" "FAIL" "reviewer_backend is missing or null"
+  report 19 "Reviewer backend set" "FAIL" "reviewer_backend is missing or null"
 fi
 
 # ── Shared: Extract audit lines from Gate Check sections only ────────────
@@ -278,7 +279,7 @@ gate_check_audit_lines=$(awk '
   in_gate && /^Review channel:/ { print NR ":" $0 }
 ' "$SESSION" 2>/dev/null || true)
 
-# ── Check 19: Review audit presence ────────────────────────────────────
+# ── Check 20: Review audit presence ────────────────────────────────────
 
 # Validate each Gate Check section has a complete audit line with all three tokens.
 audit_full_count=0
@@ -301,23 +302,23 @@ done <<< "$gate_check_audit_lines"
 # A section with 2 audit lines and another with 0 would still pass. Acceptable
 # since the protocol writes exactly one audit line per Gate Check section.
 if [[ "$gate_section_count" -gt 0 && "$audit_full_count" -ge "$gate_section_count" ]]; then
-  report 19 "Review audit presence" "PASS" "$audit_full_count complete entries"
+  report 20 "Review audit presence" "PASS" "$audit_full_count complete entries"
 elif [[ "$gate_section_count" -eq 0 ]]; then
-  report 19 "Review audit presence" "WARN" "no Gate Check sections"
+  report 20 "Review audit presence" "WARN" "no Gate Check sections"
 elif [[ "$audit_partial_count" -gt 0 ]]; then
-  report 19 "Review audit presence" "WARN" "$audit_partial_count partial entries (missing channel/effort/policy tokens)"
+  report 20 "Review audit presence" "WARN" "$audit_partial_count partial entries (missing channel/effort/policy tokens)"
 else
-  report 19 "Review audit presence" "WARN" "$gate_section_count rounds, $audit_full_count with full audit trail"
+  report 20 "Review audit presence" "WARN" "$gate_section_count rounds, $audit_full_count with full audit trail"
 fi
 
-# ── Check 20: Reasoning policy compliance ────────────────────────────────
+# ── Check 21: Reasoning policy compliance ────────────────────────────────
 
 # All rounds should use xhigh reasoning effort.
 # Per-line channel awareness: in mcp_degraded sessions, skip MCP rounds (effort
 # uncontrollable) but still check exec rounds (effort set via -c flag).
 # Self-review-only rounds have no external effort — always skip.
 # Uses the section-scoped gate_check_audit_lines from above.
-channel_status_for_20=$(yaml_field "$SESSION" "review_channel_status")
+channel_status_for_21=$(yaml_field "$SESSION" "review_channel_status")
 policy_violations=0
 skipped_rounds=0
 
@@ -332,7 +333,7 @@ while IFS= read -r match; do
     ((skipped_rounds++)) || true
     continue
   fi
-  if [[ "$channel_status_for_20" == "mcp_degraded" && "$channel" == "mcp" ]]; then
+  if [[ "$channel_status_for_21" == "mcp_degraded" && "$channel" == "mcp" ]]; then
     ((skipped_rounds++)) || true
     continue
   fi
@@ -343,32 +344,32 @@ while IFS= read -r match; do
 done <<< "$gate_check_audit_lines"
 
 if [[ "$policy_violations" -eq 0 && "$skipped_rounds" -gt 0 ]]; then
-  report 20 "Reasoning policy compliance" "PASS" "$skipped_rounds rounds skipped (effort not controllable)"
+  report 21 "Reasoning policy compliance" "PASS" "$skipped_rounds rounds skipped (effort not controllable)"
 elif [[ "$policy_violations" -eq 0 ]]; then
-  report 20 "Reasoning policy compliance" "PASS"
+  report 21 "Reasoning policy compliance" "PASS"
 else
-  report 20 "Reasoning policy compliance" "WARN" "$policy_violations rounds not using xhigh ($skipped_rounds skipped)"
+  report 21 "Reasoning policy compliance" "WARN" "$policy_violations rounds not using xhigh ($skipped_rounds skipped)"
 fi
 
-# ── Check 21: Review channel status valid ────────────────────────────────
+# ── Check 22: Review channel status valid ────────────────────────────────
 
 channel_status=$(yaml_field "$SESSION" "review_channel_status")
 case "$channel_status" in
   mcp_ready|mcp_degraded|exec_opt_in)
-    report 21 "Review channel status valid" "PASS" "status=$channel_status"
+    report 22 "Review channel status valid" "PASS" "status=$channel_status"
     ;;
   blocked)
-    report 21 "Review channel status valid" "FAIL" "status=blocked (session should not complete in blocked state)"
+    report 22 "Review channel status valid" "FAIL" "status=blocked (session should not complete in blocked state)"
     ;;
   null|"")
-    report 21 "Review channel status valid" "FAIL" "review_channel_status is missing or null (preflight should set this)"
+    report 22 "Review channel status valid" "FAIL" "review_channel_status is missing or null (preflight should set this)"
     ;;
   *)
-    report 21 "Review channel status valid" "FAIL" "unknown status: $channel_status"
+    report 22 "Review channel status valid" "FAIL" "unknown status: $channel_status"
     ;;
 esac
 
-# ── Check 22: Compaction integrity ───────────────────────────────────────
+# ── Check 23: Compaction integrity ───────────────────────────────────────
 
 # If compaction occurred, verify cumulative ledgers exist and contain valid IDs.
 # State comparison not feasible (compacted round rows are gone).
@@ -380,7 +381,7 @@ if [[ "$compacted_through" =~ ^[0-9]+$ && "$compacted_through" -gt 0 ]]; then
   has_cumulative_disputes=$(grep -c "^### Cumulative Dispute Ledger" "$SESSION" 2>/dev/null) || true
 
   if [[ "$has_compacted_section" -lt 1 || "$has_cumulative_findings" -lt 1 || "$has_cumulative_disputes" -lt 1 ]]; then
-    report 22 "Compaction integrity" "WARN" "compacted_through_round=$compacted_through but missing cumulative ledger sections"
+    report 23 "Compaction integrity" "WARN" "compacted_through_round=$compacted_through but missing cumulative ledger sections"
   else
     # Semantic: verify finding and dispute IDs from compacted rounds appear in
     # the cumulative ledgers. State comparison is not feasible after compaction
@@ -417,16 +418,16 @@ if [[ "$compacted_through" =~ ^[0-9]+$ && "$compacted_through" -gt 0 ]]; then
     ' "$SESSION" 2>/dev/null)
 
     if [[ "$compaction_result" == "ok" ]]; then
-      report 22 "Compaction integrity" "PASS" "compacted through round $compacted_through, cumulative ledger IDs valid"
+      report 23 "Compaction integrity" "PASS" "compacted through round $compacted_through, cumulative ledger IDs valid"
     else
-      report 22 "Compaction integrity" "WARN" "$compaction_result"
+      report 23 "Compaction integrity" "WARN" "$compaction_result"
     fi
   fi
 else
-  report 22 "Compaction integrity" "PASS" "no compaction performed"
+  report 23 "Compaction integrity" "PASS" "no compaction performed"
 fi
 
-fi  # end completion-only checks (13-22)
+fi  # end completion-only checks (14-23)
 
 # ── Summary ─────────────────────────────────────────────────────────────
 
