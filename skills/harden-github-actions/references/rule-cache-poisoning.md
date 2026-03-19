@@ -24,6 +24,12 @@ the cache isolation makes the poisoning vector impractical.
   includes attacker-controllable values (e.g., PR number, branch name from a fork). In this
   case, **stop and report the finding.**
 
+The suppression comment should explain why it's safe in this specific case. Examples:
+
 ```yaml
+# Cache used for testing, not release artifact generation:
 - uses: ruby/setup-ruby@... # zizmor: ignore[cache-poisoning] -- cached deps are for testing, not release artifact generation
+
+# Cache used for release build, but branch-isolated so fork PRs can't poison it:
+- uses: actions/setup-go@... # zizmor: ignore[cache-poisoning] -- cache is branch-isolated; fork PRs cannot write to this cache
 ```
