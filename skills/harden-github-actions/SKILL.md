@@ -81,8 +81,13 @@ For findings not covered in this skill, consult https://docs.zizmor.sh/audits/ f
     persist-credentials: false
 ```
 
-**Suppress (rare):** Only when the workflow needs to `git push` later (e.g., dependabot
-lockfile sync, automated commits). The credentials ARE needed in that case.
+**Suppress only if ALL of these are true:**
+1. A later step in the SAME job runs `git push`, `git tag`, or similar write operation
+2. The push target is the same repository (not a fork or external repo requiring a PAT)
+3. No other authentication mechanism (e.g., deploy key, PAT) is used for the push
+
+If you cannot confirm all three, apply the fix. If fixing would break the workflow and you
+cannot confirm all three, **stop and report the finding — do not suppress.**
 
 ```yaml
 - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2 # zizmor: ignore[artipacked] -- credentials needed for git push
@@ -116,8 +121,10 @@ This applies to ALL expressions in `run:` blocks, including `github.event.pull_r
 
 Top-level `permissions:` grants those permissions to ALL jobs, violating least privilege.
 
-**Fix (always):** Move `permissions:` from the workflow level down to each individual job.
-Give each job only the specific permissions it needs.
+**Fix (always):** Replace the workflow-level `permissions:` block with `permissions: {}` (deny
+all) and move permissions down to each individual job. The `permissions: {}` ensures every job
+starts with zero permissions, so any job that forgets to declare its own permissions will fail
+safe rather than inheriting broad defaults.
 
 ```yaml
 # BEFORE (too broad)
@@ -133,7 +140,9 @@ jobs:
   merge:
     ...
 
-# AFTER (scoped per job)
+# AFTER (deny-all at workflow level, scoped per job)
+permissions: {}
+
 jobs:
   build:
     permissions:
@@ -167,25 +176,6 @@ permissions, and permissions can only be maintained or reduced through the chain
 elevated. When you set `permissions: {}` at the workflow level, every job (including reusable
 workflow calls) starts with zero permissions and must declare what it needs.
 
-### `secrets-outside-env` — Secrets Used Outside `env:` Context
-
-Secrets should be passed through environment variables, not used directly in expressions.
-
-**Fix (preferred):** Move the secret reference into a step-level `env:` block.
-
-**Suppress (when necessary):** When the secret is in a job-level `env:` block with a
-conditional expression that cannot be restructured into step-level env vars. Include the
-reason.
-
-```yaml
-env:
-  BUNDLE_GITHUB__COM: ${{ inputs.saas && format('x-access-token:{0}', secrets.TOKEN) || '' }} # zizmor: ignore[secrets-outside-env]
-```
-
-This pattern arises when a secret is conditionally set based on workflow inputs and consumed
-by multiple steps (e.g., `BUNDLE_GITHUB__COM` for private gem access). Moving it to each
-step would create duplication and maintenance burden.
-
 ### `dependabot-execution` — Insecure External Code Execution
 
 Dependabot's `insecure-external-code-execution: allow` lets package managers run arbitrary
@@ -193,9 +183,14 @@ code during dependency resolution.
 
 **Fix (if possible):** Remove `insecure-external-code-execution: allow`.
 
-**Suppress (when required):** Some package managers (like Bundler) need this to resolve gems
-from private registries. If removing it breaks dependency resolution, suppress with an
-explanation.
+**Suppress only if ALL of these are true:**
+1. The package ecosystem requires code execution to resolve dependencies (e.g., Bundler with
+   private gem sources that use custom `source` blocks in the Gemfile)
+2. You have confirmed that removing `allow` causes dependency resolution to fail
+3. The private registry is trusted (e.g., an internal GitHub Packages registry)
+
+If you cannot confirm all three, apply the fix. If fixing would break dependency resolution
+and you cannot confirm all three, **stop and report the finding — do not suppress.**
 
 ```yaml
 insecure-external-code-execution: allow # zizmor: ignore[dependabot-execution] -- required for Bundler to resolve gems from the private github-basecamp registry
@@ -214,6 +209,86 @@ if: github.actor == 'dependabot[bot]'
 
 # AFTER (verified)
 if: github.event.pull_request.user.login == 'dependabot[bot]'
+```
+
+### `dangerous-triggers` — Dangerous Workflow Triggers
+
+zizmor flags `pull_request_target` and `workflow_run` triggers. Both execute in the target
+repository's context (with write permissions and access to secrets) while remaining
+triggerable by external forks. Even workflows that don't explicitly check out PR code can
+be vulnerable to indirect execution vectors (argument injection, environment injection via
+`LD_PRELOAD`, `GITHUB_ENV` manipulation, etc.).
+
+**Fix (preferred):**
+- Replace `workflow_run` with `workflow_call` (convert to a reusable workflow)
+- Replace `pull_request_target` with `pull_request` unless write permissions are required
+- If `pull_request_target` is necessary, never check out or run PR-controlled code
+
+**Suppress only if ALL of these are true:**
+1. The workflow requires write access to the PR (e.g., labeling, commenting, gating) or
+   needs to run after another workflow completes
+2. The workflow does NOT check out the PR's head ref (`actions/checkout` with `ref:
+   ${{ github.event.pull_request.head.sha }}` or similar)
+3. The workflow does NOT run any code from the PR (no `run:` steps that execute checked-out
+   files, no build/test steps)
+4. The workflow does NOT pass attacker-controllable values into `GITHUB_ENV`, `GITHUB_PATH`,
+   or `GITHUB_OUTPUT`
+5. For `workflow_run`: you have confirmed it cannot be replaced with `workflow_call`
+
+If you cannot confirm all applicable criteria, do NOT suppress. If fixing would break the
+workflow and you cannot confirm all criteria, **stop and report the finding — do not
+suppress or fix.**
+
+```yaml
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] -- required for write access to PRs from forks; workflow only runs trusted actions, no PR code is checked out or executed
+```
+
+### `secrets-outside-env` — Secrets Used Without GitHub Environment
+
+zizmor flags jobs that use `secrets.*` (other than `secrets.GITHUB_TOKEN`) without an
+`environment:` declaration. Org/repo-level secrets are available to any workflow run,
+including from forks. Environment-scoped secrets are only available to jobs targeting that
+environment, providing an additional access control layer.
+
+**Fix (preferred):** Add an `environment:` declaration to the job and move the secrets into
+that environment's secret store (removing them from repo/org-wide secrets).
+
+```yaml
+# BEFORE (flagged)
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./deploy.sh
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+
+# AFTER (fixed)
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - run: ./deploy.sh
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+```
+
+**Suppress only if ALL of these are true:**
+1. The job genuinely needs a non-GITHUB_TOKEN secret (not just a misconfiguration)
+2. Adding an `environment:` declaration would break the workflow (e.g., environment
+   protection rules would block PR-triggered runs that need the secret)
+3. The secret is not exposed to untrusted code (e.g., not passed to a step that runs
+   PR-submitted code)
+
+If you cannot confirm all three, apply the fix. If the situation is ambiguous, **stop and
+report the finding — do not suppress or fix.**
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest # zizmor: ignore[secrets-outside-env] -- API key needed in PR test runs; environment protection would block CI
 ```
 
 ### `superfluous-actions` — Action Can Be Replaced With Inline Code
@@ -237,16 +312,19 @@ theoretically affect the release build.
 **WARNING:** `--fix=all` will disable caching for these findings. Almost always revert these
 auto-fixes and suppress instead.
 
-**Suppress (default):** Nearly all of the time, these setup actions cache dependencies for
-testing, not for generating release artifacts. This is safe. Suppress with a reason.
+**Suppress only if ALL of these are true:**
+1. The cached dependencies are used for testing or linting, NOT for building the published
+   release artifact
+2. The release artifact is built from a clean install or a separate non-cached step
+3. The workflow's cache is not shared with workflows triggered by `pull_request` from forks
+   (GitHub isolates caches by branch, but verify if the workflow uses custom cache keys)
+
+If you cannot confirm all three, disable caching for that step. If the situation is
+ambiguous, **stop and report the finding — do not suppress or fix.**
 
 ```yaml
 - uses: ruby/setup-ruby@... # zizmor: ignore[cache-poisoning] -- cached deps are for testing, not release artifact generation
 ```
-
-**Fix (rare):** Only disable caching when the cached dependencies are directly used to build
-the release artifact in the same job, AND you've verified the cache could actually be poisoned
-by a PR workflow. Even then, double-check before disabling.
 
 ### `dependabot-cooldown` — Missing Cooldown on Dependabot Ecosystems
 
