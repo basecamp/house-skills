@@ -123,6 +123,9 @@ lint-actions:
 
 Note: pin the checkout and zizmor-action SHAs.
 
+**Before adding this job, check if the workflow already has a standalone `actionlint` job.**
+If it does, remove it — `lint-actions` replaces it. Do not create duplicate actionlint runs.
+
 ## Dependabot Configuration
 
 ### GitHub Actions entry
