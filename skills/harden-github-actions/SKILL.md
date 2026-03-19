@@ -87,7 +87,7 @@ full decision guidance, suppression checklists, and examples. Only read the rule
 | `bot-conditions` | `references/rule-bot-conditions.md` | Always fix (use verified `user.login`) |
 | `superfluous-actions` | `references/rule-superfluous-actions.md` | Always suppress (never replace with inline code) |
 | `cache-poisoning` | `references/rule-cache-poisoning.md` | Suppress (default); revert auto-fixes; only escalate if custom cache keys |
-| `unpinned-images` | `references/rule-unpinned-images.md` | Fix (pin to digest via `docker manifest inspect`); never guess a digest |
+| `unpinned-images` | `references/rule-unpinned-images.md` | Suppress (default); digest pinning is nontrivial |
 | `dependabot-execution` | `references/rule-dependabot-execution.md` | Fix or suppress with 3-point checklist |
 | `dependabot-cooldown` | `references/rule-dependabot-cooldown.md` | Always fix (add `cooldown: default-days: 10` to all ecosystems) |
 
