@@ -7,15 +7,22 @@ theoretically affect the release build.
 **WARNING:** `--fix=all` will disable caching for these findings. Almost always revert these
 auto-fixes and suppress instead.
 
-**Suppress only if ALL of these are true:**
-1. The cached dependencies are used for testing or linting, NOT for building the published
-   release artifact
-2. The release artifact is built from a clean install or a separate non-cached step
-3. The workflow's cache is not shared with workflows triggered by `pull_request` from forks
-   (GitHub isolates caches by branch, but verify if the workflow uses custom cache keys)
+**Suppress (default).** GitHub Actions caches are isolated by branch. A `pull_request` workflow
+from a fork cannot write to the cache used by a tag-push or `workflow_dispatch` release
+workflow. The cache-poisoning attack requires an actor who already has push access to the
+default branch — and if they have that, they can modify the release workflow directly.
 
-If you cannot confirm all three, disable caching for that step. If the situation is
-ambiguous, **stop and report the finding — do not suppress or fix.**
+This applies even when the cached dependencies are used to build the release artifact, because
+the cache isolation makes the poisoning vector impractical.
+
+**Suppress only if:**
+- The workflow uses the default cache keys from setup actions (e.g., `setup-go`, `setup-ruby`,
+  `setup-node`), which are keyed by lockfile hash and branch. This is the common case.
+
+**Do NOT suppress if:**
+- The workflow uses `actions/cache` with a custom `key:` that is shared across branches or
+  includes attacker-controllable values (e.g., PR number, branch name from a fork). In this
+  case, **stop and report the finding.**
 
 ```yaml
 - uses: ruby/setup-ruby@... # zizmor: ignore[cache-poisoning] -- cached deps are for testing, not release artifact generation
