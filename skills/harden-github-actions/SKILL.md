@@ -63,6 +63,15 @@ For each severity level (high, then medium, then low, then informational):
 6. Run `zizmor --min-severity=<level> .` to verify a clean check at this severity level
 7. Commit
 
+After completing all default severity levels, run a pedantic pass:
+
+1. Run `zizmor --persona=pedantic --min-severity=high .`
+2. Address findings the same way as above — the most common pedantic finding is
+   `excessive-permissions` on single-job workflows where zizmor's default persona doesn't
+   flag it. Apply the same fix: `permissions: {}` at workflow level, scoped per job.
+3. Run `zizmor --persona=pedantic --min-severity=high .` to verify clean
+4. Commit
+
 ## Decision Guide by Rule
 
 When you encounter a zizmor finding, read the corresponding rule file in `references/` for
