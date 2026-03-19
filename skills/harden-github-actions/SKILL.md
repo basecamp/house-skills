@@ -43,7 +43,13 @@ Run `pinact run --min-age 10` from the repository root. This pins all actions in
 
 ## Running zizmor
 
-Run zizmor against the entire project directory by running `zizmor <directory>`, e.g. `zizmor ~/Work/basecamp/fizzy`
+**Always run zizmor with a GitHub token** so that online audits (like `ref-version-mismatch`
+and `impostor-commit`) can resolve SHAs against the GitHub API. Without a token, these audits
+are silently skipped and findings will only surface in CI.
+
+```bash
+GITHUB_TOKEN=$(gh auth token) zizmor .
+```
 
 Filter severity by passing the flag `--min-severity=<level>` where level can be `high`, `medium`, or `low`. Informational warnings may be emitted by omitting this flag entirely.
 
