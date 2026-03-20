@@ -139,7 +139,7 @@ lint-actions:
       uses: rhysd/actionlint@v1
 
     - name: Run zizmor
-      uses: zizmorcore/zizmor-action@v1
+      uses: zizmorcore/zizmor-action@v0
       with:
         advanced-security: false
 ```
