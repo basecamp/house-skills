@@ -198,12 +198,10 @@ zizmor .
 Each tool should be a separate command so failures are clearly attributable. Place these
 near other linting steps if the script has them.
 
-### Makefile projects
+### Examples
 
-If the project uses a Makefile instead of (or in addition to) bin scripts, add a
-`lint-actions` target and wire it into the check/lint meta-target. See
-[basecamp-sdk@aa1f2d50](https://github.com/basecamp/basecamp-sdk/commit/aa1f2d50)
-for an example.
+- **bin/setup + config/ci.rb**: [lexxy#882](https://github.com/basecamp/lexxy/pull/882)
+- **Makefile**: [basecamp-sdk@aa1f2d50](https://github.com/basecamp/basecamp-sdk/commit/aa1f2d50)
 
 ## Dependabot Configuration
 
