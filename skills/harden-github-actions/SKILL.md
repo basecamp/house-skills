@@ -263,4 +263,5 @@ If an ecosystem entry is missing the cooldown block, add it.
 | Adding the zizmor CI job at the end of the workflow file | Place it near existing lint jobs — it's a linting concern, not a test |
 | Replacing an action with inline code for `superfluous-actions` | Always suppress — actions are more maintainable and receive upstream fixes |
 | Not specifying permissions on reusable workflow caller jobs | Caller jobs must declare permissions; reusable workflows inherit from the caller |
+| Adding tools to bin/setup when there's no bin/ci | Only add local linting if a local CI script exists to run the tools |
 | Running commands in the main repo instead of the worktree | Verify `pwd` and `git branch` before starting |
