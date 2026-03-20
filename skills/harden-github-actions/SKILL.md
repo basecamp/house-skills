@@ -39,7 +39,9 @@ Always work in this order. Each step is a separate commit.
    This goes beyond what zizmor flags — zizmor misses single-job workflows. Commit.
 4. **Run actionlint** and fix any findings. Commit.
 5. **Add zizmor CI job** using the standard template
-6. **Configure dependabot** to batch github-actions updates weekly
+6. **Add local workflow linting** to `bin/setup` and `bin/ci` (see below). Skip if these
+   scripts don't exist in the project.
+7. **Configure dependabot** to batch github-actions updates weekly
 
 ## Running pinact
 
@@ -146,6 +148,61 @@ Note: pin the checkout and zizmor-action SHAs.
 
 **Before adding this job, check if the workflow already has a standalone `actionlint` job.**
 If it does, remove it — `lint-actions` replaces it. Do not create duplicate actionlint runs.
+
+## Local Workflow Linting
+
+If the project has `bin/setup` and/or `bin/ci` scripts, add workflow linting to them so
+developers catch issues locally before pushing. **Skip this section entirely if these
+scripts don't exist.**
+
+### bin/setup — tool installation
+
+Check if `actionlint` and `zizmor` are already installed. If not, install them using the
+platform's package manager. Read the existing `bin/setup` script to understand its
+conventions before adding to it.
+
+```bash
+# Install actionlint if not present
+if ! command -v actionlint &> /dev/null; then
+  if command -v brew &> /dev/null; then
+    brew install actionlint
+  elif command -v pacman &> /dev/null; then
+    sudo pacman -S --noconfirm actionlint
+  else
+    echo "Error: install actionlint manually — see https://github.com/rhysd/actionlint" >&2
+    exit 1
+  fi
+fi
+
+# Install zizmor if not present
+if ! command -v zizmor &> /dev/null; then
+  if command -v brew &> /dev/null; then
+    brew install zizmor
+  elif command -v pacman &> /dev/null; then
+    sudo pacman -S --noconfirm zizmor
+  else
+    echo "Error: install zizmor manually — see https://docs.zizmor.sh" >&2
+    exit 1
+  fi
+fi
+```
+
+Adapt this to match the script's existing style (e.g., if it uses functions, conditionals,
+or a different error pattern, follow that convention).
+
+### bin/ci — running the linters
+
+Add actionlint and zizmor as separate steps. Read the existing `bin/ci` script to understand
+its conventions before adding to it.
+
+```bash
+# Lint GitHub Actions workflows
+actionlint
+zizmor .
+```
+
+Each tool should be a separate command so failures are clearly attributable. Place these
+near other linting steps if the script has them.
 
 ## Dependabot Configuration
 
