@@ -259,7 +259,7 @@ If an ecosystem entry is missing the cooldown block, add it.
 | Fixing permissions by removing the block entirely | Move to job-level, don't remove — implicit permissions may be too broad |
 | Using `--fix` instead of `--fix=all` | Safe mode silently holds back fixes; use `--fix=all` and review the diff |
 | Committing without verifying clean zizmor output | Always re-run `zizmor --min-severity=<level> .` before committing |
-| Analyzing all findings up front before starting work | Follow the workflow order step by step — pin, then fix by severity, then CI job, then dependabot |
+| Analyzing all findings up front before starting work | Follow the workflow order step by step — CI job, dependabot, local linting, pin, then fix by severity |
 | Adding the zizmor CI job at the end of the workflow file | Place it near existing lint jobs — it's a linting concern, not a test |
 | Replacing an action with inline code for `superfluous-actions` | Always suppress — actions are more maintainable and receive upstream fixes |
 | Not specifying permissions on reusable workflow caller jobs | Caller jobs must declare permissions; reusable workflows inherit from the caller |

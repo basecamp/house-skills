@@ -6,8 +6,8 @@ under the same tag.
 
 **Suppress (default).** Determining the correct digest for a container image is nontrivial
 (multi-arch manifests, registry-specific behavior, digest instability across rebuilds).
-The version tag already pins to a specific release. Suppress with a reason.
+Suppress with a reason.
 
 ```yaml
-image: myorg/myimage:1.0.0 # zizmor: ignore[unpinned-images] -- version tag pins to a specific release
+image: myorg/myimage:1.0.0 # zizmor: ignore[unpinned-images] -- version tag is fine for service containers
 ```
