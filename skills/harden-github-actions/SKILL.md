@@ -157,34 +157,28 @@ scripts don't exist.**
 
 ### bin/setup — tool installation
 
-Check if `actionlint` and `zizmor` are already installed. If not, install them using the
-platform's package manager. Read the existing `bin/setup` script to understand its
-conventions before adding to it.
+Check if `actionlint`, `shellcheck`, and `zizmor` are already installed. If not, install
+them using the platform's package manager. Read the existing `bin/setup` script to understand
+its conventions before adding to it.
+
+**shellcheck is required** — actionlint uses it to lint shell scripts in `run:` blocks.
+Without shellcheck, actionlint silently skips script checks and local results won't match CI.
+
+Install all three tools using the same pattern:
 
 ```bash
-# Install actionlint if not present
-if ! command -v actionlint &> /dev/null; then
-  if command -v brew &> /dev/null; then
-    brew install actionlint
-  elif command -v pacman &> /dev/null; then
-    sudo pacman -S --noconfirm actionlint
-  else
-    echo "Error: install actionlint manually — see https://github.com/rhysd/actionlint" >&2
-    exit 1
+for tool in actionlint shellcheck zizmor; do
+  if ! command -v "$tool" &> /dev/null; then
+    if command -v brew &> /dev/null; then
+      brew install "$tool"
+    elif command -v pacman &> /dev/null; then
+      sudo pacman -S --noconfirm "$tool"
+    else
+      echo "Error: install $tool manually" >&2
+      exit 1
+    fi
   fi
-fi
-
-# Install zizmor if not present
-if ! command -v zizmor &> /dev/null; then
-  if command -v brew &> /dev/null; then
-    brew install zizmor
-  elif command -v pacman &> /dev/null; then
-    sudo pacman -S --noconfirm zizmor
-  else
-    echo "Error: install zizmor manually — see https://docs.zizmor.sh" >&2
-    exit 1
-  fi
-fi
+done
 ```
 
 Adapt this to match the script's existing style (e.g., if it uses functions, conditionals,
