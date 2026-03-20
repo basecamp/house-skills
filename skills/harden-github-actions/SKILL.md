@@ -281,3 +281,5 @@ misleading — dismiss them.
 |----------|---------------|
 | `ruby/setup-ruby` with `bundler-cache: true` needs `actions: write` | No. Bundler cache works with `contents: read`. The cache API uses the implicit `GITHUB_TOKEN`. Do not add `actions: write`. |
 | `persist-credentials: false` will break `git fetch` / `git worktree` | Only true for private repos. All our target repos are public — unauthenticated HTTPS fetch works fine. |
+| `cooldown` is not a valid Dependabot configuration key | It is valid. GitHub added `cooldown` to Dependabot v2 config in late 2025. Copilot's training data predates this feature. |
+| Checkout version inconsistency (v3 in existing jobs vs v6 in lint-actions) | The skill pins existing versions as-is; upgrading is dependabot's job after merge. The lint-actions job template uses v6 independently. |
