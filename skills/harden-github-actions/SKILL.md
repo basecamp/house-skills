@@ -32,16 +32,16 @@ git branch   # should show the feature branch, not main
 
 Always work in this order. Each step is a separate commit.
 
-1. **Pin actions** with `pinact run`
-2. **Address zizmor warnings** by severity (high → medium → low → informational).
-3. **Ensure all permissions are job-level.** Check every workflow file for top-level
+1. **Add zizmor CI job** using the standard template
+2. **Configure dependabot** to batch github-actions updates weekly
+3. **Add local workflow linting** to `bin/setup` and `bin/ci` (see below). Skip if these
+   scripts don't exist in the project.
+4. **Pin actions** with `pinact run`
+5. **Address zizmor warnings** by severity (high → medium → low → informational).
+6. **Ensure all permissions are job-level.** Check every workflow file for top-level
    `permissions:` blocks. Replace with `permissions: {}` and add per-job permissions.
    This goes beyond what zizmor flags — zizmor misses single-job workflows. Commit.
-4. **Run actionlint** and fix any findings. Commit.
-5. **Add zizmor CI job** using the standard template
-6. **Add local workflow linting** to `bin/setup` and `bin/ci` (see below). Skip if these
-   scripts don't exist in the project.
-7. **Configure dependabot** to batch github-actions updates weekly
+7. **Run actionlint** and fix any findings. Commit.
 
 ## Running pinact
 
