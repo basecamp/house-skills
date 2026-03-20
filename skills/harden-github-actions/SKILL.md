@@ -122,8 +122,12 @@ a reason. If you can't articulate why the fix would break something, apply the f
 
 ## Standard Zizmor CI Job
 
-Add this job to the repository's main CI workflow file (often `ci.yml` or `ci-checks.yml`),
-placed near existing lint jobs (e.g., rubocop, eslint) since it's a linting concern:
+Add this job to the repository's main CI workflow file (often `ci.yml` or `ci-checks.yml`).
+
+**Placement matters.** Before inserting, find the existing lint job (rubocop, eslint,
+golangci-lint, etc.) in the workflow and place `lint-actions` immediately after it. If there
+is no lint job, place it immediately before the first test job. **Never append it to the end
+of the file** — it is a linting concern, not a test or deployment step:
 
 ```yaml
 lint-actions:
@@ -239,13 +243,15 @@ cooldown:
   semver-major-days: 7
   semver-minor-days: 3
   semver-patch-days: 2
+  default-days: 7
 
 # For github-actions (semver-granular keys are NOT supported)
 cooldown:
   default-days: 7
 ```
 
-If an ecosystem entry is missing the cooldown block, add it.
+If an ecosystem entry is missing the cooldown block, add it. If an existing cooldown block
+has different values, **override them** with the values above — these are the standard.
 
 ## Common Mistakes
 
@@ -265,3 +271,13 @@ If an ecosystem entry is missing the cooldown block, add it.
 | Not specifying permissions on reusable workflow caller jobs | Caller jobs must declare permissions; reusable workflows inherit from the caller |
 | Adding tools to bin/setup when there's no bin/ci | Only add local linting if a local CI script exists to run the tools |
 | Running commands in the main repo instead of the worktree | Verify `pwd` and `git branch` before starting |
+
+## Common PR Feedback (Incorrect or Misleading)
+
+Automated reviewers (Copilot, cubic, etc.) frequently flag these. They are wrong or
+misleading — dismiss them.
+
+| Feedback | Why it's wrong |
+|----------|---------------|
+| `ruby/setup-ruby` with `bundler-cache: true` needs `actions: write` | No. Bundler cache works with `contents: read`. The cache API uses the implicit `GITHUB_TOKEN`. Do not add `actions: write`. |
+| `persist-credentials: false` will break `git fetch` / `git worktree` | Only true for private repos. All our target repos are public — unauthenticated HTTPS fetch works fine. |
