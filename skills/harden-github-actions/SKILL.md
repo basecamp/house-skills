@@ -136,10 +136,10 @@ lint-actions:
         persist-credentials: false
 
     - name: Run actionlint
-      uses: rhysd/actionlint@v1
+      uses: rhysd/actionlint@v1.7.11
 
     - name: Run zizmor
-      uses: zizmorcore/zizmor-action@v0
+      uses: zizmorcore/zizmor-action@v0.5.2
       with:
         advanced-security: false
 ```
