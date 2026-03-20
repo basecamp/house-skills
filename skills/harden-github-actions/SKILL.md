@@ -204,6 +204,13 @@ zizmor .
 Each tool should be a separate command so failures are clearly attributable. Place these
 near other linting steps if the script has them.
 
+### Makefile projects
+
+If the project uses a Makefile instead of (or in addition to) bin scripts, add a
+`lint-actions` target and wire it into the check/lint meta-target. See
+[basecamp-sdk@aa1f2d50](https://github.com/basecamp/basecamp-sdk/commit/aa1f2d50)
+for an example.
+
 ## Dependabot Configuration
 
 ### GitHub Actions entry
@@ -221,17 +228,30 @@ The schedule **must** be `weekly` — not daily.
   schedule:
     interval: weekly
   cooldown:
-    default-days: 10
+    default-days: 7
 ```
 
 The `groups` block batches all action updates into a single PR instead of one PR per action.
 
 ### Cooldown on all ecosystems
 
-Add `cooldown: default-days: 10` to **every** ecosystem entry in `dependabot.yml`, not just
-github-actions. This gives a 10-day waiting period after any version is published before
-dependabot proposes it, avoiding churn from rapid post-release patches. If an ecosystem
-entry is missing the cooldown block, add it.
+Add cooldown to **every** ecosystem entry in `dependabot.yml`. Use semver-granular cooldowns
+for real package ecosystems so low-risk patches flow faster while major bumps get more soak
+time:
+
+```yaml
+# For package ecosystems (bundler, npm, gomod, gradle, pip, etc.)
+cooldown:
+  semver-major-days: 7
+  semver-minor-days: 3
+  semver-patch-days: 2
+
+# For github-actions (semver-granular keys are NOT supported)
+cooldown:
+  default-days: 7
+```
+
+If an ecosystem entry is missing the cooldown block, add it.
 
 ## Common Mistakes
 

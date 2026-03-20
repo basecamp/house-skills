@@ -2,12 +2,21 @@
 
 zizmor warns when dependabot ecosystem entries lack a cooldown period.
 
-**Fix (always):** Add `cooldown: default-days: 10` to every ecosystem entry in
-`.github/dependabot.yml`, not just `github-actions`. This gives a 10-day waiting period
-after any version is published before dependabot proposes it, avoiding churn from rapid
-post-release patches.
+**Fix (always):** Add cooldown to every ecosystem entry in `.github/dependabot.yml`.
+
+For real package ecosystems (bundler, npm, gomod, gradle, pip, etc.), use semver-granular
+cooldowns so low-risk patches flow faster while major bumps get more soak time:
 
 ```yaml
 cooldown:
-  default-days: 10
+  semver-major-days: 7
+  semver-minor-days: 3
+  semver-patch-days: 2
+```
+
+For `github-actions`, semver-granular keys are not supported. Use the default cooldown:
+
+```yaml
+cooldown:
+  default-days: 7
 ```

@@ -49,6 +49,10 @@ jobs:
 
 **After researching a new action's permissions, add it to `references/permission-mappings.md`.**
 
+**Exception: OpenSSF Scorecard.** Workflows using `ossf/scorecard-action` require
+`permissions: read-all` at the workflow level. Do not change this to `permissions: {}` —
+the Scorecard action needs broad read access across the repo. Leave it as-is.
+
 **Reusable workflows (`uses: ./.github/workflows/...`):** Caller jobs that invoke reusable
 workflows must specify permissions explicitly. Reusable workflows inherit the caller job's
 permissions, and permissions can only be maintained or reduced through the chain — never

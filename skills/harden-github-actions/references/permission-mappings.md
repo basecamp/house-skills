@@ -20,7 +20,7 @@ documented permission requirements before proceeding. Then add it to this table.
 | `actions/dependency-review-action` | `contents: read` | + `pull-requests: write` if `comment-summary-in-pr` is `always` or `on-failure` |
 | `actions/deploy-pages` | `pages: write`, `id-token: write` | |
 | `actions/download-artifact` | none | `actions: read` only when using `github-token` input to download from other repos/workflow runs |
-| `actions/github-script` | depends on script | No fixed permissions; required permissions depend on which GitHub API calls the script makes (e.g., `issues: write` for comments, `contents: read` for repo data). Read the script to determine. |
+| `actions/github-script` | depends on script | No fixed permissions; required permissions depend on which GitHub API calls the script makes. Key distinction: PR comments (`gh pr comment`, `updateIssueComment` on PR objects) need `pull-requests: write`; applying labels via the Issues API needs `issues: write`. Read the script to determine. |
 | `actions/labeler` | `contents: read`, `pull-requests: write` | + `issues: write` only if the action needs to create labels that don't already exist |
 | `actions/setup-go` | `contents: read` | |
 | `actions/setup-java` | `contents: read` | |
