@@ -34,8 +34,9 @@ Always work in this order. Each step is a separate commit.
 
 1. **Pin actions** with `pinact run`
 2. **Address zizmor warnings** by severity (high → medium → low → informational).
-3. **Add zizmor CI job** using the standard template
-4. **Configure dependabot** to batch github-actions updates weekly
+3. **Run actionlint** and fix any findings. Commit.
+4. **Add zizmor CI job** using the standard template
+5. **Configure dependabot** to batch github-actions updates weekly
 
 ## Running pinact
 
