@@ -63,7 +63,8 @@ For each severity level (high, then medium, then low, then informational):
    - `cache-poisoning` fixes will disable caching — almost always revert these and suppress instead
    - `artipacked` fixes add `persist-credentials: false` — revert if the workflow needs `git push`
    - `superfluous-actions` fixes replace actions with inline code — always revert these and suppress instead
-   - `bot-conditions` and `template-injection` fixes are generally correct
+   - `bot-conditions` auto-fix replaces `github.actor` with `user.login` — revert and apply the dual check instead (see rule file)
+   - `template-injection` fixes are generally correct
 3. Revert any incorrect fixes
 4. For reverted fixes, apply the correct resolution manually (e.g., suppress with a reason)
 5. Manually fix anything `--fix` didn't handle. **For `excessive-permissions`: you MUST research each action's permissions. Do not guess. See the permission research process below.**
@@ -91,7 +92,7 @@ full decision guidance, suppression checklists, and examples. Only read the rule
 | `excessive-permissions` | `references/rule-excessive-permissions.md` | Always fix (set `permissions: {}` at workflow level, scope per job) |
 | `dangerous-triggers` | `references/rule-dangerous-triggers.md` | Fix or suppress with 5-point checklist |
 | `secrets-outside-env` | `references/rule-secrets-outside-env.md` | Fix (add `environment:`) or suppress with 3-point checklist |
-| `bot-conditions` | `references/rule-bot-conditions.md` | Always fix (use verified `user.login`) |
+| `bot-conditions` | `references/rule-bot-conditions.md` | Always fix (dual check: `actor` + `user.login`); revert auto-fix |
 | `superfluous-actions` | `references/rule-superfluous-actions.md` | Always suppress (never replace with inline code) |
 | `cache-poisoning` | `references/rule-cache-poisoning.md` | Suppress (default); revert auto-fixes; only escalate if custom cache keys |
 | `unpinned-images` | `references/rule-unpinned-images.md` | Suppress (default); digest pinning is nontrivial |
