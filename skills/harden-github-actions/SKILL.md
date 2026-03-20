@@ -131,20 +131,22 @@ lint-actions:
   runs-on: ubuntu-latest
 
   steps:
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - uses: actions/checkout@v6
       with:
         persist-credentials: false
 
     - name: Run actionlint
-      uses: rhysd/actionlint@393031adb9afb225ee52ae2ccd7a5af5525e03e8 # v1.7.11
+      uses: rhysd/actionlint@v1
 
     - name: Run zizmor
-      uses: zizmorcore/zizmor-action@71321a20a9ded102f6e9ce5718a2fcec2c4f70d8 # v0.5.2
+      uses: zizmorcore/zizmor-action@v1
       with:
         advanced-security: false
 ```
 
-Note: pin the checkout and zizmor-action SHAs.
+Use version tags, not SHA hashes — run `pinact run --min-age 10` immediately after adding
+this job to pin them. This ensures the SHAs match what pinact produces for the rest of the
+workflow.
 
 **Before adding this job, check if the workflow already has a standalone `actionlint` job.**
 If it does, remove it — `lint-actions` replaces it. Do not create duplicate actionlint runs.
