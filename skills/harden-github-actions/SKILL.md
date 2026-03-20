@@ -153,9 +153,9 @@ If it does, remove it — `lint-actions` replaces it. Do not create duplicate ac
 
 ## Local Workflow Linting
 
-If the project has `bin/setup` and/or `bin/ci` scripts, add workflow linting to them so
-developers catch issues locally before pushing. **Skip this section entirely if these
-scripts don't exist.**
+If the project has a `bin/ci` script (or equivalent like `config/ci.rb`), add workflow
+linting so developers catch issues locally before pushing. If `bin/setup` also exists, add
+tool installation there too. **Skip this section entirely if there is no local CI script.**
 
 ### bin/setup — tool installation
 
