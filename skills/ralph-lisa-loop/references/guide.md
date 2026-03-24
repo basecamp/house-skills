@@ -82,7 +82,7 @@ When salience < rope threshold, the system continues without interrupting — bu
 
 ### Initialization
 
-1. Create session file from `@session-template.md` → `tmp/ralph-lisa-loop-session.md`
+1. Ensure `tmp/` exists (`mkdir -p tmp/ralph-lisa-loop-history`). Create session file from `@session-template.md` → `tmp/ralph-lisa-loop-session.md`
    - Set `artifact_path`, `mode` (plan|implement), `rope_length`, `original_prompt`
    - Set `reviewer_backend` and `review_channel_status` from preflight results
    - Set `plan_only: true` if user triggered a plan-only mode
@@ -653,7 +653,7 @@ Run `scripts/eval.sh` at completion (before attestation). Any FAIL blocks closur
 | False convergence | Both agents aligned but wrong | Mediator validates key decisions at close (attestation) |
 | Cache mismatch at gate | Bug in count tracking | Gate fails closed, log warning, recompute from records |
 | Stop hook blocks during awaiting_human | Hook not checking status | Hook checks status first, yields on awaiting_human |
-| Session lost on resume | Session file not persisted | Session file lives in .claude/, survives across turns |
+| Session lost on resume | Session file not persisted | Session file lives in tmp/, survives across turns |
 | Stale continuation block | Not updated after round | Orchestrator updates continuation block each synthesis step |
 | Attestation skipped at high rope | Attestation-exempt criteria not checked | Verify all four criteria against immutable counters |
 | Phase transition with open disputes | Gate check missed | Gate blocks transition if any dispute state=open |

@@ -11,7 +11,10 @@
 
 # Do NOT use set -e — all checks must run even if earlier ones fail.
 
-SESSION="tmp/ralph-lisa-loop-session.md"
+# Resolve default session path relative to git repo root (like stop-hook.sh),
+# falling back to cwd if git is unavailable.
+GIT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+SESSION="$GIT_ROOT/tmp/ralph-lisa-loop-session.md"
 MID_SESSION=false
 for arg in "$@"; do
   if [[ "$arg" == "--mid-session" ]]; then
