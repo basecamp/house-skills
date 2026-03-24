@@ -6,12 +6,12 @@
 # Run after session completes to verify protocol compliance.
 #
 # Usage: eval.sh [session-path] [--mid-session]
-#   Default: .claude/ralph-lisa-loop-session.md
+#   Default: tmp/ralph-lisa-loop-session.md
 #   --mid-session: run structural checks only (1, 2, 12, 13), skip completion checks
 
 # Do NOT use set -e — all checks must run even if earlier ones fail.
 
-SESSION=".claude/ralph-lisa-loop-session.md"
+SESSION="tmp/ralph-lisa-loop-session.md"
 MID_SESSION=false
 for arg in "$@"; do
   if [[ "$arg" == "--mid-session" ]]; then

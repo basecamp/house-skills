@@ -1,6 +1,6 @@
 # Session Template
 
-Copy this to `.claude/ralph-lisa-loop-session.md` at initialization. Replace bracketed values.
+Copy this to `tmp/ralph-lisa-loop-session.md` at initialization. Replace bracketed values.
 
 ---
 
@@ -34,7 +34,7 @@ original_prompt: |
 
 <!-- CONTINUATION BLOCK — injected by stop hook, kept compact -->
 ralph-lisa-loop | mode=plan | round=1 | findings=0 | disputes=0 | status=active
-Read .claude/ralph-lisa-loop-session.md. Follow the ralph-lisa-loop skill guide.
+Read tmp/ralph-lisa-loop-session.md. Follow the ralph-lisa-loop skill guide.
 Next: [specific next action, e.g., "Dispatch planner subagent for round 1"]
 <!-- END CONTINUATION BLOCK -->
 

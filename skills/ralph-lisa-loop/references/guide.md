@@ -82,7 +82,7 @@ When salience < rope threshold, the system continues without interrupting — bu
 
 ### Initialization
 
-1. Create session file from `@session-template.md` → `.claude/ralph-lisa-loop-session.md`
+1. Create session file from `@session-template.md` → `tmp/ralph-lisa-loop-session.md`
    - Set `artifact_path`, `mode` (plan|implement), `rope_length`, `original_prompt`
    - Set `reviewer_backend` and `review_channel_status` from preflight results
    - Set `plan_only: true` if user triggered a plan-only mode
@@ -228,7 +228,7 @@ active → complete
   Trigger: implement-mode close gate passes
   Action: (1) final synthesis,
           (2) mediator attestation (required unless attestation-exempt),
-          (3) archive session to .claude/ralph-lisa-loop-history/session-{id}.md,
+          (3) archive session to tmp/ralph-lisa-loop-history/session-{id}.md,
           (4) THEN set status=complete
   Effect: stop hook yields permanently after status change
 ```
@@ -254,7 +254,7 @@ On implement-mode close gate passing:
 
 1. Final synthesis (`status` remains `active` — stop hook keeps enforcing)
 2. Mediator attestation — **required** unless attestation-exempt (see below)
-3. Archive session file to `.claude/ralph-lisa-loop-history/session-{id}.md`
+3. Archive session file to `tmp/ralph-lisa-loop-history/session-{id}.md`
 4. Set `status: complete` (only AFTER synthesis + archive succeed)
 5. Stop hook now allows exit
 
@@ -419,14 +419,14 @@ mcp__codex__codex-reply(
 
 When Codex MCP is not available and the user has opted into exec mode at the startup gate, fall back to `codex exec`.
 
-Output goes to `.claude/ralph-lisa-codex-response.txt` (project-local, not /tmp).
+Output goes to `tmp/ralph-lisa-codex-response.txt`.
 
 **Plan-phase Round 1** (new session):
 ```bash
 codex exec "[independent ideation prompt — task only, NO planner draft]" \
   -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' -s read-only \
   -C "[project dir]" --json \
-  -o .claude/ralph-lisa-codex-response.txt
+  -o tmp/ralph-lisa-codex-response.txt
 # Parse session_id from JSON output → save as codex_plan_session_id in session file
 ```
 
@@ -435,7 +435,7 @@ codex exec "[independent ideation prompt — task only, NO planner draft]" \
 codex exec resume "$codex_plan_session_id" \
   "[continuation prompt]" \
   -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' -s read-only \
-  -o .claude/ralph-lisa-codex-response.txt
+  -o tmp/ralph-lisa-codex-response.txt
 ```
 
 **Implement-phase** — same pattern: new session for Round 1, `exec resume` for Round 2+. Save session ID as `codex_impl_session_id`.
@@ -549,7 +549,7 @@ context from subagent summaries.
 |---------|----------|
 | Codex MCP call fails (timeout/error) | Retry once → fall back to `codex exec` for this round → fall back to self-review-only with M-priority finding logged. Retry MCP next round. |
 | MCP thread lost | Start new thread, update session file `codex_*_thread_id` |
-| Session file corrupted | Check `.claude/ralph-lisa-loop-history/` → reconstruct from continuation block → inform user, offer restart |
+| Session file corrupted | Check `tmp/ralph-lisa-loop-history/` → reconstruct from continuation block → inform user, offer restart |
 | Context compacted mid-round | Stop hook re-injects continuation block. Orchestrator reads session, checks which round sections exist, resumes from next missing section. |
 | codex exec fails | Read stderr for diagnostics. Self-review-only for this round. |
 | Worker subagent fails (timeout/crash) | Retry once with same prompt → if still fails, orchestrator performs the step directly for this round (degrades to current behavior). Log in round summary. |
@@ -589,7 +589,7 @@ Add to `~/.claude/settings.json` → `hooks.Stop`:
 
 Restart Claude Code. The hook no-ops (exits 0) when no session file exists.
 
-The hook reads `.claude/ralph-lisa-loop-session.md` and:
+The hook reads `tmp/ralph-lisa-loop-session.md` and:
 - **Allows stop** if: no session file, `status: awaiting_human`, or `status: complete`
 - **Blocks stop** if: `status: active` — extracts the continuation block (fixed-size, ~200 bytes) and re-injects it as the continuation prompt
 
@@ -597,11 +597,11 @@ The hook reads `.claude/ralph-lisa-loop-session.md` and:
 
 ## Eval Checks
 
-Run against `.claude/ralph-lisa-loop-session.md` after session completes:
+Run against `tmp/ralph-lisa-loop-session.md` after session completes:
 
 ```bash
 scripts/eval.sh [session-path]
-# Default: .claude/ralph-lisa-loop-session.md
+# Default: tmp/ralph-lisa-loop-session.md
 # Exit 0 = all checks pass, exit 1 = any FAIL
 
 scripts/eval.sh [session-path] --mid-session

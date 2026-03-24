@@ -3,7 +3,7 @@
 # ralph-lisa-loop stop hook
 #
 # Phase-aware Stop hook for the ralph-lisa loop. Reads session state from
-# .claude/ralph-lisa-loop-session.md and decides whether to block (continue
+# tmp/ralph-lisa-loop-session.md and decides whether to block (continue
 # the loop) or allow (let Claude stop).
 #
 # Install in ~/.claude/settings.json → hooks.Stop:
@@ -27,18 +27,18 @@ set -euo pipefail
 
 # ── Locate session file ────────────────────────────────────────────────
 
-# Try .claude/ralph-lisa-loop-session.md relative to git root, then cwd
+# Try tmp/ralph-lisa-loop-session.md relative to git root, then cwd
 find_session() {
   local git_root
   git_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 
-  if [[ -n "$git_root" && -f "$git_root/.claude/ralph-lisa-loop-session.md" ]]; then
-    echo "$git_root/.claude/ralph-lisa-loop-session.md"
+  if [[ -n "$git_root" && -f "$git_root/tmp/ralph-lisa-loop-session.md" ]]; then
+    echo "$git_root/tmp/ralph-lisa-loop-session.md"
     return 0
   fi
 
-  if [[ -f ".claude/ralph-lisa-loop-session.md" ]]; then
-    echo ".claude/ralph-lisa-loop-session.md"
+  if [[ -f "tmp/ralph-lisa-loop-session.md" ]]; then
+    echo "tmp/ralph-lisa-loop-session.md"
     return 0
   fi
 
@@ -97,7 +97,7 @@ fi
 
 # Fallback if markers are missing or empty
 if [[ -z "$CONTINUATION" ]]; then
-  CONTINUATION="You are running the ralph-lisa loop. Read .claude/ralph-lisa-loop-session.md for state and follow the ralph-lisa-loop skill guide. Take the next action for your current mode and round. Mode: ${MODE}. Round: ${ROUND}. Open findings: ${OPEN_FINDINGS}. Open disputes: ${OPEN_DISPUTES}."
+  CONTINUATION="You are running the ralph-lisa loop. Read tmp/ralph-lisa-loop-session.md for state and follow the ralph-lisa-loop skill guide. Take the next action for your current mode and round. Mode: ${MODE}. Round: ${ROUND}. Open findings: ${OPEN_FINDINGS}. Open disputes: ${OPEN_DISPUTES}."
 fi
 
 # ── Build stop hook response ────────────────────────────────────────────
