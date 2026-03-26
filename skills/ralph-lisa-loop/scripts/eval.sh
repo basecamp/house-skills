@@ -6,12 +6,15 @@
 # Run after session completes to verify protocol compliance.
 #
 # Usage: eval.sh [session-path] [--mid-session]
-#   Default: .claude/ralph-lisa-loop-session.md
+#   Default: tmp/ralph-lisa-loop-session.md
 #   --mid-session: run structural checks only (1, 2, 12, 13), skip completion checks
 
 # Do NOT use set -e — all checks must run even if earlier ones fail.
 
-SESSION=".claude/ralph-lisa-loop-session.md"
+# Resolve default session path relative to git repo root (like stop-hook.sh),
+# falling back to cwd if git is unavailable.
+GIT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+SESSION="$GIT_ROOT/tmp/ralph-lisa-loop-session.md"
 MID_SESSION=false
 for arg in "$@"; do
   if [[ "$arg" == "--mid-session" ]]; then
