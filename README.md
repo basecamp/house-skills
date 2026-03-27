@@ -1,5 +1,5 @@
 ```bash
-npx skills add basecamp/dev-skills
+npx skills add basecamp/house-skills
 ```
 
 | Skill | Description |
