@@ -1,5 +1,5 @@
 ---
-name: zizmor-resolution
+name: harden-github-actions
 description: >
   Use when resolving zizmor warnings in GitHub Actions workflows, hardening CI
   pipelines, or pinning actions to SHA hashes. Covers artipacked, template-injection,
