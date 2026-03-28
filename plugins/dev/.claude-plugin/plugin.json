@@ -1,0 +1,14 @@
+{
+  "name": "dev",
+  "version": "1.0.0",
+  "description": "AI-assisted development workflow — PR reviews, plan-implement loops, and expert consultation",
+  "author": { "name": "37signals", "email": "support@37signals.com" },
+  "homepage": "https://github.com/basecamp/house-skills",
+  "repository": "https://github.com/basecamp/house-skills",
+  "license": "MIT",
+  "skills": [
+    "./skills/address-pr-reviews/",
+    "./skills/ralph-lisa-loop/",
+    "./skills/consult-outside-expert/"
+  ]
+}

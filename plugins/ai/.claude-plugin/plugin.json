@@ -1,0 +1,13 @@
+{
+  "name": "ai",
+  "version": "1.0.0",
+  "description": "AI skill development — crafting agent skills and writing install documentation for autonomous execution",
+  "author": { "name": "37signals", "email": "support@37signals.com" },
+  "homepage": "https://github.com/basecamp/house-skills",
+  "repository": "https://github.com/basecamp/house-skills",
+  "license": "MIT",
+  "skills": [
+    "./skills/skill-crafting/",
+    "./skills/install-md/"
+  ]
+}
