@@ -45,7 +45,9 @@ Always work in this order. Each step is a separate commit.
 
 ## Running pinact
 
-Run `pinact run --min-age 10` from the repository root. This pins all actions in `.github/workflows/` to SHA hashes, skipping any versions published less than 10 days ago.
+Run `pinact run --min-age 7` from the repository root. This pins all actions in `.github/workflows/` to SHA hashes, skipping any versions published less than 7 days ago.
+
+**This value must match `default-days` in `dependabot.yml`** — otherwise dependabot will propose updates that pinact refuses to pin, or pinact will pin versions dependabot has not yet cleared.
 
 ## Running zizmor
 
@@ -102,7 +104,7 @@ full decision guidance, suppression checklists, and examples. Only read the rule
 | `cache-poisoning` | `references/rule-cache-poisoning.md` | Suppress (default); revert auto-fixes; only escalate if custom cache keys |
 | `unpinned-images` | `references/rule-unpinned-images.md` | Suppress (default); digest pinning is nontrivial |
 | `dependabot-execution` | `references/rule-dependabot-execution.md` | Fix or suppress with 3-point checklist |
-| `dependabot-cooldown` | `references/rule-dependabot-cooldown.md` | Always fix (add `cooldown: default-days: 10` to all ecosystems) |
+| `dependabot-cooldown` | `references/rule-dependabot-cooldown.md` | Always fix (add `cooldown: default-days: 7` to all ecosystems) |
 
 Permission mappings for `excessive-permissions` are in `references/permission-mappings.md`.
 
@@ -148,7 +150,7 @@ lint-actions:
         advanced-security: false
 ```
 
-Use version tags, not SHA hashes — run `pinact run --min-age 10` immediately after adding
+Use version tags, not SHA hashes — run `pinact run --min-age 7` immediately after adding
 this job to pin them. This ensures the SHAs match what pinact produces for the rest of the
 workflow.
 
