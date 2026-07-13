@@ -49,6 +49,17 @@ Run `pinact run --min-age 7` from the repository root. This pins all actions in 
 
 **This value must match `default-days` in `dependabot.yml`** — otherwise dependabot will propose updates that pinact refuses to pin, or pinact will pin versions dependabot has not yet cleared.
 
+**Do not re-run `pinact run` after adding inline suppressions.** pinact requires the
+`# vX.Y.Z` version comment to sit immediately after the SHA. When a `zizmor: ignore` comment
+sits between the SHA and the version comment (the placement dependabot requires, see
+[Suppression Format](#suppression-format)), a re-run rewrites the line and silently deletes
+the suppression. This is safe in practice because pinact runs only during this one-time
+hardening pass: it is not added to CI, `bin/ci`, or `bin/setup`, and dependabot handles later
+version bumps by updating the SHA and the trailing `# vX.Y.Z` while preserving the comment in
+between. So pin first (this step), then add suppressions while addressing findings, and do not
+pin again. If you must re-pin later, re-add the suppressions afterward and verify with
+`zizmor`.
+
 ## Running zizmor
 
 **Always run zizmor with a GitHub token** so that online audits (like `ref-version-mismatch`
@@ -121,6 +132,21 @@ Always use inline comments with the rule name and a reason:
 
 The `--` separator before the reason is a convention for readability. Never suppress without
 a reason. If you can't articulate why the fix would break something, apply the fix instead.
+
+### Suppressing on a pinned action
+
+When the suppression lands on a `uses:` line that pinact has pinned, the `zizmor: ignore`
+comment goes **between the SHA and the version-pin comment**, leaving `# vX.Y.Z` last:
+
+```yaml
+uses: ruby/setup-ruby@<sha> # zizmor: ignore[cache-poisoning] -- reason # v1.302.0
+```
+
+Dependabot reads the trailing `# vX.Y.Z` comment to track the pinned version, so it must be
+the last comment on the line. Do not put the version comment first (`# v1.302.0 # zizmor:
+...`): pinact tolerates that order, but dependabot will no longer recognize the pin and will
+stop proposing updates for that action. This ordering interacts with re-running pinact, so
+read the warning under "Running pinact".
 
 ## Standard Zizmor CI Job
 

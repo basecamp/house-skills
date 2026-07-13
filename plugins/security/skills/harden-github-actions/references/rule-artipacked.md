@@ -19,5 +19,5 @@ If you cannot confirm all three, apply the fix. If fixing would break the workfl
 cannot confirm all three, **stop and report the finding — do not suppress.**
 
 ```yaml
-- uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2 # zizmor: ignore[artipacked] -- credentials needed for git push
+- uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # zizmor: ignore[artipacked] -- credentials needed for git push # v6.0.2
 ```

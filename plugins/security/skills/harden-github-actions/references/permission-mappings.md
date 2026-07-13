@@ -57,6 +57,7 @@ documented permission requirements before proceeding. Then add it to this table.
 | `securego/gosec` | none | Runs gosec in Docker; no token input. If uploading SARIF via `github/codeql-action/upload-sarif`, that action needs `security-events: write`. |
 | `sigstore/cosign-installer` | none | Only installs cosign. Subsequent cosign *commands* need `id-token: write` for OIDC keyless signing. |
 | `softprops/action-gh-release` | `contents: write` | + `discussions: write` if using `discussion_category_name` |
+| `ruby/actions` (`ruby_versions.yml` reusable workflow) | none | Caller job needs `permissions: {}`. Fetches the CI version list from cache.ruby-lang.org via a `run:` script; no checkout, no GitHub API, no GITHUB_TOKEN. |
 | `rubygems/configure-rubygems-credentials` | `id-token: write` | + `contents: write` only if using `bundle exec rake release` for git push |
 | `zizmorcore/zizmor-action` | none | With `advanced-security: false` (recommended in this skill). With `advanced-security: true`: `security-events: write`; private repos also need `contents: read`, `actions: read`. |
 | `zzak/action-discord` | `contents: read` | Reads commit metadata for Discord webhook notifications |
