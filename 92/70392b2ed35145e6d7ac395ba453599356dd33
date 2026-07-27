@@ -1,0 +1,37 @@
+plugins/ai/skills/agents-md/SKILL.md
+  s_1ad9dc053c5abc::t_6b15bd2145bc54 1-85,95-118
+  s_1ad9dc053c5abc::t_3bfc76df93315b 86-90
+  s_1ad9dc053c5abc::t_fe5f78e2f2b08c 92-94
+  s_1ad9dc053c5abc::t_184dc373017eae 91
+README.md
+  s_1ad9dc053c5abc::t_85609f217869d6 27
+plugins/ai/skills/agents-md/references/spec.md
+  s_1ad9dc053c5abc::t_223b7d600ceb6c 5-27
+  s_1ad9dc053c5abc::t_3faff384f4b8d1 1-4,28-78,91-104
+  s_1ad9dc053c5abc::t_5070b9d12e6d99 79-81,88-90
+  s_1ad9dc053c5abc::t_bb24a942377e60 82-87
+plugins/ai/skills/agents-md/references/guide.md
+  s_1ad9dc053c5abc::t_29151a611de66c 1-70,72-75
+  s_1ad9dc053c5abc::t_33a8b80ebdd6d9 71
+plugins/ai/.claude-plugin/plugin.json
+  s_1ad9dc053c5abc::t_b846aabe916216 11-12
+  s_1ad9dc053c5abc::t_a31195311e5348 3-4
+skills/agents-md
+  s_1ad9dc053c5abc::t_97a1b74c239d90 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "9270392b2ed35145e6d7ac395ba453599356dd33",
+  "prompts": {},
+  "sessions": {
+    "s_1ad9dc053c5abc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2cc39af5-a0d6-44ec-895a-2638d7b25a46",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
