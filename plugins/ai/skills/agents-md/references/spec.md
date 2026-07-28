@@ -56,7 +56,7 @@ description: >
 ---
 ```
 
-**Activation lives entirely in `description`.** Claude Code selects skills on it, as do Codex and Copilot. A `triggers:` list is not part of the [Agent Skills spec](https://agentskills.io/specification) and is not read — keyword lists there are dead weight.
+**Activation runs on `description`, optionally extended by `when_to_use`.** Claude Code selects on the two together — `when_to_use` is appended to `description` in the skill listing, and the pair shares a 1,536-character cap, so put the key use case first. Codex and Copilot read the description. A `triggers:` key is documented by neither the [Agent Skills spec](https://agentskills.io/specification) nor [Claude Code](https://code.claude.com/docs/en/skills), so don't rely on one to make a skill fire; several skills in this repository still carry keyword lists under it.
 
 Write the description as *what it does* plus *when you'd want it*. The "when" is what makes it fire.
 

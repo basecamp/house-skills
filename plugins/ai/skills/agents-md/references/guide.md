@@ -6,7 +6,7 @@ Read it line by line and classify each line OBVIOUS / GOTCHA / TASTE / POINTER. 
 
 Then check, in this order:
 
-1. **Every command.** Does the task or script exist? In trusted mode, run it. Fabricated commands are the most common defect, and they survive for years because nobody runs the docs.
+1. **Every command.** Does the task or script exist? A script is a path, so its existence is provable in either mode. In trusted mode you may additionally run the safe ones — tests, setup, anything local and reversible — but establish deploys, database resets, and anything touching a shared service from source, `--help`, or a dry run instead. Never deploy to prove a line of documentation. Fabricated commands are the most common defect, and they survive for years because nobody checks the docs.
 2. **Every path and link.** Does it resolve today?
 3. **Every literal** — ports, versions, limits. Read it from the file that defines it. A version pin cited from a linter config is a favorite failure: the linter's target version and the actual runtime pin drift apart, and the file confidently states the wrong one.
 4. **Duplication of anything already in context** — a shared or global instruction file, the README, a script's own header.
@@ -68,7 +68,7 @@ Resolve by deciding which file **owns** the rule, stating it once there, and del
 
 ## Verify what you wrote
 
-Perform the static checks above. In trusted mode, execute every command that survived the cut.
+Perform the static checks above. In trusted mode, execute the safe commands among those that survived the cut, and establish the consequential ones without executing them.
 
 Then measure. Where the harness exposes a context breakdown, check the always-on total against the budget — word counts are a proxy, and should be reported as one rather than as a token measurement.
 

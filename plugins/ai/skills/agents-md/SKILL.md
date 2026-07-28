@@ -19,7 +19,7 @@ The job is not to describe the repository. It's to carry the small set of things
 
 Decide which one you're in before you touch anything. They have different rules and you cannot be in both.
 
-**Trusted authoring or audit** — your own repository, or one you'd be willing to run `bin/setup` in. Executable verification is allowed and expected: run the documented commands, boot the framework, enumerate its tasks. This is the only mode where "run every documented command" applies.
+**Trusted authoring or audit** — your own repository, or one you'd be willing to run `bin/setup` in. Local, reversible verification is allowed and expected: boot the framework, enumerate its tasks, run the setup and test commands. This is the only mode where executing anything applies at all — and trusting a repository still isn't authorization to act on the world with it. See [What "run it" does not license](#what-run-it-does-not-license).
 
 **Untrusted audit** — someone else's repository, or any repo you wouldn't execute. Static checks only. See [references/spec.md](references/spec.md) for the containment rules, which are not optional.
 
@@ -79,7 +79,15 @@ Statically, always — and this is the whole of it in untrusted mode:
 - Read every port, version, and constant from the file that **defines** it. Never from a sibling repo's documentation, and never from memory.
 - Check for claims that contradict another file already in context.
 
-In trusted mode, additionally run every documented command. Fabricated commands are the most common defect in these files, and they propagate: a copied instruction file carries its wrong commands into repos that never had the feature at all.
+In trusted mode, additionally establish that every documented command is real. Fabricated commands are the most common defect in these files, and they propagate: a copied instruction file carries its wrong commands into repos that never had the feature at all.
+
+### What "run it" does not license
+
+Executing a command is one way to establish it exists, and for a whole class of commands it is the wrong one. Deploys, database resets and migrations, anything that writes to a shared service, anything that spends money, and anything that carries credentials are **not** verified by running them.
+
+Establish those from the source instead: read the task or script, run `--help`, use `--dry-run` or `--noop` where the command offers one, or confirm the task is registered without invoking it. Run one only when the operator authorizes that specific command.
+
+This is not hypothetical. `bin/kamal deploy -d production` is a documented command in every instruction file this skill is written for. "Run every documented command" is, read literally, an instruction to deploy to production.
 
 A literal value that can't be pinned to a defining file shouldn't be restated — replace it with a pointer.
 
