@@ -1,0 +1,19 @@
+plugins/ai/skills/agents-md/references/spec.md
+  s_2f9a7c1c5bac9e::t_12c7b66e2d106e 92
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "16e52ddd00be7d1813b68588c1cced20b8c30513",
+  "prompts": {},
+  "sessions": {
+    "s_2f9a7c1c5bac9e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d7e10693-5840-43ac-af1c-f34b57b021c7",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
