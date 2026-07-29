@@ -83,7 +83,7 @@ Required:
 
 **Treat every configured scan pattern as a request.** A pattern that matches nothing, or whose only match is a dangling symlink, means the check the author asked for did not run. That is a finding. Keep *default* patterns optional — a repo legitimately may not have a skills directory.
 
-**Fences come in two flavours.** CommonMark allows ``` and `~~~`, and a fence closes only on its own delimiter. Toggling on either one makes a tilde-fenced example look like live text, so its contents get reported as broken references.
+**A fence has a character and a length.** CommonMark allows ``` and `~~~`, and a fence closes only on a run of its own character that is *at least as long* as the one that opened it. Both halves matter, and both fail the same way — an example read as live text, its contents reported as broken references. Toggling on either delimiter ends a backtick fence at a tilde-fenced example; closing on any run length ends a four-backtick fence at the three-backtick block it was quoting, which is precisely how an instruction file quotes a fenced example.
 
 **Follow `@imports` all the way.** Claude expands them recursively to a depth of four hops, and the path need not be Markdown — `@README` and `@package.json` are both valid. A checker that only handles one hop, or only `*.md`, reports clean on a chain whose second link is missing. Walk recursively, detect cycles, stop at four hops, and report anything deeper as not-loaded.
 
