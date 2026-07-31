@@ -4,8 +4,7 @@ set -euo pipefail
 # Validate the symlink-inversion structure:
 # - Every entry in skills/ is a symlink pointing into a plugin's skills/ dir
 # - Every skill in a plugin's skills/ has a corresponding symlink in skills/
-# - Every skill referenced in plugin.json exists in that plugin's skills/ dir
-# - plugin.json skill paths normalize to exactly skills/<name>
+# - No plugin.json declares a skills field (skills are auto-discovered)
 
 errors=0
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -83,60 +82,29 @@ for plugin_dir in "$root"/plugins/*/; do
   done < <(find "$skills_dir" -mindepth 1 -maxdepth 1)
 done
 
-# 3. Every skill path in plugin.json exists in that plugin's skills/ dir
+# 3. No plugin.json may declare a skills field. Skills are auto-discovered from
+# the plugin's skills/ directory; the field is redundant, and its path format
+# has broken installs before (issue #23).
 for plugin_dir in "$root"/plugins/*/; do
   [ -d "$plugin_dir" ] || continue
   plugin="$(basename "$plugin_dir")"
   manifest="$plugin_dir/.claude-plugin/plugin.json"
   [ -f "$manifest" ] || continue
 
-  if ! skill_names="$(python3 - "$manifest" <<'PYEOF'
-import json, os, sys
+  if ! python3 - "$manifest" <<'PYEOF'
+import json, sys
 
-manifest = sys.argv[1]
-with open(manifest) as f:
+with open(sys.argv[1]) as f:
     data = json.load(f)
 
-invalid = False
-skills = data.get("skills", [])
-if isinstance(skills, list):
-    for path in skills:
-        normalized = os.path.normpath(path)
-        parts = normalized.split(os.sep)
-        if len(parts) == 2 and parts[0] == "skills":
-            print(parts[1])
-        else:
-            print(f"invalid skill path: {path}", file=sys.stderr)
-            invalid = True
-elif isinstance(skills, dict):
-    for name in skills:
-        print(name)
-
-if invalid:
-    sys.exit(1)
+sys.exit(1 if "skills" in data else 0)
 PYEOF
-)"; then
-    echo "ERROR: plugins/$plugin plugin.json has invalid skill paths"
+  then
+    echo "ERROR: plugins/$plugin plugin.json declares a 'skills' field — remove it." \
+         "Skills are auto-discovered from the plugin's skills/ directory; the field is" \
+         "redundant and its path format has broken installs before (issue #23)"
     errors=$((errors + 1))
   fi
-
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    if [ ! -d "$plugin_dir/skills/$name" ]; then
-      echo "ERROR: plugins/$plugin plugin.json references '$name' but plugins/$plugin/skills/$name/ does not exist"
-      errors=$((errors + 1))
-    fi
-  done <<< "$skill_names"
-
-  # Reverse: every skill dir should be in plugin.json
-  for skill_dir in "$plugin_dir"/skills/*/; do
-    [ -d "$skill_dir" ] || continue
-    name="$(basename "$skill_dir")"
-    if ! echo "$skill_names" | grep -Fqx -- "$name"; then
-      echo "ERROR: plugins/$plugin/skills/$name exists but is not in plugin.json"
-      errors=$((errors + 1))
-    fi
-  done
 done
 
 if [ "$errors" -gt 0 ]; then
