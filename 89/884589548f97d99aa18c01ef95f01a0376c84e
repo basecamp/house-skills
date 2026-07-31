@@ -1,0 +1,28 @@
+scripts/validate-structure
+  s_99088a68e53b37::t_8047c6c2278162 94-95,101-103,105-106,111-112
+  s_ee36af3a7711b9::t_f34efb5bdf50ba 113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.18",
+  "base_commit_sha": "89884589548f97d99aa18c01ef95f01a0376c84e",
+  "prompts": {},
+  "sessions": {
+    "s_99088a68e53b37": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d7458bf4-8947-443b-9b73-458edb8b4cd2",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    },
+    "s_ee36af3a7711b9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f8fd1-322e-7880-85cc-ab6c3e75c537",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
