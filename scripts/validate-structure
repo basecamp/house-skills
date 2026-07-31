@@ -91,18 +91,25 @@ for plugin_dir in "$root"/plugins/*/; do
   manifest="$plugin_dir/.claude-plugin/plugin.json"
   [ -f "$manifest" ] || continue
 
-  if ! python3 - "$manifest" <<'PYEOF'
+  status=0
+  python3 - "$manifest" <<'PYEOF' || status=$?
 import json, sys
 
 with open(sys.argv[1]) as f:
     data = json.load(f)
 
-sys.exit(1 if "skills" in data else 0)
+if not isinstance(data, dict):
+    sys.exit(2)
+sys.exit(3 if "skills" in data else 0)
 PYEOF
-  then
+
+  if [ "$status" -eq 3 ]; then
     echo "ERROR: plugins/$plugin plugin.json declares a 'skills' field — remove it." \
          "Skills are auto-discovered from the plugin's skills/ directory; the field is" \
          "redundant and its path format has broken installs before (issue #23)"
+    errors=$((errors + 1))
+  elif [ "$status" -ne 0 ]; then
+    echo "ERROR: plugins/$plugin plugin.json is not a JSON object"
     errors=$((errors + 1))
   fi
 done
