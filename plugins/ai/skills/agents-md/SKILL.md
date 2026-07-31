@@ -97,7 +97,7 @@ Substring matching fails in both directions. `DEFAULT_PORT=3001` changed to `999
 
 Mutation-test each pin from both sides — edit the defining occurrence while leaving a secondary one, then edit the document's claim while leaving the source correct.
 
-A pin protects the literal it captures, and nothing downstream of it. Prose that *derives* a quantity — a margin, a headroom, a total, a "so this is safe" — has no defining file to point at, so no pin can reach it. When the underlying literal moves, the pin fires and the derived sentence stays, now unsupported. Either recompute the derivation where it's written, or delete it and leave the reader the literal.
+A pin protects the literal it captures, and nothing downstream of it. Prose that *derives* a quantity — a margin, a headroom, a total, a "so this is safe" — has no single defining assignment to compare against, so a simple pin cannot reach it: when the underlying literal moves, the pin fires on the literal and the derived sentence stays, now unsupported. What does reach it is a check that captures the documented result *and* every authoritative input, then recomputes the relation — `documented_headroom == limit - usage`. Write that where you own the repo. Where you don't, and CI isn't yours to add to, recompute the derivation by hand where it's written, or delete it and leave the reader the literal.
 
 In a repository you own, wire these checks into CI. A dead path or a broken pin then fails loudly on the commit that introduced it, which is the whole reason to prefer real paths over invented examples.
 
@@ -119,9 +119,9 @@ Be honest about the residual, because it's where the real defects live:
 
 - **Wrong semantics for a real flag.** No assertion distinguishes a correct description from a confident wrong one. A claim like "`--once` has no effect with `-s`" passes every structural check and is simply false.
 - **An exemplar that resolves but no longer exemplifies.**
-- **A rule that is true and not followed.** The codebase does the opposite, at scale, and every structural check still passes — the rule is well-formed, the paths resolve, nothing is fabricated. Surface it only when following the rule would visibly diverge from the code the agent is about to edit, or when the file's own example is the thing being contradicted. A rule that is merely unevenly applied is not worth a line. This is never a documentation defect — the guidance may be right and the code wrong — so report both counts and leave the choice to the owner.
+- **A rule that is true and not followed.** The codebase does the opposite, and every structural check still passes — the rule is well-formed, the paths resolve, nothing is fabricated. Key on *how systematically* the code contradicts it: a rule the repository ignores wholesale is worth surfacing, and so is one the file's own example contradicts. A rule that is merely unevenly applied — most modules follow it, a handful don't — is not. Don't scope this to the code being edited; in a standalone audit that is the instruction file and nothing else, which would suppress exactly the whole-repo contradictions worth reporting.
 
-All three stay editorial. The fix is not writing the claim unless you checked it.
+All three stay editorial: they need a reader who knows the system, not a checker. For the first two, the fix is not writing the claim unless you checked it. For the third there is nothing to unwrite — the claim was checked and is true, so it is either stale guidance or code debt. Show the evidence, name both readings, and leave the choice to the owner.
 
 ## Further reading
 
