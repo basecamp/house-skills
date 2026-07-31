@@ -24,20 +24,18 @@ browsing view for development.
 2. Create `plugins/{plugin}/skills/SKILL_NAME/SKILL.md` with YAML frontmatter
 3. Add supporting files to `plugins/{plugin}/skills/SKILL_NAME/references/` if needed
 4. Create a symlink: `cd skills && ln -s ../plugins/{plugin}/skills/SKILL_NAME SKILL_NAME`
-5. Add the skill path to `plugins/{plugin}/.claude-plugin/plugin.json` in the `skills` array
-6. Add entry to README
+5. Add entry to README
 
 ### Moving a skill between plugins
 
 1. Move the directory from the old plugin to the new one
 2. Update the symlink in `skills/` to point to the new location
-3. Update both plugins' `plugin.json` files
 
 ### CI gate
 
 Run `bin/ci` before committing and opening PRs. It validates the symlink/plugin
-structure — every skill symlink resolves, every plugin.json matches its skills
-directory, and nothing in `skills/` is a real file.
+structure — every skill symlink resolves, no plugin.json declares a `skills`
+field, and nothing in `skills/` is a real file.
 
 ### Do not create files directly in skills/
 

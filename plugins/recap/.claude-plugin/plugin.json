@@ -1,15 +1,9 @@
 {
   "name": "recap",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Activity digests — pluggable source fetchers, progressive timescale synthesis, audience-aware composition",
   "author": { "name": "37signals", "email": "support@37signals.com" },
   "homepage": "https://github.com/basecamp/house-skills",
   "repository": "https://github.com/basecamp/house-skills",
-  "license": "MIT",
-  "skills": [
-    "skills/recap",
-    "skills/basecamp-activity",
-    "skills/github-activity",
-    "skills/git-activity"
-  ]
+  "license": "MIT"
 }
