@@ -77,7 +77,7 @@ Statically, always — and this is the whole of it in untrusted mode:
 
 - Resolve every path, every link, and every cited exemplar.
 - Read every port, version, and constant from the file that **defines** it. Never from a sibling repo's documentation, and never from memory.
-- Check for claims that contradict another file already in context.
+- Check for claims that contradict another file already in context — and for claims that contradict a *later passage of the file itself*, which is what an accreted file does when a summary line at the top stops matching a detailed section further down.
 
 In trusted mode, additionally establish that every documented command is real. Fabricated commands are the most common defect in these files, and they propagate: a copied instruction file carries its wrong commands into repos that never had the feature at all.
 
@@ -96,6 +96,8 @@ Pin by **capturing both ends**: a regex locating the claim in the document that 
 Substring matching fails in both directions. `DEFAULT_PORT=3001` changed to `9999` while a help string still reads `3001` passes a presence check. Worse, a *document* edited to a wrong value passes too — searching for the old value finds nothing and the pin is skipped exactly when it should fire. And a bare number is ambiguous: "37" also occurs in "37signals".
 
 Mutation-test each pin from both sides — edit the defining occurrence while leaving a secondary one, then edit the document's claim while leaving the source correct.
+
+A pin protects the literal it captures, and nothing downstream of it. Prose that *derives* a quantity — a margin, a headroom, a total, a "so this is safe" — has no single defining assignment to compare against, so a simple pin cannot reach it: when the underlying literal moves, the pin fires on the literal and the derived sentence stays, now unsupported. What does reach it is a check that captures the documented result *and* every authoritative input, then recomputes the relation — `documented_headroom == limit - usage`. Such a check has more than two ends, so mutation-test every one: each input at its *defining* occurrence, independently, plus the documented result. An input captured from a secondary occurrence gives you a check that stays green when the real definition moves — the same vacuous success a substring pin gives you. Write that where you own the repo. Where you don't, and CI isn't yours to add to, recompute the derivation by hand where it's written, or delete it and leave the reader the literal.
 
 In a repository you own, wire these checks into CI. A dead path or a broken pin then fails loudly on the commit that introduced it, which is the whole reason to prefer real paths over invented examples.
 
@@ -117,8 +119,9 @@ Be honest about the residual, because it's where the real defects live:
 
 - **Wrong semantics for a real flag.** No assertion distinguishes a correct description from a confident wrong one. A claim like "`--once` has no effect with `-s`" passes every structural check and is simply false.
 - **An exemplar that resolves but no longer exemplifies.**
+- **A rule that is true and not followed.** The codebase does the opposite, and every structural check still passes — the rule is well-formed, the paths resolve, nothing is fabricated. Key on *how systematically* the code contradicts it: a rule the repository ignores wholesale is worth surfacing, and so is one the file's own example contradicts. A rule that is merely unevenly applied — most modules follow it, a handful don't — is not. Don't scope this to the code being edited; in a standalone audit that is the instruction file and nothing else, which would suppress exactly the whole-repo contradictions worth reporting.
 
-Both stay editorial. The fix is not writing the claim unless you checked it.
+All three stay editorial: they need a reader who knows the system, not a checker. For the first two, the fix is not writing the claim unless you checked it. For the third there is nothing to unwrite — the claim was checked and is true, so it is either stale guidance or code debt. Show the evidence, name both readings, and leave the choice to the owner.
 
 ## Further reading
 
