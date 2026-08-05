@@ -317,8 +317,10 @@ unless it is unbuffered, and a crashing run is the one you most need it for.
 - **`valid_encoding?` is the wrong guard for "safe to hand to a UTF-8 parser."** It is
   unconditionally **true** for every single-byte encoding, so a check written against broken
   UTF-8 silently passes arbitrary bytes tagged `ASCII-8BIT`/`ISO-8859-1`/`Windows-1252`. Round 4
-  found this mistake made *independently at two layers* — an app's own transcode guard and
-  rinku's `ENC_CODERANGE_BROKEN` check. Guard on the **encoding**, not on validity.
+  found this mistake made *independently at two layers* — an application's own transcode guard,
+  and the `ENC_CODERANGE_BROKEN` check inside the C extension it fed. Guard on the **encoding**,
+  not on validity. (Gem unnamed on purpose: the extension is unfixed and its upstream is dead.
+  Re-apply the §7 disclosure test at close-out — a scent library is a skill, and skills ship.)
 
 ## A fix template that is right for one bug class and wrong for the other
 
