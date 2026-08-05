@@ -106,10 +106,14 @@ module Hunt
   # the easy way to guarantee the same pool: sufficient, not necessary. Check slot_size,
   # not bytesize. Get this wrong and the stale pointer reads intact data => false negative.
   #
-  # For a HEAP subject (>boundary) the bytes are a malloc block and ANY filler size
-  # reclaims it -- the size-pool argument does not apply and fillers need not be retained.
-  # If churn appears not to bite a heap subject, the usual cause is that the subject is
-  # still RETAINED: nothing was freed to reclaim, which is correct, not a harness defect.
+  # For a HEAP subject (>boundary) the bytes are a malloc block, and smaller fillers do NOT
+  # reliably reclaim it: measured against a freed 5000-byte buffer, a 5000-byte filler left
+  # 0/5000 of the original bytes, while 1000B and 100B fillers each left 891/5000. Size-match
+  # here too, and check the FULL length with peek -- the first 16 bytes changed in every one
+  # of those cases, so a short peek reports success while most of the buffer is intact.
+  #
+  # If churn appears not to bite at all, the subject may simply still be RETAINED: nothing was
+  # freed to reclaim, which is correct, not a harness defect.
   def churn(rounds = 20, size = 100)
     rounds.times { 2000.times { +("Z" * size) } }
     GC.start

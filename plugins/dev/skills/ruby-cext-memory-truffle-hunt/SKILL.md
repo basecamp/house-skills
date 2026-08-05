@@ -77,11 +77,14 @@ PEM: an RSA-2048 private key is ~1675 bytes and a cert ~977 — heap. EC keys an
 are short.) A heap buffer is *stable* under compaction, **so a test using only a large string
 exercises liveness alone and will wrongly clear a gem that has the mobility bug.**
 
-**Length is a proxy, not the property.** A String that grew by `<<`, was built with
-`String.new(capacity:)`, or came from `File.read` / `IO#read` / `StringIO#read` is
-heap-allocated **even at 100 bytes** — and therefore stable under compaction. That is the same
-false negative running in the opposite direction, and it hits the realistic case: input read
-off a socket or file. Assert it, never infer it:
+**Length is a proxy, not the property.** Measured on ruby 4.0.6 and 3.4.10 (arm64-darwin), a
+String that grew by `<<`, was built with `String.new(capacity:)`, or came from `File.read` /
+`IO#read` / `StringIO#read` is heap-allocated **even at 100 bytes** — and therefore stable
+under compaction. That is the same false negative running in the opposite direction, and it
+hits the realistic case: input read off a socket or file.
+
+Treat that list as measured, not universal — construction internals change between releases.
+The assertion is the source of truth on whatever interpreter you are actually running:
 
 ```ruby
 raise "subject is not embedded" unless Hunt.embedded?(subject)
@@ -226,13 +229,26 @@ Matching the bytesize is the easy way to guarantee it, and is sufficient but not
 Nokogiri reported clean 3/3 until this was fixed. Always dump the old address to confirm:
 
 ```ruby
-Hunt.peek(old_addr, len)   # "ZZZZ..." good;  "<r><item>..." churn missed
+Hunt.peek(old_addr, len)   # read the FULL len, not the first bytes
 ```
 
-*Two limits.* This doesn't apply to a **heap** subject — its bytes are a malloc block and any
-filler size reclaims it; fillers need not be retained. And if churn seems not to bite a heap
-subject, the subject is usually still **retained** — nothing was freed, which is correct, not
-a defect.
+**Size-match for heap subjects too, and check the whole buffer.** A freed malloc block is not
+reliably reclaimed by smaller fillers. Measured against a freed 5000-byte buffer, counting how
+much of the original content survived:
+
+| filler | original bytes still present |
+|---|---|
+| 5000 (subject size) | **0 / 5000** |
+| 1000 | 891 / 5000 |
+| 100 | 891 / 5000 |
+
+A stale pointer reading past the first few bytes still finds real data. And **read the full
+length when you check** — the first 16 bytes changed in every row above, so a short peek
+reports success while most of the buffer is intact. That is exactly how this went unnoticed.
+
+*One genuine exception.* If churn seems not to bite, the subject may simply still be
+**retained** — nothing was freed, so there is nothing to reclaim. That is correct, not a
+defect. Establish which case you are in before adjusting the churn.
 
 **Lazy, one-shot registration.** If the C-side registration happens on first use and is then
 frozen or guarded, compacting *before* that first use registers the callback with the
@@ -240,9 +256,26 @@ post-move address and the bug cannot appear. openssl looked clean until a **warm
 was added before the compaction. Generally: exercise the object once, compact, then exercise
 again.
 
-**Verify which binary loaded.** RubyGems prefers a precompiled platform gem over a source build
-of the same version. Two nokogiri results were silently produced by the wrong `.bundle`. Print
-the loaded path; prefer `ruby -I<path>/lib` over `GEM_HOME`.
+**Verify which binary loaded — and that its contents are current.** Two separate traps:
+
+*Wrong file.* RubyGems prefers a precompiled platform gem over a source build of the same
+version, and gems often require a version-namespaced path (`google/4.0/protobuf_c`) that
+resolves to the installed gem before your staging directory. Two nokogiri results and one
+protobuf result were silently produced by the wrong `.bundle`. Print the loaded path; prefer
+`ruby -I<path>/lib` over `GEM_HOME`.
+
+*Right file, stale contents.* A correct path is not enough. Skip a rebuild — a `git stash pop`
+without re-running `make`, an edit that didn't trigger one — and the right filename holds the
+previous build, so every result after that silently describes code you are no longer testing.
+This produced a phantom "the fix doesn't work" that cost a real detour. **Checksum the artifact
+you built against the one that loaded**, and treat a mismatch as a failed run:
+
+```ruby
+shasum path/to/built.bundle  $(ruby -e 'require "gem"; puts $LOADED_FEATURES.grep(/gem_c\.bundle/).first')
+```
+
+The general rule: when a red/green comparison needs two builds, rebuild and re-stage *inside*
+the same step that runs the test, so the two can never drift apart.
 
 **The witness must not be a live local**, or conservative scanning pins it and it reports "did
 not move" while compaction ran fine.
