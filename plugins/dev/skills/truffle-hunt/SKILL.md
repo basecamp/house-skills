@@ -80,6 +80,16 @@ Audit **what production actually runs**, not what's newest.
 - Fetch the **pinned** source, not the newest, naming the version explicitly —
   `gem unpack NAME -v VERSION`, `npm pack NAME@VERSION`, `go mod download NAME@VERSION`.
   Record the path you audited next to the verdict.
+- **Name the platform too, wherever the lock pins one.** A version alone does not identify a
+  platform-specific artifact, and the payloads genuinely differ — different vendored library,
+  different compile flags, sometimes different sources. `gem unpack` takes only `-v`, so from a
+  macOS workstation it hands you the darwin gem for a lock pinning `x86_64-linux` and the
+  audit clears the wrong thing. Fetch the exact artifact, then unpack that:
+
+  ```sh
+  gem fetch NAME -v VERSION --platform x86_64-linux   # prints the resolved name,
+  gem unpack ./NAME-VERSION-x86_64-linux-gnu.gem      # which may be more specific than asked
+  ```
 - **Sweeping first-party code instead?** The corpus is every deployed branch, every vendored or
   generated copy, and anything built from a template. Enumerate it the same way, and be as
   explicit about what you excluded.
@@ -222,8 +232,15 @@ finding bugs.
 Report findings with severity, issue links, **explicit negatives**, and what's unresolved. The
 negatives and the unresolved list are what make the next round cheap.
 
-**Keep the reproducers.** Check the harness and one reproducer per confirmed class into the
-scent library's `references/`; a lesson in prose has to be re-derived, a reproducer just runs.
+**Keep the reproducers that are safe to publish.** Check the harness and one reproducer per
+confirmed class into the scent library's `references/`; a lesson in prose has to be
+re-derived, a reproducer just runs. But a scent library is a skill, and skills ship — so
+committing a reproducer *is* publishing it. Re-apply the §7 disclosure test at this step:
+anything routed privately, and anything against first-party code, goes in sanitised — the
+mechanism, the harness, the assertion, the negative signals — with the working exploit path
+left out, or stays internal with a pointer from here. The scent survives sanitising; that is
+the part worth keeping.
+
 Feed new scents, burned false positives and precedents back too — a hunt that doesn't update
 its scent library rediscovers everything next time.
 
@@ -242,4 +259,4 @@ its scent library rediscovers everything next time.
 - [ ] Every delegated finding independently re-reproduced
 - [ ] Findings routed; disclosure channel chosen deliberately
 - [ ] Every corpus member labelled; reachable vs latent shown
-- [ ] Reproducers and new scents checked into the scent library
+- [ ] Reproducers and new scents checked into the scent library, sanitised where §7 requires
