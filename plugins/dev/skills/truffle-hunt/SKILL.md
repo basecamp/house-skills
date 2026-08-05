@@ -98,6 +98,24 @@ Audit **what production actually runs**, not what's newest.
   Record the path you audited next to the verdict. `gem unpack` and `go mod download` are inert;
   `npm pack` is not, on any spec that isn't a registry `NAME@VERSION` — see the trust boundary,
   and fetch those inside the sandbox or with `--ignore-scripts`.
+- **A version is not a source.** `NAME@VERSION` resolves through whatever registry the
+  *auditing* machine is configured with, so it quietly substitutes the public package for a
+  private-registry, tarball or git pin — and a fork that kept upstream's version number gets
+  cleared by auditing upstream. The lock records the real source: npm's `resolved` is "the place
+  where the package was actually resolved from" and `integrity` is the SRI hash of the artifact
+  that was unpacked; Bundler's `GIT remote:`/`revision:` and `PATH remote:` sections say the same
+  for gems. Fetch the recorded source, then prove you got that artifact:
+
+  ```sh
+  jq -r '.packages["node_modules/NAME"] | .resolved, .integrity' package-lock.json
+  npm pack "$RESOLVED"
+  echo "sha512-$(openssl dgst -sha512 -binary NAME-VERSION.tgz | base64)"   # == integrity
+  ```
+
+  The hash is the part that actually pins it: `registry.npmjs.org` in `resolved` is a magic
+  value meaning *the currently configured registry*, so even the recorded URL can resolve
+  somewhere else on your machine. `NAME@VERSION` is only equivalent once the hash matches. A git
+  or tarball `resolved` is a build and not a fetch — see the trust boundary.
 - **Name the platform too, wherever the lock pins one.** A version alone does not identify a
   platform-specific artifact, and the payloads genuinely differ — different vendored library,
   different compile flags, sometimes different sources. `gem unpack` takes only `-v`, so from a
