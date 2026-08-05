@@ -117,6 +117,28 @@ module Hunt
     ObjectSpace.dump(obj)[/"address":"([^"]+)"/, 1]
   end
 
+  # Addresses arrive in two forms and only one of them survives `to_i`.
+  #
+  #   bytes_ptr    -> Integer                4877322120
+  #   object_addr  -> String, hex, 0x-prefix "0x122b60788"
+  #
+  # `"0x122b60788".to_i` is 0. So `peek(object_addr(x), n)` -- the exact call the docstring
+  # below tells you to make -- hit the null guard and returned "<null>" EVERY TIME, for
+  # every object, on every run. The churn proof the harness advertises was unobtainable,
+  # silently, in the false-negative direction. Parse before guarding, and raise on garbage:
+  # a zero that arrives by accident must not read like a zero that was measured.
+  def to_addr(addr)
+    case addr
+    when Integer then addr
+    when String
+      raise ArgumentError, "not an address: #{addr.inspect}" \
+        unless addr =~ /\A(?:0[xX])?\h+\z/
+
+      Integer(addr, 16)
+    else Integer(addr)
+    end
+  end
+
   # Read back what is at an address now. Use this to PROVE the churn bit --
   # if the original bytes are still there, a "survived" result means nothing.
   #
@@ -126,7 +148,8 @@ module Hunt
   # fault` mid-run reads exactly like "the gem crashed" -- a false positive from the
   # instrument.
   def peek(addr, len)
-    return "<null>" if addr.to_i.zero?
+    addr = to_addr(addr)
+    return "<null>" if addr.zero?
 
     r, w = IO.pipe
     pid = fork do
@@ -278,6 +301,16 @@ end
 if __FILE__ == $PROGRAM_NAME
   puts RUBY_DESCRIPTION
   puts "embedded boundary: #{Hunt.embedded_boundary} (first NON-embedded length)"
+
+  # Self-check the instrument before trusting it on a gem. peek shipped returning "<null>"
+  # unconditionally, and nothing in this file would have told you.
+  probe = +("PEEKPEEKPEEK" * 4)
+  %w[bytes_ptr object_addr].each do |how|
+    got = Hunt.peek(Hunt.public_send(how, probe), 12)
+    warn "[harness] peek via #{how}: #{got.inspect}"
+    raise "peek(#{how}) is broken -- it cannot read a live object" \
+      if got == "<null>" || got == "<unreadable>"
+  end
 
   $subject = [+("a" * 100), +("a" * 5000)]
   before = $subject.map { |s| Hunt.bytes_ptr(s) }
