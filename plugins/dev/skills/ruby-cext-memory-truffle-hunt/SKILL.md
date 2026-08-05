@@ -310,9 +310,18 @@ previous build, so every result after that silently describes code you are no lo
 This produced a phantom "the fix doesn't work" that cost a real detour. **Checksum the artifact
 you built against the one that loaded**, and treat a mismatch as a failed run:
 
-```ruby
-shasum path/to/built.bundle  $(ruby -e 'require "gem"; puts $LOADED_FEATURES.grep(/gem_c\.bundle/).first')
+```sh
+# Match both extensions and FAIL when nothing loaded. A bare `\.bundle` grep prints
+# nothing on Linux, where the extension is `.so` — and `shasum` on the built artifact
+# alone still exits 0, so the check that exists to catch a stale binary reports a pass.
+dlext=$(ruby -e 'puts RbConfig::CONFIG["DLEXT"]')
+loaded=$(ruby -Ipath/to/lib -rharness -e 'require "the_gem"; puts Hunt.loaded_binary("gem_c")')
+[ -n "$loaded" ] || { echo "no loaded binary matched gem_c — failed run, not a pass"; exit 1; }
+shasum "path/to/built.$dlext" $loaded
 ```
+
+`Hunt.loaded_binary` matches `\.(bundle|so)\z` and returns **every** hit, not the first:
+two loaded candidates is itself the finding, and `shasum` over all of them shows it.
 
 The general rule: when a red/green comparison needs two builds, rebuild and re-stage *inside*
 the same step that runs the test, so the two can never drift apart.
@@ -343,7 +352,12 @@ as an existence proof, not a rate.
 - [ ] Discriminator applied — in-call uses discarded before testing
 - [ ] Copying semantics settled by mutation, and the *linked* library version recorded
 - [ ] Both size regimes run
-- [ ] Churn lands in the subject's `slot_size` pool; old address dumped to prove it bit
+- [ ] *Embedded* subject: churn lands in the subject's **`slot_size` pool** — checked as
+      `slot_size`, never inferred from bytesize
+- [ ] *Heap* subject: churn **size-matched to the subject's `bytesize`** — a smaller filler
+      leaves most of the freed malloc block intact (891/5000 measured)
+- [ ] Either way, the old address peeked at its **full length** to prove the churn bit — the
+      first 16 bytes change even when the rest of the buffer survives
 - [ ] Lazy registration exercised before compaction
 - [ ] Loaded binary path printed and correct
 - [ ] Witness parked in a global, relocation confirmed

@@ -11,7 +11,9 @@ Read the status honestly, because the skill it illustrates demands it:
 - **Outcome means "what we filed", not "what upstream accepted."** All of these were
   filed by us and are unconfirmed. The one exception is trilogy#312, where byroot
   agreed at code level ("I'm unable to repro on my machine, but looking at the code,
-  it indeed does look like a `GC_GUARD` is missing") and opened PR #313, still open.
+  it indeed does look like a `GC_GUARD` is missing") and opened PR #313 — **merged
+  2026-08-05, but in no released version**, so there is still no upgrade path. See
+  "Neither trilogy fix is in a released version" below.
 - The sqlite3 fix referenced throughout is PR #723, **open and unmerged**.
 
 These serve the same purpose as a vulnerability pattern library: they are what the
