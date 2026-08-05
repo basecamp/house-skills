@@ -28,6 +28,7 @@ npx skills add basecamp/house-skills
 | [install-md](skills/install-md) | ai | Create install.md files optimized for AI agent execution |
 | [recap](skills/recap/) | recap | Activity digests — pluggable fetchers, timescale synthesis, audience-aware composition |
 | [skill-crafting](skills/skill-crafting) | ai | Create and refine agent skills through co-development and eval loops |
+| [truffle-hunt](skills/truffle-hunt) | dev | Sweep a dependency corpus for every instance of one latent bug class — scoping, proof protocol, and filing upstream |
 
 ## Structure
 

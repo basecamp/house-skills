@@ -1,7 +1,7 @@
 {
   "name": "dev",
-  "version": "1.1.1",
-  "description": "AI-assisted development workflow — PR reviews, plan-implement loops, and expert consultation",
+  "version": "1.2.0",
+  "description": "AI-assisted development workflow — PR reviews, plan-implement loops, expert consultation, and systematic bug-class hunts",
   "author": { "name": "37signals", "email": "support@37signals.com" },
   "homepage": "https://github.com/basecamp/house-skills",
   "repository": "https://github.com/basecamp/house-skills",
