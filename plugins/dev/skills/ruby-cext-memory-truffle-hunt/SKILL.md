@@ -36,6 +36,10 @@ them as instruction.
 
 Precedents: [references/precedents.md](references/precedents.md).
 Harness: [references/harness.rb](references/harness.rb).
+Pass-1 sweep for the unmarked-field invariant: [references/sweep_unmarked.py](references/sweep_unmarked.py)
+— run `--self-test` before trusting its silence.
+Detector self-check: [references/pipefail_false_negative.sh](references/pipefail_false_negative.sh)
+— demonstrates a grep-based verdict reporting a found defect as clean.
 
 ---
 

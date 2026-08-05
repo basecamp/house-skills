@@ -15,6 +15,20 @@ module Hunt
 
   # ---------------------------------------------------------------- compaction
 
+  # SINGLE-THREADED harnesses only. `verify_compaction_references` installs a read
+  # barrier by mprotect-ing heap page bodies, which is what makes it a detector -- and
+  # what makes it WRONG for a concurrent harness. A second thread reading an *embedded*
+  # String's bytes inside a GVL-released region faults on a page the compactor has
+  # protected, and the fault handler needs the GVL to service it, so the process dies on
+  # a pointer that was **valid and pinned**. Measured: 3/3 gdb backtraces with thread 1
+  # in the nogvl C call and thread 3 in lock_page_body / gc_unprotect_pages /
+  # gc_ref_update under gc_verify_compaction_references.
+  #
+  # That is a false positive for exactly the mobility regime this hunt targets, and it
+  # bites only embedded subjects -- a >616B malloc'd buffer lives outside GC pages, which
+  # is why earlier rounds using large strings never hit it.
+  #
+  # Use `compact_concurrent!` from any harness with a compacting thread.
   def compact!
     if ENV["COMPACT"] == "0"
       warn "[harness] CONTROL: compaction skipped"
@@ -22,6 +36,36 @@ module Hunt
     else
       GC.verify_compaction_references(expand_heap: true, toward: :empty)
       warn "[harness] compaction done"
+      true
+    end
+  end
+
+  # Concurrent-safe: plain GC.compact installs no read barrier.
+  #
+  # It relocates FAR less, and sensitivity has to be earned over a whole run rather than
+  # assumed per call. Measured on ruby 4.0.6 aarch64-linux:
+  #
+  #   verify_compaction_references, one call, fresh witnesses  -> 200/200 moved
+  #   GC.compact,                   one call, fresh witnesses  ->   0/200 moved
+  #   GC.compact,   witnesses planted once, 2,142 calls        ->   0/200 moved
+  #   GC.compact,   fresh batch per round, ~1,100-1,600 calls  -> ~92% of 66k-98k moved
+  #
+  # So a single GC.compact routinely relocates NOTHING: re-planting per round is necessary
+  # but not sufficient, and only the accumulated per-run witness count is evidence. Report
+  # it. A concurrent run that never observed a relocation has sensitivity zero no matter
+  # how many compactions it counted.
+  #
+  # And plain GC.compact does not expand the heap, so a defect whose trigger is heap
+  # *expansion* does not reproduce under it at all -- measured on prometheus-client-mmap:
+  # 20/20 evictions with expand_heap:, 0/20 with plain GC.compact, none within 20,000
+  # allocations. If a concurrent harness needs expansion, you need a different instrument,
+  # not a different flag.
+  def compact_concurrent!
+    if ENV["COMPACT"] == "0"
+      warn "[harness] CONTROL: compaction skipped"
+      false
+    else
+      GC.compact
       true
     end
   end
