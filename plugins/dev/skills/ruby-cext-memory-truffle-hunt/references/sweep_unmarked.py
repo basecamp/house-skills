@@ -35,9 +35,43 @@ so the clears are the part worth reading.
 
 CATEGORIES
   UNMARKED   field named in no mark function        -- freed by ordinary GC (mysql2 shape)
+  MENTIONED  field named in the dmark body but not inside any marking call -- the round-5
+             (b) case; see below. Not a clear, and not a claim: pass 2 decides
   NO-COMPACT field marked movable, absent from dcompact -- stale after compaction only
              (openssl#1088 shape)
+  NO-COMPACT-UNKNOWN  same, but the movable mark was reached through a helper, so which
+             field the primitive applied to is not resolved here. Conservative by design
   VALUE*     a VALUE array/pointer field; needs a marking loop, check the bound by hand
+
+ROUND 5: THREE OVER-CLEARS THIS SCRIPT SHIPPED WITH
+---------------------------------------------------
+All three made a broken struct read as safe, which is the one failure mode the effort
+exists to prevent. Each has a generated red fixture in --self-test.
+
+(a) The de-dupe key was `(struct, field)` across ALL dtypes, so the first dtype to be
+    walked decided the verdict for every other dtype wrapping the same struct. msgpack
+    wraps `msgpack_buffer_t` with both `buffer_data_type` (marks) and
+    `buffer_view_data_type` (`.dmark = NULL`); which one won was iteration order. The key
+    is now `(dtype, struct, field)`, and the coalescing that the de-dupe was actually
+    added for -- the legacy `<inline:>` compat wrapper -- is applied only to that case.
+
+(b) The clearing test was "is the field NAME present anywhere in the dmark body", so
+    `if (w->callback) rb_gc_mark(w->other);` cleared `callback`. A field must now appear
+    inside a marking call's own ARGUMENT LIST. Three tiers, because a one-tier "must be a
+    primitive" rule flags sqlite3 PR #723's `functions`/`collations`/`aggregators`, which
+    are marked via `rb_sqlite3_pin_array_and_contents(c->functions)` -- acceptance item 4
+    is the control that discriminates the correct fix from the plausible one.
+
+(c) A dmark reaching the field through a callee (`mark_value(w->cb)` where the helper
+    calls `rb_gc_mark_movable` on its own parameter) named the field nowhere near the
+    movable call, so it cleared instead of reporting. Helper-tier marks now carry the
+    helper's own primitive kind, and a movable one with no dcompact reports
+    NO-COMPACT-UNKNOWN rather than clearing.
+
+Plus a parsing defect found while fixing (a): `TypedData_Get_Struct(o, t, view ?
+&buffer_view_data_type : &buffer_data_type, b)` -- msgpack buffer_class.c:151 -- yielded
+the whole ternary as the dtype name, matching no rb_data_type_t, so the wrap site
+vanished. Both branches are now registered.
 
 ACCEPTANCE (--self-test): flags fieldTypes on mysql2 m2-red and not on m2-green; clears
 all six VALUE fields of sqlite3 pr-723's struct and flags whichever one a mutated tree
@@ -81,6 +115,17 @@ C_EXT = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".rs")
 # empty mark body, which reads as "marks nothing" -- a false positive factory.
 
 
+def blank(span):
+    """Spaces of the same length, but NEWLINES KEPT so line numbers survive.
+
+    Blanking a block comment's newlines shortened rmagick's rmimage.cpp from 16,432 lines
+    to 12,633. Nothing in round 4 printed a line number, so it never bit; anything that
+    reports a call SITE needs this. Length is unchanged either way, so every byte offset
+    into the stripped text still matches the original.
+    """
+    return "".join("\n" if ch == "\n" else " " for ch in span)
+
+
 def strip_noise(src):
     out = []
     i, n = 0, len(src)
@@ -90,12 +135,12 @@ def strip_noise(src):
         if two == "/*":
             j = src.find("*/", i + 2)
             j = n if j < 0 else j + 2
-            out.append(" " * (j - i))
+            out.append(blank(src[i:j]))
             i = j
         elif two == "//":
             j = src.find("\n", i)
             j = n if j < 0 else j
-            out.append(" " * (j - i))
+            out.append(blank(src[i:j]))
             i = j
         elif c in "\"'":
             j = i + 1
@@ -103,7 +148,7 @@ def strip_noise(src):
                 j += 2 if src[j] == "\\" else 1
             j = min(j + 1, n)
             # Keep the quotes so `"name"` in an rb_data_type_t still parses as a token.
-            out.append(c + " " * (j - i - 2) + c if j - i >= 2 else " " * (j - i))
+            out.append(c + blank(src[i + 1:j - 1]) + c if j - i >= 2 else blank(src[i:j]))
             i = j
         else:
             out.append(c)
@@ -205,6 +250,87 @@ def type_name(expr):
     return e.split()[-1] if e.split() else ""
 
 
+def dtype_candidates(expr):
+    """`view ? &a_type : &b_type` -> ["a_type", "b_type"]; anything else -> one name.
+
+    msgpack selects its rb_data_type_t with a ternary (buffer_class.c:151). base_type()
+    returned the whole expression, which matches no indexed dtype, so that wrap site was
+    dropped -- and it did not even land in the `unresolved` tally, because the tally keys
+    on the struct being unresolvable, not the dtype. Silence produced by the query.
+    """
+    e = expr.strip()
+    q = e.find("?")
+    if q >= 0:
+        rest, depth = e[q + 1:], 0
+        for i, ch in enumerate(rest):
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            elif ch == ":" and depth == 0:
+                return [base_type(rest[:i]), base_type(rest[i + 1:])]
+    return [base_type(e)]
+
+
+# ------------------------------------------------------- marking primitives (round 5b)
+#
+# The clearing test is now "the field appears inside one of THESE calls' argument list",
+# not "the field appears in the body". Everything below exists to make that test precise
+# enough that a real mark is not missed (a false positive is a pass-2 discharge; a missed
+# mark clears a broken struct, which is the whole failure mode).
+
+MARK_PRIM = re.compile(
+    r"^(?:rb_gc_mark|rb_gc_mark_maybe|rb_gc_mark_locations"
+    r"|rb_gc_mark_movable|rb_gc_mark_and_move|RB_GC_MARK\w*)$")
+MOVABLE_PRIM = re.compile(
+    r"^(?:rb_gc_mark_movable|rb_gc_mark_and_move|RB_GC_MARK_MOVABLE\w*)$")
+# rb_gc_mark_and_move is BOTH: registering one function as .dmark and .dcompact is the
+# modern idiom, and it is safe. Listing it here is what stops that shape reporting
+# NO-COMPACT -- the same body scanned under LOC_PRIM makes `in_compact` true.
+LOC_PRIM = re.compile(
+    r"^(?:rb_gc_location|rb_gc_mark_and_move|rb_gc_update\w*|RB_GC_UPDATE\w*)$")
+
+# Control keywords take parenthesised operands and would otherwise read as calls.
+NOT_CALLS = {"if", "for", "while", "switch", "return", "sizeof", "defined", "do", "else",
+             "case", "typeof", "alignof", "static_assert"}
+
+RANK = {None: 0, "pin": 1, "loc": 1, "movable": 2}
+
+
+def prim_kind(name):
+    """None | "pin" | "movable" -- how a marking primitive treats its argument."""
+    if not MARK_PRIM.match(name):
+        return None
+    return "movable" if MOVABLE_PRIM.match(name) else "pin"
+
+
+def loc_kind(name):
+    """None | "loc" -- does this call update a reference for compaction?"""
+    return "loc" if LOC_PRIM.match(name) else None
+
+
+def stronger(a, b):
+    """Movable beats pinning: a field that MIGHT be marked movable still needs a dcompact."""
+    return a if RANK[a] >= RANK[b] else b
+
+
+def find_calls(body):
+    """[(name, [args])] for every call in a body, nested calls included."""
+    out = []
+    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*(?=\()", body):
+        if m.group(1) in NOT_CALLS:
+            continue
+        args, _ = call_args(body, m.end())
+        if args:
+            out.append((m.group(1), args))
+    return out
+
+
+def arg_tokens(args):
+    """Identifiers appearing anywhere in an argument list -- `c->functions` -> {c, functions}."""
+    return set(re.findall(r"[A-Za-z_]\w*", " ".join(args)))
+
+
 # ---------------------------------------------------------------- tree model
 
 
@@ -214,13 +340,17 @@ class Tree:
     def __init__(self, root):
         self.root = pathlib.Path(root)
         self.files = {}
+        self.macros = {}         # function-like #define name -> concatenated bodies
         for p in sorted(self.root.rglob("*")):
             if p.is_file() and p.suffix in C_EXT and ".git" not in p.parts:
                 try:
-                    self.files[p] = strip_directives(
-                        strip_noise(p.read_text(errors="replace")))
+                    # Macros are indexed BEFORE the directives are blanked: a gem's own
+                    # marking macro lives entirely inside a directive line.
+                    decommented = strip_noise(p.read_text(errors="replace"))
                 except OSError:
-                    pass
+                    continue
+                self._index_macros(decommented)
+                self.files[p] = strip_directives(decommented)
         self.all = "\n".join(self.files.values())
         self.structs = {}        # name -> body text
         self.struct_file = {}    # name -> path (for reporting)
@@ -229,6 +359,7 @@ class Tree:
         self.funcs = {}          # function name -> body text
         self.type_of_dtype = {}  # rb_data_type_t name -> wrapped struct type name
         self.wrap_sites = []     # (path, dtype, struct_type, macro)
+        self._helper_memo = {}   # ("dmark"|"dcompact") -> {fn -> kind}, with cycle guard
         for path, src in self.files.items():
             self._index_structs(path, src)
             self._index_aliases(src)
@@ -236,6 +367,41 @@ class Tree:
             self._index_dtypes(src)
         for path, src in self.files.items():
             self._index_wraps(path, src)
+
+    # -- function-like macros -----------------------------------------------
+
+    def _index_macros(self, src):
+        """`#define rb_mysql2_gc_location(ptr) ptr = rb_gc_location(ptr)` -> a callee.
+
+        mysql2 updates every one of its fields through that macro. strip_directives blanks
+        the definition, so without this index the name resolves to neither a primitive nor
+        an in-tree function and all six fields report NO-COMPACT on the PATCHED tree. The
+        v2 script cleared them only because its compaction test was bare name presence in
+        the dcompact body -- defect (b) was silently covering for this gap, so fixing (b)
+        alone turned m2-green red.
+
+        All arms are concatenated rather than first-wins: mysql2 defines this macro twice,
+        as the real thing and as a no-op for Rubies without compaction. Marking on any arm
+        counts as marking, which is right -- on a Ruby taking the no-op arm there is no
+        compaction to go stale under.
+        """
+        for m in re.finditer(r"^[ \t]*#[ \t]*define[ \t]+(\w+)\(", src, re.M):
+            _, j = call_args(src, m.end() - 1)
+            k = j
+            while True:
+                nl = src.find("\n", k)
+                if nl < 0:
+                    nl = len(src)
+                    break
+                if not src[k:nl].rstrip().endswith("\\"):
+                    break
+                k = nl + 1
+            self.macros[m.group(1)] = \
+                self.macros.get(m.group(1), "") + "\n" + src[j:nl]
+
+    def body_of(self, name):
+        """The body of an in-tree callee, function or function-like macro."""
+        return self.funcs.get(name, self.macros.get(name))
 
     # -- structs ------------------------------------------------------------
 
@@ -368,11 +534,13 @@ class Tree:
                 args, _ = call_args(src, m.end())
                 if not args or len(args) <= max(di, ti or 0):
                     continue
-                dtype = base_type(args[di])
                 st = type_name(args[ti]) if ti is not None else None
-                self.wrap_sites.append((path, dtype, st, macro))
-                if st and dtype not in self.type_of_dtype:
-                    self.type_of_dtype[dtype] = st
+                # A ternary picks between two dtypes; register BOTH, or the wrap site
+                # silently disappears (msgpack buffer_class.c:151).
+                for dtype in dtype_candidates(args[di]):
+                    self.wrap_sites.append((path, dtype, st, macro))
+                    if st and dtype not in self.type_of_dtype:
+                        self.type_of_dtype[dtype] = st
         for macro, (ti, mi) in self.UNTYPED.items():
             for m in re.finditer(r"\b%s\s*(?=\()" % macro, src):
                 args, _ = call_args(src, m.end())
@@ -406,29 +574,89 @@ class Tree:
                         return r
         return self.type_of_dtype.get(dtype)
 
-    def mark_text(self, dtype):
-        """Bodies of dmark+dcompact, plus one level of in-tree callees.
+    def helper_kind(self, fn, key, depth=1):
+        """Does in-tree function `fn` mark (key=dmark) or update (key=dcompact)?
 
-        One level, not zero: sqlite3 PR #723 marks three of its six fields through
-        helpers (`rb_sqlite3_pin_array_and_contents(c->functions)`). Those name the field
-        in the dmark body itself, but a helper taking the whole struct would not, so the
-        callee bodies are folded in. Transitivity only ever CLEARS, which is why each
-        clear is printed with the reason rather than swallowed.
+        One level of onward callees, which is the transitivity the v2 `mark_text` folded
+        in wholesale. sqlite3 PR #723 marks three of its six fields through
+        `rb_sqlite3_pin_array_and_contents(c->functions)`; without this tier the round-5
+        (b) fix would flag all three and acceptance item 4 would fail. That fixture is
+        the control which separates the correct fix from the merely plausible one.
+
+        Conservative on disagreement: a helper with any movable path counts as movable,
+        because an unwarranted NO-COMPACT costs a pass-2 discharge while a missed one
+        ships a stale pointer.
         """
-        out = {}
+        memo = self._helper_memo.setdefault(key, {})
+        if fn in memo:
+            return memo[fn]
+        memo[fn] = None                       # cycle guard: recursion resolves to None
+        kinds = set()
+        for name, _args in find_calls(self.body_of(fn) or ""):
+            k = loc_kind(name) if key == "dcompact" else prim_kind(name)
+            if k is None and depth > 0 and name != fn and self.body_of(name) is not None:
+                k = self.helper_kind(name, key, depth - 1)
+            if k:
+                kinds.add(k)
+        best = None
+        for k in kinds:
+            best = stronger(best, k)
+        memo[fn] = best
+        return best
+
+    def _collect_marks(self, fn, key, direct, helper, mentioned, depth=1):
+        """Walk a mark function and one level of in-tree callees, crediting fields.
+
+        Two ways a callee marks, and BOTH have a real instance in the corpus:
+
+          msgpack   Packer_mark calls `msgpack_packer_mark(pk)` -- the whole struct. The
+                    field names appear only inside the CALLEE, on its own parameter, so
+                    the callee's marking calls have to be walked or `buffer_ref` and
+                    `to_msgpack_arg` read as UNMARKED. (They are marked. Eight msgpack
+                    fields were false positives on the first cut of this fix.)
+          sqlite3   database_mark calls `rb_sqlite3_pin_array_and_contents(c->functions)`
+                    -- the FIELD. The name is at the call site and the primitive is one
+                    frame in, so the field is credited at the helper tier.
+
+        The second is why the helper tier is kept distinct: the primitive's kind is known
+        but which argument it applied to is not, which is the whole of round-5 defect (c).
+        """
+        body = self.body_of(fn) or ""
+        mentioned |= set(re.findall(r"[A-Za-z_]\w*", body))
+        for name, args in find_calls(body):
+            kind = loc_kind(name) if key == "dcompact" else prim_kind(name)
+            if kind:
+                for tok in arg_tokens(args):
+                    direct[tok] = stronger(direct.get(tok), kind)
+            elif depth > 0 and name != fn and self.body_of(name) is not None:
+                hk = self.helper_kind(name, key)
+                if hk:
+                    for tok in arg_tokens(args):
+                        helper[tok] = stronger(helper.get(tok), hk)
+                self._collect_marks(name, key, direct, helper, mentioned, depth - 1)
+
+    def mark_index(self, dtype):
+        """Per-key marking evidence, in three tiers. {key: (direct, helper, mentioned)}
+
+        direct    token named inside a marking PRIMITIVE's own argument list
+        helper    token passed BY NAME to an in-tree function that marks
+        mentioned every identifier seen, so "named but never marked" is nameable
+
+        The v2 test was `word.search(body)` over the dmark concatenated with every callee
+        body, which cleared any field the dmark so much as touched -- defect (b), where
+        `if (w->callback) rb_gc_mark(w->other);` cleared `callback`. It also attributed
+        movability with an `[^;]*` window, and that window spans a comma, so
+        `rb_gc_mark_movable(w->a), rb_gc_mark(w->b)` mis-attributed. Parsing argument
+        lists removes both, and costs nothing in recall because the walk still descends.
+        """
+        idx = {}
         for key in ("dmark", "dcompact"):
             fn = self.dtypes.get(dtype, {}).get(key)
-            if not fn or fn in ("NULL", "0", "RUBY_DEFAULT_FREE"):
-                out[key] = ""
-                continue
-            body = self.funcs.get(fn, "")
-            extra = []
-            for cm in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", body):
-                callee = cm.group(1)
-                if callee != fn and callee in self.funcs:
-                    extra.append(self.funcs[callee])
-            out[key] = body + "\n" + "\n".join(extra)
-        return out
+            direct, helper, mentioned = {}, {}, set()
+            if fn and fn not in ("NULL", "0", "RUBY_DEFAULT_FREE"):
+                self._collect_marks(fn, key, direct, helper, mentioned)
+            idx[key] = (direct, helper, mentioned)
+        return idx
 
 
 # ---------------------------------------------------------------- the predicate
@@ -453,11 +681,9 @@ def value_fields(body):
 
 def sweep(tree, verbose=False):
     suspects, clears = [], []
-    seen, reported = set(), set()
-    # Typed dtypes first: a gem carrying both `TypedData_Make_Struct` and a legacy
-    # `Data_Make_Struct` under an #ifdef wraps the same struct twice, and the legacy
-    # pseudo-dtype has no dcompact by construction -- reporting it too would double every
-    # line and invent a NO-COMPACT on a gem that has one.
+    seen, reported, typed_seen = set(), set(), set()
+    # Typed dtypes first, so the `<inline:>` legacy pseudo-dtype is the one coalesced away
+    # and never the other way round.
     sites = sorted(tree.wrap_sites, key=lambda s: s[1].startswith("<inline:"))
     for path, dtype, _st, macro in sites:
         st = tree.struct_type_for(dtype)
@@ -470,30 +696,50 @@ def sweep(tree, verbose=False):
         if (dtype, st) in seen:
             continue
         seen.add((dtype, st))
-        marks = tree.mark_text(dtype)
+        inline = dtype.startswith("<inline:")
+        idx = tree.mark_index(dtype)
+        m_direct, m_helper, m_named = idx["dmark"]
+        c_direct, c_helper, _ = idx["dcompact"]
         decl_in = tree.struct_file.get(st, path)
         for field, is_ptr in value_fields(tree.structs[st]):
-            if (st, field) in reported:
+            # Round 5 (a): the key carries the dtype. The old (struct, field) key let
+            # msgpack's marking `buffer_data_type` clear `msgpack_buffer_t` on behalf of
+            # `buffer_view_data_type`, whose .dmark is NULL. Two wrappers of one struct
+            # are two verdicts, and the safe one must not speak for the unsafe one.
+            if (dtype, st, field) in reported:
                 continue
-            word = re.compile(r"\b%s\b" % re.escape(field))
-            in_mark = bool(word.search(marks["dmark"]))
-            in_compact = bool(word.search(marks["dcompact"]))
+            # The ONE case the de-dupe was added for: a gem under an #ifdef carrying both
+            # TypedData_Make_Struct and legacy Data_Make_Struct wraps the same struct
+            # twice, and the pseudo-dtype has no dcompact by construction, so reporting it
+            # would double every line and invent a NO-COMPACT on a gem that has one.
+            if inline and (st, field) in typed_seen:
+                continue
+            reported.add((dtype, st, field))
+            if not inline:
+                typed_seen.add((st, field))
+
+            kind = stronger(m_direct.get(field), m_helper.get(field))
+            via_helper = field not in m_direct and field in m_helper
+            in_compact = bool(c_direct.get(field) or c_helper.get(field))
             cat = None
-            if not in_mark:
-                cat = "UNMARKED"
+            if kind is None:
+                # Round 5 (b): presence in the body is not a mark. Separating these two
+                # keeps the recall honest -- MENTIONED says "we saw the name and it was
+                # not in a marking call", which is a question for pass 2, not a verdict.
+                cat = "MENTIONED" if field in m_named else "UNMARKED"
             elif is_ptr:
                 cat = "VALUE*"
-            elif re.search(r"rb_gc_mark_movable\s*\([^;]*\b%s\b" % re.escape(field),
-                           marks["dmark"]) and not in_compact:
-                cat = "NO-COMPACT"
+            elif kind == "movable" and not in_compact:
+                # Round 5 (c): reached through a callee, so which argument the movable
+                # primitive applied to is not resolved here. Report, do not clear.
+                cat = "NO-COMPACT-UNKNOWN" if via_helper else "NO-COMPACT"
             if cat:
-                reported.add((st, field))
                 suspects.append((cat, decl_in, st, field, dtype,
                                  tree.dtypes.get(dtype, {})))
             else:
-                reported.add((st, field))
-                clears.append((dtype, st, field,
-                               "named in dmark" + ("+dcompact" if in_compact else "")))
+                how = "via helper" if via_helper else "direct"
+                clears.append((dtype, st, field, "marked %s (%s)%s"
+                               % (kind, how, "+dcompact" if in_compact else "")))
     return suspects, clears
 
 
@@ -525,6 +771,76 @@ def report(name, tree, suspects, clears, verbose):
 # ---------------------------------------------------------------- acceptance
 
 
+# Round-5 red controls. Each is a MINIMAL tree written at test time, not a checked-in
+# file: a hand-edited control drifts from the defect it was cut to prove, and these four
+# each encode one over-clear the shipped script actually committed on real gems.
+#
+# Every one of them measured "0 suspects, N cleared" before the fix.
+
+RED_A = """
+#include <ruby.h>
+typedef struct { VALUE payload; } buf_t;
+static void buf_mark(void *p) { buf_t *b = (buf_t *)p; rb_gc_mark(b->payload); }
+static void buf_free(void *p) { xfree(p); }
+/* Two wrappers, one struct. The view marks NOTHING and must not be spoken for by the
+   owner. This is msgpack buffer_class.c:127/:137 reduced to its bones. */
+static const rb_data_type_t buf_data_type      = { "buf",  { buf_mark, buf_free, }, };
+static const rb_data_type_t buf_view_data_type = { "view", { NULL,     buf_free, }, };
+static VALUE a1(VALUE k) { buf_t *b; return TypedData_Make_Struct(k, buf_t, &buf_data_type, b); }
+static VALUE a2(VALUE k) { buf_t *b; return TypedData_Make_Struct(k, buf_t, &buf_view_data_type, b); }
+"""
+
+RED_B = """
+#include <ruby.h>
+typedef struct { VALUE callback; VALUE other; } wrapper_t;
+static void w_free(void *p) { xfree(p); }
+/* `callback` is READ, never MARKED. Presence in the body is not a mark. */
+static void w_mark(void *p) { wrapper_t *w = (wrapper_t *)p; if (w->callback) rb_gc_mark(w->other); }
+static const rb_data_type_t w_type = { "wrapper", { w_mark, w_free, }, };
+static VALUE w_alloc(VALUE k) { wrapper_t *w; return TypedData_Make_Struct(k, wrapper_t, &w_type, w); }
+"""
+
+RED_C = """
+#include <ruby.h>
+typedef struct { VALUE cb; } holder_t;
+static void h_free(void *p) { xfree(p); }
+/* The movable primitive is one frame away, so the field name sits nowhere near it. */
+static void mark_value(VALUE v) { rb_gc_mark_movable(v); }
+static void h_mark(void *p) { holder_t *h = (holder_t *)p; mark_value(h->cb); }
+static const rb_data_type_t h_type = { "holder", { h_mark, h_free, }, };   /* no dcompact */
+static VALUE h_alloc(VALUE k) { holder_t *h; return TypedData_Make_Struct(k, holder_t, &h_type, h); }
+"""
+
+RED_TERNARY = """
+#include <ruby.h>
+typedef struct { VALUE payload; } tbuf_t;
+static void t_mark(void *p) { tbuf_t *b = (tbuf_t *)p; rb_gc_mark(b->payload); }
+static void t_free(void *p) { xfree(p); }
+static const rb_data_type_t t_data_type      = { "t",     { t_mark, t_free, }, };
+static const rb_data_type_t t_view_data_type = { "tview", { NULL,   t_free, }, };
+/* The dtype is chosen by a ternary -- msgpack buffer_class.c:151. Both arms are wrap
+   sites; taking the expression whole matches no dtype and the site disappears. */
+static tbuf_t *t_get(VALUE o, int view) {
+    tbuf_t *b;
+    TypedData_Get_Struct(o, tbuf_t, view ? &t_view_data_type : &t_data_type, b);
+    return b;
+}
+"""
+
+# GREEN control for the macro tier: a gem that updates through its OWN #define is safe,
+# and fixing (b) turned mysql2's patched tree red until macros were indexed as callees.
+GREEN_MACRO = """
+#include <ruby.h>
+#define my_gc_location(ptr) ptr = rb_gc_location(ptr)
+typedef struct { VALUE held; } mbox_t;
+static void m_free(void *p) { xfree(p); }
+static void m_mark(void *p) { mbox_t *m = (mbox_t *)p; rb_gc_mark_movable(m->held); }
+static void m_compact(void *p) { mbox_t *m = (mbox_t *)p; my_gc_location(m->held); }
+static const rb_data_type_t m_type = { "mbox", { m_mark, m_free, NULL, m_compact, }, };
+static VALUE m_alloc(VALUE k) { mbox_t *m; return TypedData_Make_Struct(k, mbox_t, &m_type, m); }
+"""
+
+
 def self_test(base):
     """Fail loudly rather than let a broken query clear the corpus by accident."""
     base = pathlib.Path(base)
@@ -533,6 +849,15 @@ def self_test(base):
     def fields_flagged(tree_dir):
         s, _ = sweep(Tree(tree_dir))
         return {(st, f) for _, _, st, f, _, _ in s}
+
+    def flagged_from_source(src):
+        """(categories, fields) for a tree generated from one C file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ext = pathlib.Path(tmp) / "ext"
+            ext.mkdir()
+            (ext / "t.c").write_text(src)
+            s, _ = sweep(Tree(ext))
+            return {c for c, _, _, _, _, _ in s}, {f for _, _, _, f, _, _ in s}
 
     # mysql2: the known instance. Declared in result.h -- the file v1 never opened.
     red = fields_flagged(base / "m2-red" / "ext")
@@ -575,6 +900,29 @@ def self_test(base):
         hit = "authorizer" in mgot
         ok &= hit
         print("%s de-marked sqlite3 tree flags authorizer" % ("PASS" if hit else "FAIL"))
+
+    # -- round 5: the four over-clears, each with its own generated red ------------
+    for label, src, want_cat, want_field in (
+        ("(a) second dtype wrapping one struct is judged separately",
+         RED_A, "UNMARKED", "payload"),
+        ("(b) field named in dmark but never marked is not cleared",
+         RED_B, "MENTIONED", "callback"),
+        ("(c) movable mark reached through a helper is not cleared",
+         RED_C, "NO-COMPACT-UNKNOWN", "cb"),
+        ("(ternary) both arms of a dtype ternary are wrap sites",
+         RED_TERNARY, "UNMARKED", "payload"),
+    ):
+        cats, fields = flagged_from_source(src)
+        hit = want_cat in cats and want_field in fields
+        ok &= hit
+        print("%s red %s%s" % ("PASS" if hit else "FAIL", label,
+                              "" if hit else "  [got %s %s]" % (sorted(cats), sorted(fields))))
+
+    cats, fields = flagged_from_source(GREEN_MACRO)
+    clean = not fields
+    ok &= clean
+    print("%s green (macro) a gem's own gc_location #define counts as an update%s"
+          % ("PASS" if clean else "FAIL", "" if clean else "  [got %s]" % sorted(fields)))
 
     print("\nself-test: %s" % ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
