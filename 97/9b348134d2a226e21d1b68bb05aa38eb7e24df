@@ -1,0 +1,25 @@
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/sweep_unmarked.py
+  s_727254054efaf1::t_1020b4c7f4680a 721-746
+  s_727254054efaf1::t_085f5842899374 1628-1629
+  s_727254054efaf1::t_7488e2aba09258 149,151
+  s_727254054efaf1::t_ca9b7bb9840553 92,94
+  s_727254054efaf1::t_508e8df943205b 122-131
+  s_727254054efaf1::t_4bd907ca3d4c52 700-701
+  s_727254054efaf1::t_6e33d5d62c2f18 1374-1387
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "979b348134d2a226e21d1b68bb05aa38eb7e24df",
+  "prompts": {},
+  "sessions": {
+    "s_727254054efaf1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cc60cb66-90bd-4906-acd1-763ce29396bc",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}

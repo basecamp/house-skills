@@ -1,0 +1,41 @@
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/sweep_unmarked.py
+  s_727254054efaf1::t_7aef282344befe 577-584,586-594,596,598-606,638-639,644,652,655-656,658-659
+  s_727254054efaf1::t_c445fbc66c85c5 774-843,853-860
+  s_727254054efaf1::t_a59b66a5588576 38-39,42-43,46-74
+  s_727254054efaf1::t_367b4c43984dfe 118-128,138,143
+  s_727254054efaf1::t_1c1ee652fffd9b 362
+  s_727254054efaf1::t_1980677f8e0de2 343,347-349,351-353
+  s_727254054efaf1::t_b77ccf7c373f5e 607-622,624-637,640-643,645-650,657
+  s_727254054efaf1::t_09996110bfb873 151
+  s_727254054efaf1::t_232b6b71f9cb4c 904-925
+  s_727254054efaf1::t_2a386517723162 595,597
+  s_727254054efaf1::t_8260af7860b0c8 371-404,651
+  s_727254054efaf1::t_9cd417510d96c9 684-686,699-702,705-709,711-723,725-729,732-735,740-742
+  s_727254054efaf1::t_8caff6d9d74bd0 253-331
+  s_727254054efaf1::t_942dc071d1ebf6 538-543
+  s_489947fdcc1213::t_3616a55eaae787 75,332-333,405,861,926
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "89553fbb32a6d31bdf630dbc278dd66cddcd7693",
+  "prompts": {},
+  "sessions": {
+    "s_489947fdcc1213": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e20ed24d-55c2-42ed-8e77-e35502be4305",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    },
+    "s_727254054efaf1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cc60cb66-90bd-4906-acd1-763ce29396bc",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}

@@ -1,0 +1,39 @@
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/harness.rb
+  s_4be3462dfbcc6c::t_a9710b8caf1aa6 18-31,43-44,63-68
+  s_4be3462dfbcc6c::t_274b6ecd95dd4a 45-62
+  s_4be3462dfbcc6c::t_769863614e788a 69-71
+  s_53a3e449aae0b5::t_73abc0d3a035eb 72
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/sweep_unmarked.py
+  s_4be3462dfbcc6c::t_1dc3a4978529fe 44-66
+  s_4be3462dfbcc6c::t_8587c07f75498e 41-43
+  s_4be3462dfbcc6c::t_7c6740eb401f9b 67-69
+  s_4be3462dfbcc6c::t_5027e1b481218b 1-40,70-603
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/SKILL.md
+  s_4be3462dfbcc6c::t_da299f32f0fee9 39-42
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/pipefail_false_negative.sh
+  s_4be3462dfbcc6c::t_0e3d231ba63bf6 1-55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "4af66e26a1b9055ceefbaa5f7100d2e37a886526",
+  "prompts": {},
+  "sessions": {
+    "s_4be3462dfbcc6c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "827f3b63-7086-45e4-8bb6-865952443582",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    },
+    "s_53a3e449aae0b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-abcd02fa8ee9fe542",
+        "model": "unknown"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
