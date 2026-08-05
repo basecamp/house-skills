@@ -53,6 +53,18 @@ VALUE callable = (VALUE)sqlite3_user_data(ctx);   /* ✗ read back much later */
 
 Keeping the object **alive** (an ivar array, a global) does not keep it **in place**.
 
+**The predicate that generalises it** (round 3): not "an incomplete `dcompact`" but *a
+`VALUE` reaching a non-Ruby library where the owning object's `dmark` does not call the
+**pinning** `rb_gc_mark` on that same `VALUE`*. Two variants that evade the obvious grep:
+
+- **Stored as an integer, key, handle or index**, not as a `void *`. prometheus-client-mmap
+  keys an `ObjectSpace::WeakMap` on `str.as_raw()`; after compaction the key is a stale
+  address, and a later string in the recycled slot **evicts a live entry**.
+- **Never handed to a library at all** — a `VALUE` field of an xmalloc'd TypedData struct
+  that `dmark` simply forgets. mysql2's `fieldTypes` is freed by *ordinary* GC inside the
+  very call that allocates it. Enumerate the struct's `VALUE` fields against the mark
+  function; don't start from the library call.
+
 ### Class B — a `char *` into a Ruby String's bytes
 
 Two sub-mechanisms needing *different* fixes:
@@ -151,6 +163,12 @@ sass_make_data_context   yajl_parse               upb_StringView
 *_set_input_buffer       SSL_CTX_set_default_passwd_cb_userdata
 SSL_CTX_set_alpn_select_cb                SSL_CTX_set_next_proto_select_cb
 ```
+
+**Round-3 additions, each of which the previous query missed:** `create_collation`,
+`_aggregate_context` (a `VALUE` written into a *library-allocated* buffer rather than passed
+as an argument), `as_raw`, `opaque =`, `PQsetNotice*`, `xmlReaderForIO`,
+`xmlCreateIOParserCtxt`, and `\.dmark` — read every mark function rather than grepping for
+the store.
 
 **Negative signals:** `RB_GC_GUARD` present; openssl's `volatile VALUE *` write-back idiom
 (`ossl_obj2bio`); the String is a stack argument live across the whole call.
