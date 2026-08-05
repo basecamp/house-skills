@@ -168,9 +168,45 @@ module Hunt
     GC.start
   end
 
+  # Fragment the heap BEFORE allocating the subject -- under GC.compact, allocation ORDER
+  # decides whether your subject can move at all.
+  #
+  # The compactor slides objects from late pages into early holes. A subject allocated *before*
+  # the fragmentation sits in an early page and is never a move candidate: it stays put through
+  # any number of compactions while everything else shuffles beneath it.
+  #
+  # THE WITNESS CHECK DOES NOT CATCH THIS, which is what makes it the nastiest false negative
+  # here. Measured on ruby 4.0.6 aarch64-linux, 100-byte embedded subject, 5 trials per cell --
+  # witnesses reported 200/200 in EVERY cell:
+  #
+  #                                      | fragment before | fragment after
+  #   GC.compact                         | moved 5/5       | moved 0/5   <-- silent dead run
+  #   verify_compaction_references        | moved 5/5       | moved 5/5
+  #     (expand_heap: true, toward: :empty)
+  #
+  # So it is MODE-SPECIFIC, and it bites exactly where compact_concurrent! lives: plain
+  # GC.compact only fills existing holes, while verify_compaction_references with expand_heap
+  # relocates almost everything and hides the ordering entirely. A harness that develops under
+  # compact! and then switches to compact_concurrent! for a threaded run can go silently dead.
+  #
+  #   Hunt.fragment!            # first
+  #   $holder = [subject]       # then the subject
+  #
+  # And when a row reports clean, assert the SUBJECT's own address moved -- witness counts prove
+  # the compactor ran, never that your subject was movable.
+  def fragment!(rounds = 60, size = 100)
+    keep = []
+    rounds.times { 3000.times { |i| s = +("F" * size); keep << s if i % 3 == 0 } }
+    keep.each_index { |i| keep[i] = nil if i.even? }   # holes for the compactor to slide into
+    GC.start
+    GC.start
+    nil
+  end
+
   # ------------------------------------------------------------------ witnesses
 
   # Objects that must relocate, proving a clean negative is not a "nothing moved" artifact.
+  # NOTE: witnesses moving does not mean the SUBJECT could move -- see fragment! above.
   #
   # Parked in a module-level array on purpose: a witness held in a live LOCAL is
   # conservatively pinned by the machine-stack scan and reports "did not move" even when
