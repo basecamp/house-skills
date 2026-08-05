@@ -452,6 +452,7 @@ class Tree:
         self.wrap_sites = []     # (path, dtype, struct_type, macro)
         self._helper_memo = {}   # ("dmark"|"dcompact") -> {fn -> kind}, with cycle guard
         self.func_spans = {}     # function name -> (path, body_start, body_end) offsets
+        self.func_defs = {}      # function name -> how many definitions carry that name
         self.static_values = set()   # file-scope `static VALUE name;` identifiers
         self._src_memo = {}      # predicate A: token -> [rhs], memoised
         for path, src in self.files.items():
@@ -565,7 +566,16 @@ class Tree:
     # -- structs ------------------------------------------------------------
 
     def _index_structs(self, path, src):
-        for m in re.finditer(r"\b(?:typedef\s+)?(struct|union)\s+(\w+)?\s*\{", src):
+        # `class` as well as struct/union, with an optional base-clause before the brace.
+        # vernier is C++ and declares `class Thread { public: ... VALUE ruby_thread; ... }`
+        # plus `class TimeCollector : public BaseCollector {`. Matching only struct|union
+        # made every one of its classes invisible, so the gem measured 0 suspects with 3
+        # unresolved sites while holding three genuinely unmarked VALUEs -- Thread::mark()
+        # is an EMPTY BODY that ThreadTable::mark() dutifully calls. A human found those;
+        # the sweep could not. vernier was the strongest candidate in the round-5 corpus
+        # precisely because it shares stackprof's architecture, and the query could not see it.
+        for m in re.finditer(
+                r"\b(?:typedef\s+)?(struct|union|class)\s+(\w+)?\s*(?::[^{;]*)?\{", src):
             open_idx = src.index("{", m.end() - 1)
             close = match_brace(src, open_idx)
             if close < 0:
@@ -636,6 +646,15 @@ class Tree:
                     # Offsets, not just text: predicate A reports the file:line of the
                     # coercion it found, and a body extracted into a string has none.
                     self.func_spans.setdefault(name, (path, k + 1, close))
+                    # C++ overloads collide on the bare name, and first-wins then decides
+                    # a verdict by file order -- the same disease as the round-5 (a)
+                    # de-dupe defect. vernier declares FOUR `mark()` bodies; the first is
+                    # Thread::mark, which is EMPTY, so `collector->mark()` resolved to it
+                    # and `stack_table_value` reported UNMARKED even though
+                    # BaseCollector::mark marks it on the next screen. Resolving this
+                    # properly needs the static type of the callee expression. Counting
+                    # the collision at least stops the arbitrary pick being invisible.
+                    self.func_defs[name] = self.func_defs.get(name, 0) + 1
 
     # -- rb_data_type_t -----------------------------------------------------
 
@@ -874,6 +893,11 @@ def value_fields(body):
     whitespace and missed `VALUE* items;` entirely.
     """
     fields = []
+    # C++ access specifiers are labels, not statements, so no `;` separates them from the
+    # member that follows. `class C { public: VALUE held; }` put `public:` and `VALUE held`
+    # in ONE fragment and lost the field -- i.e. the FIRST member after any access
+    # specifier was invisible. Dropping the labels is what makes the split see it.
+    body = re.sub(r"\b(?:public|private|protected)\s*:", " ", body)
     for frag in re.split(r"[;{}]", body):
         m = re.match(r"\s*(?:(?:const|volatile|_Atomic)\s+)*VALUE(?![A-Za-z0-9_])(.*)",
                      frag, re.S)
@@ -1328,10 +1352,16 @@ def report(name, tree, suspects, clears, verbose, grades=None):
                           ("HEAP-IF-COERCED", "REGISTERED", "IMMEDIATE-ONLY")
                           if counts.get(g)),
                   nostore))
+    # C++ overloads that collide on the bare name. Every one of them is a place where the
+    # callee body used to resolve a mark was picked by FILE ORDER. Non-zero here means
+    # some verdict in this tree may have been decided arbitrarily -- vernier's four
+    # `mark()` bodies are the measured case, and the first one is empty.
+    overloaded = sum(1 for n, c in tree.func_defs.items() if c > 1)
+    amb = ", %d overloaded name(s)" % overloaded if overloaded else ""
     print("%s: %d suspect(s), %d field(s) cleared "
-          "[%d wrap site(s), %d dtype(s), %d unresolved]%s"
+          "[%d wrap site(s), %d dtype(s), %d unresolved%s]%s"
           % (name, len(suspects), len([c for c in clears if c[2] != "-"]),
-             len(tree.wrap_sites), len(tree.dtypes), unresolved, cov),
+             len(tree.wrap_sites), len(tree.dtypes), unresolved, amb, cov),
           file=sys.stderr)
     return len(suspects)
 
@@ -1407,6 +1437,23 @@ typedef struct { VALUE held; } zbox_t;
 /* Callbacks all default: nothing here casts the payload or takes its sizeof. */
 static const rb_data_type_t z_type = { "zbox", { 0, RUBY_DEFAULT_FREE, 0, 0, }, };
 static VALUE z_alloc(VALUE k) { return rb_data_typed_object_zalloc(k, sizeof(zbox_t), &z_type); }
+"""
+
+RED_CXX_CLASS = """
+#include <ruby.h>
+/* C++, with a base clause. vernier is written this way and every one of its classes was
+   invisible: `struct|union` does not match `class`, so the gem measured 0 suspects with
+   3 unresolved sites while holding three genuinely unmarked VALUEs. */
+class Base { public: int n; };
+class Collector : public Base {
+    public:
+        VALUE held;
+        void mark() { }
+};
+static void c_free(void *p) { delete (Collector *)p; }
+static void c_mark(void *p) { Collector *c = static_cast<Collector *>(p); c->mark(); }
+static const rb_data_type_t c_type = { "collector", { c_mark, c_free, }, };
+static VALUE c_wrap(VALUE k, Collector *c) { return TypedData_Wrap_Struct(k, &c_type, c); }
 """
 
 RED_COMPACT_DECL = """
@@ -1670,6 +1717,8 @@ def self_test(base):
          RED_COMPACT_DECL, "UNMARKED", "held"),
         ("(starred) VALUE* with the star against the type is still a field",
          RED_COMPACT_DECL, "UNMARKED", "items"),
+        ("(c++) a class, with a base clause, is a wrapped struct too",
+         RED_CXX_CLASS, "UNMARKED", "held"),
     ):
         cats, fields = flagged_from_source(src)
         check(want_cat in cats and want_field in fields, "red " + label,
