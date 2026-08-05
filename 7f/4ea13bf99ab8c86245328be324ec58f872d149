@@ -1,0 +1,29 @@
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/harness.rb
+  s_4be3462dfbcc6c::t_7b466ea8d04683 45-53
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/SKILL.md
+  s_fa4a9a353f581a::t_767ff4887883c6 92-121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "7f4ea13bf99ab8c86245328be324ec58f872d149",
+  "prompts": {},
+  "sessions": {
+    "s_4be3462dfbcc6c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "827f3b63-7086-45e4-8bb6-865952443582",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    },
+    "s_fa4a9a353f581a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1ff70c75-321d-4874-913c-0fc25b3d811b",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
