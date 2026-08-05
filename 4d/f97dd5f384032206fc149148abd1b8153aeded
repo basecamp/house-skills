@@ -1,0 +1,27 @@
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/precedents.md
+  s_fa4a9a353f581a::t_712c8243b80677 45-99
+  s_fa4a9a353f581a::t_26f4eee98c3390 136-177
+  s_fa4a9a353f581a::t_844d24ba73547c 113-119
+  s_fa4a9a353f581a::t_91ffb9e1a39d17 3
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/SKILL.md
+  s_fa4a9a353f581a::t_8a2c78a731df44 167-172
+  s_fa4a9a353f581a::t_07302273ba0802 56-67
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/repro-class-a-sqlite3.rb
+  s_fa4a9a353f581a::t_835e59725982a2 1-89
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "4df97dd5f384032206fc149148abd1b8153aeded",
+  "prompts": {},
+  "sessions": {
+    "s_fa4a9a353f581a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1ff70c75-321d-4874-913c-0fc25b3d811b",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
