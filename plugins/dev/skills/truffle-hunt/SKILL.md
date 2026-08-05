@@ -97,7 +97,8 @@ Audit **what production actually runs**, not what's newest.
   `gem unpack NAME -v VERSION`, `npm pack NAME@VERSION`, `go mod download NAME@VERSION`.
   Record the path you audited next to the verdict. `gem unpack` and `go mod download` are inert;
   `npm pack` is not, on any spec that isn't a registry `NAME@VERSION` — see the trust boundary,
-  and fetch those inside the sandbox or with `--ignore-scripts`.
+  and fetch those inside the sandbox or with `--ignore-scripts`. All three name a version and
+  none of them names a *source*, which the next bullet is about; don't copy them alone.
 - **A version is not a source.** `NAME@VERSION` resolves through whatever registry the
   *auditing* machine is configured with, so it quietly substitutes the public package for a
   private-registry, tarball or git pin — and a fork that kept upstream's version number gets
@@ -109,13 +110,26 @@ Audit **what production actually runs**, not what's newest.
   ```sh
   jq -r '.packages["node_modules/NAME"] | .resolved, .integrity' package-lock.json
   npm pack "$RESOLVED"
-  echo "sha512-$(openssl dgst -sha512 -binary NAME-VERSION.tgz | base64)"   # == integrity
+  echo "sha512-$(openssl dgst -sha512 -binary NAME-VERSION.tgz | openssl base64 -A)"  # == integrity
   ```
+
+  `openssl base64 -A`, not `base64`: GNU coreutils wraps at 76 columns by default and an SRI
+  sha512 is 88, so a *correct* tarball compares unequal against the lock's single line. That is
+  a false alarm in an instrument whose whole job is telling real substitution from noise.
 
   The hash is the part that actually pins it: `registry.npmjs.org` in `resolved` is a magic
   value meaning *the currently configured registry*, so even the recorded URL can resolve
   somewhere else on your machine. `NAME@VERSION` is only equivalent once the hash matches. A git
   or tarball `resolved` is a build and not a fetch — see the trust boundary.
+
+  The same hole exists in the other two ecosystems, with different names on it. `Gemfile.lock`
+  names its remote per source block — `GEM remote:`, `GIT remote:`/`revision:`, `PATH remote:` —
+  and `gem fetch` takes `--source URL` and `--clear-sources`, so pin the source or a private
+  fork on a company gem server is served to you as the public gem of the same version. In Go,
+  `go mod download NAME@VERSION` is a *version query* and does not follow a `replace`: read
+  `go list -m -json all` for each module's actual `Dir`, `Replace` and `Origin`, audit the
+  replacement path or `vendor/` tree where there is one, and run `go mod verify` to confirm the
+  cache matches the recorded hashes.
 - **Name the platform too, wherever the lock pins one.** A version alone does not identify a
   platform-specific artifact, and the payloads genuinely differ — different vendored library,
   different compile flags, sometimes different sources. `gem unpack` takes only `-v`, so from a
