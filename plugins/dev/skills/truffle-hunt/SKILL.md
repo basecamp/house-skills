@@ -82,8 +82,15 @@ perishable knowledge in a hunt.
 Audit **what production actually runs**, not what's newest.
 
 - Read the lock your production artifact is built from, for **every** deployment, not one:
-  `Gemfile.lock`, `go.sum`, `package-lock.json`, `uv.lock`, `Cargo.lock`, the container base
-  image. Pins differ between apps, and that difference is often the finding.
+  `Gemfile.lock`, `package-lock.json`, `uv.lock`, `Cargo.lock`, `go.mod` **plus the resolved
+  build list**, the container base image. Pins differ between apps, and that difference is often
+  the finding.
+- **A hash file is not a build list.** `go.sum` is the closest-looking file and the wrong one:
+  it records "known hashes" for everything the module graph has ever needed, so it keeps stale
+  and unused entries, and a `replace` pointing at a local path or vendored tree has no entry in
+  it at all. Over-include and under-include at once. Derive the Go corpus from `go list -m all`
+  or `go list -deps`, honour `go.mod` replacements, and read `vendor/modules.txt` where a tree
+  is vendored.
 - **Vendored and custom builds count.** A fork's version string is not its upstream's;
   auditing upstream proves nothing about the fork you ship.
 - Fetch the **pinned** source, not the newest, naming the version explicitly —
