@@ -449,16 +449,47 @@ def escapes_by_return(fn, param):
     found = []
     ptr_params = {nm for decl, nm in fn.params
                   if nm and ("*" in decl or "[" in decl) and nm != param}
+
+    # Locals that ALIAS the interior before the return:
+    #
+    #     const char *p = RSTRING_PTR(str);
+    #     return p;
+    #
+    # Matching only `return RSTRING_PTR(str);` misses this, and it is a completely
+    # ordinary way to spell the very defect this predicate targets -- rm_str2cstr with one
+    # more line. Recall gap, so it fails silent: the funnel reports the conversion, finds
+    # no escape, and prints a clean sheet.
+    aliases = set()
+    for m in re.finditer(r"(?<![=!<>])=(?!=)", body):
+        semi = body.find(";", m.end())
+        if semi < 0:
+            continue
+        if not any(name in INTERIOR
+                   and param in re.findall(r"[A-Za-z_]\w*", " ".join(args))
+                   for name, args, _s, _e in find_calls(body[m.end():semi])):
+            continue
+        lhs = body[max(0, m.start() - 200):m.start()]
+        stmt = lhs[lhs.rfind(";") + 1:]
+        stmt = stmt[stmt.rfind("{") + 1:].strip()
+        # `p`, `char *p`, `const char *p` -- a plain local, not `*out` or `o->f`, which
+        # are the STORES-INTERIOR case handled below.
+        nm = re.match(r"^(?:[A-Za-z_]\w*\s+)*\*?\s*([A-Za-z_]\w*)$", stmt)
+        if nm and nm.group(1) not in ptr_params:
+            aliases.add(nm.group(1))
+
     for m in re.finditer(r"\breturn\b", body):
         semi = body.find(";", m.end())
         if semi < 0:
             continue
         expr = body[m.end():semi]
-        for name, args, s, _e in find_calls(expr):
-            if name in INTERIOR and param in re.findall(r"[A-Za-z_]\w*", " ".join(args)):
-                found.append(("RETURNS-INTERIOR", fn.bstart + m.start(),
-                              body[m.start():semi + 1].strip()))
-                break
+        hit = any(name in INTERIOR
+                  and param in re.findall(r"[A-Za-z_]\w*", " ".join(args))
+                  for name, args, _s, _e in find_calls(expr))
+        if not hit:
+            hit = bool(aliases & set(re.findall(r"[A-Za-z_]\w*", expr)))
+        if hit:
+            found.append(("RETURNS-INTERIOR", fn.bstart + m.start(),
+                          body[m.start():semi + 1].strip()))
     # store through an out-parameter: `*out = RSTRING_PTR(str)`, `out->f = ...`,
     # `out[i] = ...`. The caller owns that memory, so the pointer outlives this frame
     # exactly as a return value would.
@@ -558,7 +589,16 @@ def caller_derefs(tree, fn, param_idx, param, window=None, discharge=True):
             unmapped += 1
             continue
         arg = args[param_idx].strip()
-        if not re.fullmatch(r"[A-Za-z_]\w*(\s*\[[^\]]*\])?", arg):
+        # Member and indirect lvalues are RE-READABLE, so they belong in the scan, not in
+        # the discharge pile. `helper(w->path)` followed by `RSTRING_PTR(w->path)` is the
+        # CALLER-DEREFS class with a struct field standing in for the local: the helper
+        # converted its private VALUE copy and the caller's field still holds the original.
+        # Requiring a bare identifier discharged every one of those as "a temporary".
+        #
+        # Still discharged: genuine temporaries -- a call result, a cast, a literal,
+        # anything the caller has no name for and therefore cannot read a second time.
+        if not re.fullmatch(
+                r"[A-Za-z_]\w*(\s*(->|\.)\s*[A-Za-z_]\w*|\s*\[[^\]]*\])*", arg):
             discharged.append((caller, arg, off, "argument is a temporary, "
                                                  "not an lvalue the caller can re-read"))
             continue
@@ -910,6 +950,40 @@ def self_test(pool):
           "coverage counters make json's zero readable "
           "(%d files, %d fns, %d conversions)" % (rj.files, rj.funcs,
                                                   len(rj.conversions)))
+
+    # 9. The two recall gaps Codex found on #28, each as a mutation of a KNOWN RED. A
+    #    defect spelled a slightly different way has to stay found; both of these failed
+    #    silent, which is the worst direction for a sweep -- the funnel reported the
+    #    conversion, found no escape, and printed a clean sheet.
+
+    # 9a. The interior aliased into a local before the return. rm_str2cstr with one more
+    #     line, which is a completely ordinary way to write it.
+    alias_tree = _mutate(rmagick, [(
+        "ext/RMagick/rmutil.cpp",
+        "    return RSTRING_PTR(str);\n}",
+        "    {\n        char *p_alias_ = RSTRING_PTR(str);\n"
+        "        return p_alias_;\n    }\n}")])
+    ah = [h for h in _hits(alias_tree) if h[0] == "RETURNS-INTERIOR"
+          and "rm_str2cstr" in h[3]]
+    check(len(ah) == 1,
+          "RED stays red when the interior is aliased into a local before the return",
+          [(h[0], h[1], h[2]) for h in _hits(alias_tree)])
+
+    # 9b. The caller re-reads a struct MEMBER rather than a bare local. Requiring a plain
+    #     identifier discharged this as "a temporary", but `w->path` is re-readable and is
+    #     exactly the CALLER-DEREFS class with a field standing in for the local.
+    member_tree = _mutate(bootsnap, [(
+        "ext/bootsnap/bootsnap.c",
+        "  bs_cache_path(cachedir_v, namespace_v, path_v, &cache_path);\n"
+        "\n  return bs_fetch(RSTRING_PTR(path_v), path_v, cache_path, handler, args);",
+        "  struct { VALUE p; } holder_;\n  holder_.p = path_v;\n"
+        "  bs_cache_path(cachedir_v, namespace_v, holder_.p, &cache_path);\n"
+        "\n  return bs_fetch(RSTRING_PTR(holder_.p), path_v, cache_path, handler, args);")])
+    mh = [h for h in _hits(member_tree) if h[0] == "CALLER-DEREFS"
+          and "bs_cache_path" in h[3]]
+    check(any("holder_.p" in str(h[4]) for h in mh) or len(mh) >= 2,
+          "a re-readable struct MEMBER argument is scanned, not discharged as a temporary",
+          [(h[0], h[1], h[2]) for h in _hits(member_tree)])
 
     print("\n".join(log))
     print("\nself-test: %s" % ("PASS" if ok else "FAIL"))
