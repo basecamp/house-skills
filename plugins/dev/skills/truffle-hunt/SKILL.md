@@ -18,9 +18,9 @@ from debugging: you already know the shape of the bug, and the work is finding e
 proving each one, and not fooling yourself about the ones that look clean.
 
 This skill is the reusable machinery — the dog, not the truffle. The *scents* — the specific
-APIs, the mechanism, the measurements — live in a per-class **scent library**. See
-`ruby-cext-memory-truffle-hunt` for a worked example that produced 10 filed bugs across two
-rounds.
+APIs, the mechanism, the measurements — live in a per-class **scent library**, a companion
+skill naming one bug class and everything learned hunting it. Pair this skill with whichever
+scent library matches the class you are chasing; if none exists yet, §1 is how you start one.
 
 **Core principle:** the hunt's output is a set of **labelled verdicts**, not a list of bugs. A
 dependency cleared *by execution* is as valuable as a bug found, and an unlabelled claim is
@@ -70,8 +70,9 @@ Audit **what production actually runs**, not what's newest.
   image. Pins differ between apps, and that difference is often the finding.
 - **Vendored and custom builds count.** A fork's version string is not its upstream's;
   auditing upstream proves nothing about the fork you ship.
-- Fetch the **pinned** source, not the newest — `gem unpack NAME -v VERSION`,
-  `go mod vendor`, `npm pack`. Record the path you audited next to the verdict.
+- Fetch the **pinned** source, not the newest, naming the version explicitly —
+  `gem unpack NAME -v VERSION`, `npm pack NAME@VERSION`, `go mod download NAME@VERSION`.
+  Record the path you audited next to the verdict.
 - **Sweeping first-party code instead?** The corpus is every deployed branch, every vendored or
   generated copy, and anything built from a template. Enumerate it the same way, and be as
   explicit about what you excluded.
