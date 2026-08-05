@@ -1,0 +1,20 @@
+plugins/dev/skills/truffle-hunt/SKILL.md
+  s_727254054efaf1::t_1ea5a8fb518846 100-101
+  s_727254054efaf1::t_b00209daa3216c 113,116-119,124-132
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "8e21af727ca86a678873775e43f1560e798c1471",
+  "prompts": {},
+  "sessions": {
+    "s_727254054efaf1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cc60cb66-90bd-4906-acd1-763ce29396bc",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
