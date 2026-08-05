@@ -89,9 +89,9 @@ a heap object is not a defect. And a store whose RHS is not a BARE IDENTIFIER is
 shape at all -- `w->f = rb_to_int(arg)` keeps the conversion RESULT, which is the fix; a
 source route that flags any coerced token in the RHS flags every correct call site.
 
-ROUND 5: THREE OVER-CLEARS THIS SCRIPT SHIPPED WITH
+ROUND 5: FOUR OVER-CLEARS THIS SCRIPT SHIPPED WITH
 ---------------------------------------------------
-All three made a broken struct read as safe, which is the one failure mode the effort
+All four made a broken struct read as safe, which is the one failure mode the effort
 exists to prevent. Each has a generated red fixture in --self-test.
 
 (a) The de-dupe key was `(struct, field)` across ALL dtypes, so the first dtype to be
@@ -119,6 +119,16 @@ Plus a parsing defect found while fixing (a): `TypedData_Get_Struct(o, t, view ?
 the whole ternary as the dtype name, matching no rb_data_type_t, so the wrap site
 vanished. Both branches are now registered.
 
+(d) The function wrap forms -- `rb_data_typed_object_zalloc` and its three siblings --
+    take no struct-type argument, so they were registered with `None` and the struct was
+    dropped even though `rb_data_typed_object_zalloc(klass, sizeof(foo_t), &foo_type)`
+    names it one argument over. `struct_type_for`'s fallback covered that up wherever a
+    callback body carried a sizeof or a cast, which is why it survived the corpus: the
+    case it does NOT cover is a dtype whose callbacks are all `0`/`RUBY_DEFAULT_FREE` --
+    and a NULL dmark is what makes every VALUE field in the wrapper a suspect. The sweep
+    was blind exactly where its predicate is loudest, and said `struct type unresolved`.
+    `sizeof_arg` now reads the struct off the call site, and the fallback stays.
+
 ACCEPTANCE (--self-test): flags fieldTypes on mysql2 m2-red and not on m2-green; clears
 all six VALUE fields of sqlite3 pr-723's struct and flags whichever one a mutated tree
 stops marking; and, for predicate A, grades a generated stackprof reduction on all four
@@ -136,9 +146,9 @@ checkouts and are deliberately not committed here; rebuild the directory like so
     git clone https://github.com/sparklemotion/sqlite3-ruby sqlite3-pr723
     cd sqlite3-pr723 && git fetch origin pull/723/head && git checkout FETCH_HEAD
 
-Then: python3 sweep_unmarked.py --self-test acceptance   (expects 20/20 PASS)
+Then: python3 sweep_unmarked.py --self-test acceptance   (expects 22/22 PASS)
 
-Two of the twenty run against the REAL gem rather than a generated reduction, and look for
+Two of the twenty-two run against the REAL gem rather than a generated reduction, and look for
 fixtures beside the acceptance dir: `../corpus/stackprof-0.2.28` for the target grades, and
 `../fixtest/sp-pristine` + `../fixtest/sp-fixed` for the red/green pair (sp-fixed is the
 tree with `VALUE interval` changed to `long`, which is the upstream fix's shape). When they
@@ -687,6 +697,8 @@ class Tree:
                 if not args or len(args) <= max(di, ti or 0):
                     continue
                 st = type_name(args[ti]) if ti is not None else None
+                if st is None:
+                    st = self.sizeof_arg(args, di)
                 # A ternary picks between two dtypes; register BOTH, or the wrap site
                 # silently disappears (msgpack buffer_class.c:151).
                 for dtype in dtype_candidates(args[di]):
@@ -705,6 +717,32 @@ class Tree:
                 self.wrap_sites.append((path, key, st, macro))
                 if st and key not in self.type_of_dtype:
                     self.type_of_dtype[key] = st
+
+    SIZEOF = re.compile(r"\bsizeof\s*\(\s*(?:struct\s+)?(\w+)\s*\)")
+
+    def sizeof_arg(self, args, skip):
+        """Recover the wrapped struct from a `sizeof(...)` in the call's OTHER arguments.
+
+        The function forms carry no struct-type argument, so TYPED registers them with
+        `None` -- but `rb_data_typed_object_zalloc(klass, sizeof(foo_t), &foo_type)` names
+        the struct right there, one argument over. Dropping it is only survivable while
+        `struct_type_for`'s fallback has a callback body to scan, and the case that
+        matters most is exactly the one where it does not: a dtype whose callbacks are
+        `0`/`RUBY_DEFAULT_FREE` has no body carrying a `sizeof` or a cast, and a NULL
+        dmark is also what makes every VALUE field in the wrapper a suspect. So the
+        sweep went blind precisely where its own predicate is loudest, and reported the
+        site as `struct type unresolved, 0 suspects`.
+
+        Only a name that resolves to a struct we have a body for is accepted:
+        `sizeof(VALUE)`, `sizeof(*p)` and friends must not become the wrapped type.
+        """
+        for i, a in enumerate(args):
+            if i == skip:
+                continue
+            for m in self.SIZEOF.finditer(a):
+                if self.resolve(m.group(1)) in self.structs:
+                    return m.group(1)
+        return None
 
     # -- resolution ---------------------------------------------------------
 
@@ -1333,6 +1371,20 @@ static tbuf_t *t_get(VALUE o, int view) {
 }
 """
 
+# A fifth over-clear, same family: the struct type was discarded at the wrap site rather
+# than mis-read. The two halves have to appear TOGETHER to reproduce it -- a `zalloc` form
+# whose struct type lives only inside `sizeof`, and a dtype with no callback bodies for
+# `struct_type_for` to fall back on. Either alone still resolves. Measured before the fix:
+# "0 suspect(s), 0 cleared [1 wrap site(s), 1 dtype(s), 1 unresolved]" on a struct whose
+# every VALUE field is a suspect by construction.
+RED_ZALLOC = """
+#include <ruby.h>
+typedef struct { VALUE held; } zbox_t;
+/* Callbacks all default: nothing here casts the payload or takes its sizeof. */
+static const rb_data_type_t z_type = { "zbox", { 0, RUBY_DEFAULT_FREE, 0, 0, }, };
+static VALUE z_alloc(VALUE k) { return rb_data_typed_object_zalloc(k, sizeof(zbox_t), &z_type); }
+"""
+
 # GREEN control for the macro tier: a gem that updates through its OWN #define is safe,
 # and fixing (b) turned mysql2's patched tree red until macros were indexed as callees.
 GREEN_MACRO = """
@@ -1573,6 +1625,8 @@ def self_test(base):
          RED_C, "NO-COMPACT-UNKNOWN", "cb"),
         ("(ternary) both arms of a dtype ternary are wrap sites",
          RED_TERNARY, "UNMARKED", "payload"),
+        ("(zalloc) a struct named only inside sizeof is still the wrapped type",
+         RED_ZALLOC, "UNMARKED", "held"),
     ):
         cats, fields = flagged_from_source(src)
         check(want_cat in cats and want_field in fields, "red " + label,
