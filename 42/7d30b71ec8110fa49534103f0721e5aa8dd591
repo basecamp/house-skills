@@ -1,0 +1,31 @@
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/precedents.md
+  s_727254054efaf1::t_f9a34e611e24cf 35
+  s_727254054efaf1::t_90973a6859dfcd 138-139
+  s_727254054efaf1::t_37d199f6893f68 3-11
+  s_727254054efaf1::t_4a4e20ec3ea391 124
+  s_727254054efaf1::t_e5a8bf9ce3c0fe 98-110
+  s_727254054efaf1::t_d30424edd7be66 64-66
+  s_727254054efaf1::t_0f46becac2ecae 447
+  s_727254054efaf1::t_f8cd06836dede0 144-148
+  s_727254054efaf1::t_83a9c12b02fdc6 93
+  s_727254054efaf1::t_b43155e2257688 46
+  s_727254054efaf1::t_f99ca0d7e6822b 75-77
+  s_727254054efaf1::t_2f9b69dc096688 91
+  s_727254054efaf1::t_70fe19d463a65b 141
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "427d30b71ec8110fa49534103f0721e5aa8dd591",
+  "prompts": {},
+  "sessions": {
+    "s_727254054efaf1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cc60cb66-90bd-4906-acd1-763ce29396bc",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
