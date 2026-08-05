@@ -856,11 +856,35 @@ FIELD = re.compile(
 
 
 def value_fields(body):
-    """VALUE fields of a struct body, as (name, is_pointer)."""
+    """VALUE fields of a struct body, as (name, is_pointer).
+
+    Declarations are split on `;`, `{` and `}` -- NOT matched from the start of a line.
+    The old pattern was `^`-anchored under re.M, so it saw a field only when VALUE opened
+    the line. Measured on `typedef struct { int n; VALUE held; } compact_t;` with a NULL
+    dmark: 0 suspects, 0 CLEARED. Zero fields makes a struct read as structurally out of
+    scope, so a genuinely unmarked VALUE printed the same clean sheet as a gem that wraps
+    nothing -- the round-5 failure family again, a broken struct wearing a green tick, and
+    the one shape the coverage line cannot distinguish because the counts really are zero.
+
+    Splitting on braces as well as semicolons is what reaches the members of a nested
+    anonymous struct/union, which share the allocation and were the reason the old comment
+    said "scan whole".
+
+    `VALUE*` with the star against the type is accepted too: `VALUE\\s+` demanded
+    whitespace and missed `VALUE* items;` entirely.
+    """
     fields = []
-    # Nested anonymous struct/union bodies are part of the same allocation, so scan whole.
-    for m in FIELD.finditer(body):
-        for decl in split_args(m.group(1)):
+    for frag in re.split(r"[;{}]", body):
+        m = re.match(r"\s*(?:(?:const|volatile|_Atomic)\s+)*VALUE(?![A-Za-z0-9_])(.*)",
+                     frag, re.S)
+        if not m:
+            continue
+        rest = m.group(1)
+        # `VALUE (*cb)(...)` is a function pointer, not a reference the GC can mark; `=`
+        # only appears here in a C++ default member initialiser.
+        if "(" in rest or "=" in rest:
+            continue
+        for decl in split_args(rest):
             d = decl.strip()
             ptr = "*" in d or "[" in d
             nm = d.replace("*", " ").split("[")[0].strip()
@@ -1385,6 +1409,21 @@ static const rb_data_type_t z_type = { "zbox", { 0, RUBY_DEFAULT_FREE, 0, 0, }, 
 static VALUE z_alloc(VALUE k) { return rb_data_typed_object_zalloc(k, sizeof(zbox_t), &z_type); }
 """
 
+RED_COMPACT_DECL = """
+#include <ruby.h>
+/* Two ordinary C spellings the ^-anchored field matcher could not see. Both dmarks are
+   NULL, so both fields are genuinely unmarked -- and with zero fields found, the struct
+   read as "holds no VALUE, structurally out of scope" and printed 0 suspects, 0 cleared.
+   The coverage line cannot catch this one: the counts really are zero. */
+typedef struct { int n; VALUE held; } compact_t;
+typedef struct { VALUE* items; long len; } starred_t;
+static void c_free(void *p) { xfree(p); }
+static const rb_data_type_t compact_type = { "compact", { NULL, c_free, }, };
+static const rb_data_type_t starred_type = { "starred", { NULL, c_free, }, };
+static VALUE c_alloc(VALUE k) { compact_t *c; return TypedData_Make_Struct(k, compact_t, &compact_type, c); }
+static VALUE s_alloc(VALUE k) { starred_t *s; return TypedData_Make_Struct(k, starred_t, &starred_type, s); }
+"""
+
 # GREEN control for the macro tier: a gem that updates through its OWN #define is safe,
 # and fixing (b) turned mysql2's patched tree red until macros were indexed as callees.
 GREEN_MACRO = """
@@ -1627,6 +1666,10 @@ def self_test(base):
          RED_TERNARY, "UNMARKED", "payload"),
         ("(zalloc) a struct named only inside sizeof is still the wrapped type",
          RED_ZALLOC, "UNMARKED", "held"),
+        ("(compact-decl) a VALUE that does not open its line is still a field",
+         RED_COMPACT_DECL, "UNMARKED", "held"),
+        ("(starred) VALUE* with the star against the type is still a field",
+         RED_COMPACT_DECL, "UNMARKED", "items"),
     ):
         cats, fields = flagged_from_source(src)
         check(want_cat in cats and want_field in fields, "red " + label,
