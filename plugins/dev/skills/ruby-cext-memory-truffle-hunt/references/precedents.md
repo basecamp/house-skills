@@ -1,7 +1,14 @@
 # Precedents
 
-Real findings from three hunt rounds against the gems in the Basecamp app locks
-(bc3, haystack, fizzy, launchpad, queenbee).
+Real findings from four hunt rounds against the native gems pinned by the production
+`Gemfile.lock`s of five Rails applications.
+
+**Sanitised on purpose.** A scent library is a skill, and skills ship — this file is
+distributed both inside the `dev` plugin and as a standalone skill. So it names the gem, the
+version and the mechanism, and never which application pins what or how far along the fix is.
+That pairing is the operational half, it belongs in an internal ticket, and it is worthless
+here anyway: the durable content is the bug shape, not who was exposed to it in August 2026.
+Re-apply the §7 disclosure test whenever you add a row.
 
 Read the status honestly, because the skill it illustrates demands it:
 
@@ -25,7 +32,7 @@ bug classes actually look like in the wild, and they calibrate what is worth cha
 |---|---|---|---|
 | psych | `psych_emitter.c:97` — `yaml_emitter_set_output(emitter, writer, (void *)self)` | Emitter's own `VALUE` stored in libyaml, read on every write | [ruby/psych#811](https://github.com/ruby/psych/issues/811) — reproduced on 5.2.6–5.4.0 (oldest tested; range likely wider). **Exposure is narrow**: streaming `Psych::Emitter` only, `Psych.dump` unaffected |
 | nokogiri | `SAX::PushParser` — raw `VALUE` in libxml2 `_private`, no `dmark`/`dcompact` | Stored at registration, read later | [sparklemotion/nokogiri#3665](https://github.com/sparklemotion/nokogiri/issues/3665) |
-| fiddle | `Fiddle::Closure` | SEGV after compaction | [ruby/fiddle#211](https://github.com/ruby/fiddle/issues/211) — **queenbee ships fiddle 1.1.8** |
+| fiddle | `Fiddle::Closure` | SEGV after compaction | [ruby/fiddle#211](https://github.com/ruby/fiddle/issues/211) — reproduced on 1.1.8 |
 | pg | — | — | [ged/ruby-pg#734](https://github.com/ged/ruby-pg/issues/734) |
 | libxml-ruby | `ruby_xml_registry.c:8` + reader | Three findings. The worst is not a raw `VALUE` at all: a file-static `st_table` of `xmlNodePtr → VALUE` held as raw `st_data_t` and read back **inside mark functions**, feeding dead VALUEs to `rb_gc_mark` | [xml4r/libxml-ruby#231](https://github.com/xml4r/libxml-ruby/issues/231) — corrupts the collector (`[BUG] try to mark T_NONE object`), not just a user call |
 | sqlite3 | `database.c:525`, `aggregator.c:248` — `(void *)block` to `sqlite3_create_function` | Same shape PR #466 fixed for `busy_handler` and never extended | reported to the project |
@@ -36,7 +43,7 @@ bug classes actually look like in the wild, and they calibrate what is worth cha
 |---|---|---|---|
 | google-protobuf | `map.c` `Map_index_set`, `message.c` `Map_initialize_kwarg` — key built with a NULL arena aliases a *temporary*, then the value conversion allocates before `upb_Map_Set` copies the key | Liveness. **Fires under ordinary GC** — one corruption in 150k iterations vs 100/100 under `GC.stress`. Silent key corruption, not a crash | [protocolbuffers/protobuf#29023](https://github.com/protocolbuffers/protobuf/issues/29023) — 4.29.3→4.35.1 + HEAD |
 | openssl | `ossl_ssl.c:810/814/830` — ALPN/NPN callbacks stash the same `VALUE` the `dcompact` doesn't update | Class A regression from converting SSLContext to `rb_gc_mark_movable` | [ruby/openssl#1088](https://github.com/ruby/openssl/issues/1088) — **`master` only**; all releases pin and are safe |
-| trilogy | `cext.c` — `connopt.hostname`/`path` re-read after `try_connect` to format the error | Mobility; `try_connect` releases the GVL | [trilogy-libraries/trilogy#312](https://github.com/trilogy-libraries/trilogy/issues/312) — 2.9.0/2.10.0 fail, **haystack pins 2.9.0** |
+| trilogy | `cext.c` — `connopt.hostname`/`path` re-read after `try_connect` to format the error | Mobility; `try_connect` releases the GVL | [trilogy-libraries/trilogy#312](https://github.com/trilogy-libraries/trilogy/issues/312) — 2.9.0 and 2.10.0 both fail |
 | nokogiri | `xml_reader.c` — `xmlReaderForMemory(StringValuePtr(rb_buffer), …)` | Mobility, **only when linked against libxml2 ≤ 2.10** | [sparklemotion/nokogiri#3666](https://github.com/sparklemotion/nokogiri/issues/3666) — packaged builds measured safe (2.12.9 and 2.13.9), `--use-system-libraries` against a distro 2.9.x not |
 | puma | `mini_ssl.c:294-296` — key passphrase as `SSL_CTX` passwd_cb userdata | Mobility; **latent** — no public path dereferences it after the frame | [puma/puma#3984](https://github.com/puma/puma/issues/3984), filed as latent |
 
@@ -54,8 +61,9 @@ built artifacts (`nm -D`), *both* are wrong:
 
 - `trilogy_xallocator.h` **exists only in 2.12.x.** 2.9.0/2.10.0 `src/buffer.c:36` is plain
   libc `realloc` — `nm` shows `realloc@GLIBC_2.17`; 2.12.6 shows `ruby_xrealloc` and no libc
-  allocator at all. So the GC window the brief described exists in **fizzy's** pin, not
-  haystack's — the opposite of what the plan assumed.
+  allocator at all. So the GC window the brief described exists in the **2.12.x** pin and not
+  the 2.9.0 one — the opposite of the way round the plan assumed, and a reminder that "newer"
+  and "safer" are independent when the change is which allocator got compiled in.
 - All three sites are nevertheless **clean by execution**, for a structural reason neither
   round found: `trilogy_buffer_expand` only fires once the packet buffer passes
   `TRILOGY_DEFAULT_BUF_SIZE` = 32768, so the source String must be tens of KB to reach an
@@ -64,8 +72,9 @@ built artifacts (`nm -D`), *both* are wrong:
 
 **Neither trilogy fix is in a released version.** `fe2293f` and PR #313 (`63392f00`) both
 merged 2026-08-05; `v2.12.6` is tagged 2026-06-23 and `git compare` puts it 21 and 20
-commits behind them. Round 2's precedent row implied an upgrade path for #312. There is
-none yet — this is internal remediation *blocked on an upstream release*.
+commits behind them. Round 2's precedent row implied an upgrade path for #312; there is none
+yet. **Merged is not released**, and a precedent table that records only the merge quietly
+tells the next reader to close the finding.
 
 ## Round 3 — a `VALUE` handed to a C library that nothing pins
 
@@ -79,19 +88,26 @@ non-Ruby library where the owning object's `dmark` does not call the **pinning**
 | sqlite3 | `database.c:283` trace, `:671` authorizer, `:525` create_function, `:766` collation, `aggregator.c:248`, `aggregator.c:79` | Six live sites. `database_mark` pinned only `busy_handler`. `(void *)self` is the worst shape: `SQLite3::Database` is a T_DATA that **relocates**, and its slot is reused immediately | our own repo — [PR #723](https://github.com/sparklemotion/sqlite3-ruby/pull/723) closes all six; red/green verified 0/3 → 3/3 |
 | openssl | `ossl_ssl.c:810` (NPN advertise), `:814` (NPN select) | Round 2 could not reach these because both ends negotiated TLS 1.3, where NPN is never sent. A TLS 1.2 ceiling made both fail immediately | extends [ruby/openssl#1088](https://github.com/ruby/openssl/issues/1088) — master only |
 | nokogiri | `xslt_stylesheet.c:63` `_private`, `xml_reader.c:682` and `xml_sax_parser_context.c:93` `(void *)rb_io` | Stylesheet/IO `VALUE` in a persistent libxml2/libxslt object with no `dmark`/`dcompact`, read on every later use | new upstream issues; affected at HEAD |
-| mysql2 | `result.h:9` `fieldTypes` | **Not this class at all** — a `VALUE` field of an xmalloc'd struct that no `dmark` marks. Freed by *ordinary* GC inside the very call that allocates it; `rb_ary_store` then writes through a freed slot | upstream (affected at HEAD, 0.5.4–0.5.7) **and** internal: the `0.5.4.latin1utf8` fork carries it |
+| mysql2 | `result.h:9` `fieldTypes` | **Not this class at all** — a `VALUE` field of an xmalloc'd struct that no `dmark` marks. Freed by *ordinary* GC inside the very call that allocates it; `rb_ary_store` then writes through a freed slot | upstream (affected at HEAD, 0.5.4–0.5.7). A private fork branched off 0.5.4 carries it too — **auditing upstream proves nothing about a fork**, whatever its version string says |
 | zlib | `zlib.c:1230` store / `:1116` read — `z->stream.opaque = (voidpf)obj` | `zstream_mark` marks `buf` and `input`, never `obj`; the `Z_NEED_DICT` branch reads it back | ruby/zlib, **all versions incl. HEAD** — private channel: it is a CRuby default gem |
-| pg | `pg_connection.c:2994/:3055` | `PQsetNotice*` userdata; `pgconn_gc_compact` has no `self` back-reference | already covered by [ged/ruby-pg#734](https://github.com/ged/ruby-pg/issues/734); pg is in no app lock |
+| pg | `pg_connection.c:2994/:3055` | `PQsetNotice*` userdata; `pgconn_gc_compact` has no `self` back-reference | already covered by [ged/ruby-pg#734](https://github.com/ged/ruby-pg/issues/734); pg was outside the audited corpus |
 | prometheus-client-mmap | `mmap.rs:535-541` `track_rstring` | **A third shape.** `let key = str.as_raw()` — a `VALUE` laundered through Ruby as an Integer and used as a WeakMap key. Compaction leaves a stale key; a later string in the recycled slot collides and **evicts a live entry** | upstream (gitlab-org); affected at HEAD |
 
 ### Out of class, found by the same sweep
 
-- **zlib-basecamp-patch 1.1.1 ships CVE-2026-27820.** `zstream_buffer_ungets`
-  (`zlib.c:825-844`) overflows `z->buf`. Fixed upstream Nov 2025 and released 2026-03-05;
-  the fork is frozen at ruby/zlib `785d747` (2021-03-07) and its `lib/zlib.so` **shadows the
-  patched default gem** on `require "zlib"`. bc3 and haystack both ship it. Reproduced 3/3
-  via `GzipReader#ungetc`, patched stdlib clean 3/3. The diff is the deliverable here: the
-  entire fork is a version-string bump plus upstream's own 6-line `Bug #10961` fix.
+- **A private zlib fork re-exposed CVE-2026-27820, and shadowed the fix.** `zstream_buffer_ungets`
+  (`zlib.c:825-844`) overflows `z->buf`. Upstream fixed it Nov 2025 and released 2026-03-05 —
+  but a fork frozen at ruby/zlib `785d747` (2021-03-07) never received that or anything else in
+  between, and its `lib/zlib.so` **shadows the patched default gem** on `require "zlib"`. So the
+  patched stdlib is installed and is not the code that runs. Reproduced 3/3 via
+  `GzipReader#ungetc`; the patched stdlib is clean 3/3 through the same harness.
+
+  Three generic lessons, which is why this is here at all. A fork carried for one small patch
+  silently inherits **every** fix it has missed since — diff it against upstream and check when
+  it last merged, not what its version string says. A fork of a **default gem** is invisible to
+  a lockfile-level audit, because the vulnerable copy is not the one the lock names. And the
+  remedy is usually smaller than the fork: this one was a version-string bump plus upstream's
+  own 6-line `Bug #10961` fix, so the diff *was* the deliverable.
 - **zstd-ruby `skippable_frame.c:25-26`** — `rb_str_new(input_data, input_size + 8 + skip_size)`
   reads past the end of the argument's buffer. Deterministic SEGV at 1 MiB.
 - **trilogy `cext.c:1190` (HEAD)** — `rb_enc_get(str)` before `StringValue(str)`, so any
@@ -105,7 +121,7 @@ non-Ruby library where the owning object's `dmark` does not call the **pinning**
 Every finding below was **independently re-reproduced** by a second agent that was forbidden from
 reading the first one's harness, before anything was filed. That caught a mis-diagnosis carried
 for a whole round (rmagick), a false positive in our own sweep (json), and a wrong correction
-(haystack) — see the calibration notes.
+to an application-side encoding claim — see the calibration notes.
 
 | Gem | Site | Mechanism | Outcome |
 |---|---|---|---|
@@ -119,15 +135,17 @@ for a whole round (rmagick), a false positive in our own sweep (json), and a wro
 
 - **gvltools 0.4.0** — a real use-after-free (thread-scoped pointer cache anchored by *fiber-scoped*
   `Thread#[]=`; 3/3 per vector, one needing no app misuse). **Fixed upstream in 0.5.0** before the
-  hunt started, by the same change we derived. Internal remediation, not a filing.
+  hunt started, by the same change we derived. Routes to a version bump, not a filing — and
+  checking that first would have saved the reproducer.
 - **bootsnap 1.24.5 namespace overflow** — confirmed 3/3 under ASan, but **fixed in 1.24.6** and
-  independently reported by someone else. Internal bump only. Worth recording: the 1.24.6 changelog
+  independently reported by someone else. A version bump, not a filing. Worth recording: the 1.24.6 changelog
   does not mention the fix, `bundler-audit` has no entry, and a Dependabot PR proposing the bump sat
   unmerged for two months. Neither the changelog nor the tooling would have surfaced it.
-- **zlib `zstream_run_func`** — the fork violates the GVL invariant 4236/4236 and 1498/1498;
-  **upstream 3.2.3 measures 0/4236 and 0/1498.** Fork-only, and no app ships the fork any more, so
-  the blast radius is zero. Round 3's "~1/700" was the concurrency-overlap rate, not the violation
-  rate, which is 100%.
+- **zlib `zstream_run_func`** — the same frozen fork violates the GVL invariant 4236/4236 and
+  1498/1498; **upstream 3.2.3 measures 0/4236 and 0/1498.** Fork-only, so there is nothing to
+  file. The number worth keeping is the correction: round 3's "~1/700" was the
+  concurrency-*overlap* rate, not the violation rate, which is 100%. Report the rate of the
+  thing you are claiming, not the rate of the window you observed it through.
 
 ### Cleared by execution this round
 
@@ -426,7 +444,7 @@ safe teaches the idiom.
 
 | Gem | Why safe |
 |---|---|
-| mysql2 (incl. the `0.5.4.latin1utf8` fork) | Query path: `args` is a stack local so the converted String is pinned even mid-nogvl, **and** there are explicit `RB_GC_GUARD`s — belt and braces, not bare pinning. Survived ~1700 concurrent compactions with the strings demonstrably relocating. `mysql_ssl_set` copies (verified against the real libmysqlclient in C). |
+| mysql2 (and the private 0.5.4 fork) | Query path: `args` is a stack local so the converted String is pinned even mid-nogvl, **and** there are explicit `RB_GC_GUARD`s — belt and braces, not bare pinning. Survived ~1700 concurrent compactions with the strings demonstrably relocating. `mysql_ssl_set` copies (verified against the real libmysqlclient in C). |
 | ffi | Best-behaved of the set: `rb_gc_mark_movable` **plus** a real `dcompact` using `rb_gc_location`, everywhere. |
 | msgpack | Pins with `rb_gc_mark`; keeps its own copy of any non-frozen/non-binary feed String. |
 | yajl-ruby | Correct *by accident* — no `RB_GC_GUARD` on the parse paths; safe only because the argument `VALUE` is stack-live and therefore pinned. Fragile to refactoring. |
