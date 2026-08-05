@@ -26,11 +26,20 @@ scent library matches the class you are chasing; if none exists yet, §1 is how 
 dependency cleared *by execution* is as valuable as a bug found, and an unlabelled claim is
 worth nothing. Most of the discipline below exists to stop a broken thing from looking clean.
 
-**Trust boundary.** A hunt builds and runs source you don't own. Fetching a package is not the
-risky part — *building* it is: `extconf.rb`, `build.rs`, install hooks and test suites all
-execute arbitrary code, as the author wrote it, before you have read a line of it.
+**Trust boundary.** A hunt builds and runs source you don't own, and the author's code starts
+executing earlier than the verb suggests. *Building* is the obvious half: `extconf.rb`,
+`build.rs`, install hooks and test suites all execute arbitrary code, as the author wrote it,
+before you have read a line of it.
 
-**Run the build and the reproducers in an isolated environment** — a container, VM, or
+**Fetching is not reliably inert.** Only a registry tarball is a pure download. `npm pack` takes
+a git url or a local folder as readily as `NAME@VERSION`, and on those it runs the `prepack`
+lifecycle script — and for a git dependency installs the package's `devDependencies` and runs
+`prepare` — before it has a tarball to hand you. That is author-written code running on your
+host during what reads as a fetch. Treat any fetch that can resolve a git, folder or tarball-url
+spec as a build: run it inside the sandbox, or disable the hooks (`npm pack --ignore-scripts`)
+and know you are then packing something whose build step never ran.
+
+**Run the fetch, the build and the reproducers in an isolated environment** — a container, VM, or
 equivalent sandbox with no access to your credentials, SSH keys, cloud tokens, or internal
 network. A scratch directory on your workstation is *not* isolation; it shares everything that
 matters. Never build against a live production dependency, and never load an artifact you
@@ -79,7 +88,9 @@ Audit **what production actually runs**, not what's newest.
   auditing upstream proves nothing about the fork you ship.
 - Fetch the **pinned** source, not the newest, naming the version explicitly —
   `gem unpack NAME -v VERSION`, `npm pack NAME@VERSION`, `go mod download NAME@VERSION`.
-  Record the path you audited next to the verdict.
+  Record the path you audited next to the verdict. `gem unpack` and `go mod download` are inert;
+  `npm pack` is not, on any spec that isn't a registry `NAME@VERSION` — see the trust boundary,
+  and fetch those inside the sandbox or with `--ignore-scripts`.
 - **Name the platform too, wherever the lock pins one.** A version alone does not identify a
   platform-specific artifact, and the payloads genuinely differ — different vendored library,
   different compile flags, sometimes different sources. `gem unpack` takes only `-v`, so from a
