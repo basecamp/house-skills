@@ -89,14 +89,36 @@ PEM: an RSA-2048 private key is ~1675 bytes and a cert ~977 — heap. EC keys an
 are short.) A heap buffer is *stable* under compaction, **so a test using only a large string
 exercises liveness alone and will wrongly clear a gem that has the mobility bug.**
 
-**Length is a proxy, not the property.** Measured on ruby 4.0.6 and 3.4.10 (arm64-darwin), a
-String that grew by `<<`, was built with `String.new(capacity:)`, or came from `File.read` /
-`IO#read` / `StringIO#read` is heap-allocated **even at 100 bytes** — and therefore stable
-under compaction. That is the same false negative running in the opposite direction, and it
-hits the realistic case: input read off a socket or file.
+**Length is a proxy, not the property — and neither is the constructor.** At one fixed length
+of 100 bytes, some constructions embed and some malloc, and *which* is platform-dependent.
+Measured on ruby 4.0.6 and 3.4.10 (arm64-darwin) and 4.0.5 and 3.4.10 (x86_64-linux); all four
+put the literal boundary at 616:
 
-Treat that list as measured, not universal — construction internals change between releases.
-The assertion is the source of truth on whatever interpreter you are actually running:
+| 100-byte String built by | darwin | linux |
+|---|---|---|
+| `"a" * 100` literal | embedded | embedded |
+| `String.new(capacity: 100) << …` | **embedded** | **embedded** |
+| `String.new(capacity: 0 or 1000) << …` | heap | heap |
+| `+"" << ("a" * 100)`, or grown a byte at a time | heap | heap |
+| `File.read(path)`, `IO#read` with no length | heap | **embedded** |
+| `IO#read(100)`, `IO#readpartial(100)`, `sock.read(100)` | **embedded** | **embedded** |
+| `IO#read(100, buf)` into a reused buffer | heap | heap |
+| `sock.readpartial(4096)` returning 100 bytes | heap | heap |
+| `StringIO#read` | heap | heap |
+
+Three traps in there, and they run in both directions:
+
+- **`String.new(capacity: n)` is not a "force a heap buffer" idiom.** It only mallocs when `n`
+  is at or above the embedded boundary — ask for 100 and you get an embedded String, so a
+  subject built this way to test *liveness* is silently testing mobility, or vice versa.
+- **A sized read is embedded.** `sock.read(n)` and `readpartial(n)` for small `n` allocate at
+  the requested size, so the mobility case is reachable from exactly the input everyone assumes
+  is malloc'd. A read with no length, or into a reused buffer, is not.
+- **`File.read` of a small file differs by platform** — embedded on Linux, heap on macOS.
+  Enough on its own to make one reproducer pass on one CI runner and fail on another.
+
+So do not infer the regime from how the String was built any more than from its length. The
+assertion is the only source of truth on the interpreter you are actually running:
 
 ```ruby
 raise "subject is not embedded" unless Hunt.embedded?(subject)

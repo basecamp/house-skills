@@ -42,10 +42,15 @@ module Hunt
     nil
   end
 
-  # Length is a PROXY, not the property. A String that grew by <<, was built with
-  # String.new(capacity:), or came from File.read/IO#read/StringIO#read is heap-allocated
-  # even at 100 bytes -- stable under compaction, and it will clear a gem that has the
-  # mobility bug. Always assert this on the actual subject; never infer from bytesize.
+  # Neither length nor CONSTRUCTOR predicts the regime. At 100 bytes, measured on 4.0.6
+  # arm64-darwin and 4.0.5 x86_64-linux (boundary 616 on both): a literal,
+  # String.new(capacity: 100), and any SIZED read -- IO#read(100), readpartial(100),
+  # sock.read(100) -- are EMBEDDED. capacity: 0 or 1000, +"" <<, byte-at-a-time growth,
+  # IO#read(100, buf) into a reused buffer, and StringIO#read are HEAP. File.read of a
+  # small file splits by PLATFORM: embedded on Linux, heap on macOS.
+  #
+  # So String.new(capacity:) is not a "force a malloc'd buffer" idiom, and a socket read is
+  # not reliably heap. Always assert this on the actual subject; infer nothing, from either.
   def embedded?(str)
     raise TypeError, "not a String: #{str.class}" unless str.is_a?(String)
 
