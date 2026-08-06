@@ -643,3 +643,33 @@ The C++ `namespace` / `extern "C"` brace dispositions, ported from predicate C i
 **no rows at all** and took sassc from **95 to 983 indexed functions** — about 90% of that tree had
 been invisible to every later stage, reading as a clean gem. When a fix is row-neutral, report the
 funnel delta or the fix looks like a no-op.
+
+### Iteration count is not sensitivity — instrument the window, not the loop
+
+psych's `start_document_try` was reported in round 8 as needing a *coercible object* among the tag
+directives, on the strength of "0/30 with plain Strings". **Round 9 refuted that**: the plain
+round-trip (`Encoding.default_internal = ISO-8859-1`, then `Psych.parse_stream(src).to_yaml` with
+8 `%TAG` directives) corrupts **20/20 with zero compactions**, on all nine ruby × psych cells. No
+coercion needed; it is a plain use-after-free.
+
+The more transferable half is why the *non*-adversarial number was worthless. 380,000 clean
+round-trips sounds decisive. But **300,000 of them had zero GCs inside the emit call** — the export
+dups were embedded-size, so they generated no `malloc_increase` and no malloc-limit GC ever landed
+in the window. Pushing the handles past the 616-byte boundary bought real sensitivity: the
+remaining 80,000 put **5,485 ordinary GCs and 3 compactions inside the window**, still clean. So
+the honest bound is "one per 5,485 in-call GCs", not "one per 380,000 iterations".
+
+This is the **same mechanism as the sqlite3 aggregate finding** — under the embedded boundary the
+conversions allocate nothing, so the GC rate that drives the defect never rises. Two independent
+findings, one lesson: **when the subject is a converted String, iteration count measures nothing
+until you have measured GCs inside the window.** Count them with a probe; do not infer them.
+
+### Two burned false negatives in the reachability query itself
+
+- **`xargs -d '\n'` is GNU-only.** BSD `xargs` rejects it, and the sweep reported **0 hits across
+  989 gem paths** with the error swallowed. A reachability query that returns zero because it never
+  ran is indistinguishable from a gem nothing calls. Use `tr '\n' '\0' | xargs -0`, and validate
+  the query against a known instance before trusting its silence — psych's own tree, in that case.
+- **A name-directory lookup misses git and path gems.** `bundle list --paths` resolved **989** gem
+  paths for the five apps; **66 of 446 locked names are git- or path-sourced**, and any query that
+  builds paths from `<name>-<version>` skips every one of them. Our own forks are in that 66.
