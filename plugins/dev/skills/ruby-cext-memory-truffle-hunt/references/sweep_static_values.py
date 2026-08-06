@@ -214,8 +214,24 @@ cannot match it.
                     discharge harder, but an extra registration match would CLEAR a row, and
                     that is the direction this sweep is not allowed to be wrong in.
 
+The descent was ported into the SLOT walk and not into the FUNCTION index, and that is the
+half-fix a review caught a round later. A file-scope slot inside `namespace prof { ... }`
+was found, while `_index_funcs` still counted raw braces -- so every function defined
+inside a namespace or an `extern "C"` block sat at nonzero depth, was never indexed, and
+its body never contributed a span. A namespaced function holding `static VALUE cache;
+cache = rb_str_new_cstr("x");` therefore measured `slots 0/0, HITS 0`: not a row dropped
+but an INDEX emptied, which is the shape of zero that reads as a clean gem. The walk now
+lives in tu_scope.py -- one implementation, four ports' worth of the same lesson -- and
+both the slot walk and the function index read the depth from it.
+
 KNOWN, NOT FIXED HERE
 ---------------------
+A METHOD BODY defined inline in a class body is still not scanned for function-local
+statics: a class body is a real scope, so it is not transparent, and the members walk reads
+declarations rather than statements. `class R { VALUE f() { static VALUE cache; ... } };`
+is therefore invisible. Same direction as the defect above and a smaller population --
+recorded here rather than left for a third round to rediscover.
+
 A namespace-scope static is keyed BARE (`cache`), because top_level_units walks THROUGH a
 namespace rather than qualifying what it finds -- only class bodies qualify. So a
 registration spelled from outside the namespace, `rb_global_variable(&prof::cache)`,
@@ -384,17 +400,7 @@ def strip_directives(src):
     return "".join(out)
 
 
-def match_brace(src, open_idx):
-    """Index of the `}` matching the `{` at open_idx, or -1."""
-    depth = 0
-    for i in range(open_idx, len(src)):
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
+match_brace = tu_scope.match_brace
 
 
 def split_args(text):
@@ -474,65 +480,20 @@ def find_calls(body):
     return out
 
 
-# C++ SCOPE HEADS. Each is matched against the text between the last `;`/`}` and a `{`, so
-# every pattern is `$`-anchored.
-#
-# `extern "C"` reaches here AFTER strip_noise, which blanks string BODIES and keeps the
-# quotes -- the text is `extern " " {`, so the pattern has to allow a blanked literal.
-NAMESPACE_HEAD = re.compile(r"\bnamespace(?:\s+\w+(?:\s*::\s*\w+)*)?\s*$")
-LINKAGE_HEAD = re.compile(r"\bextern\s*\"[^\"]*\"\s*$")
+# C++ SCOPE HEADS AND THE WALK THAT TREATS THEM AS TRANSPARENT -- one implementation, in
+# tu_scope.py, beside the linkage rule. Four ports of the same three brace dispositions
+# across three scripts before it was written down once; the fourth was this file's own
+# function index, which kept counting raw braces after its slot walk had been fixed.
+NAMESPACE_HEAD = tu_scope.NAMESPACE_HEAD
+LINKAGE_HEAD = tu_scope.LINKAGE_HEAD
+top_level_units = tu_scope.top_level_units
 # A NAMED class/struct/union body, optionally `final`, optionally with a base clause.
 # Anonymous aggregates (`static struct {`) deliberately do not match: they stay on the
 # existing _unit_slots path, which reads their declarator list and walks the OBJECT.
+# Class bodies are THIS file's business alone -- they are a real scope with a qualified
+# key, so tu_scope's walk yields them inert and class_scopes below descends them.
 CLASS_HEAD = re.compile(r"\b(?:class|struct|union)\s+(\w+)\s*(?:final\b\s*)?(?::[^{;]*)?$")
 ACCESS_LABEL = re.compile(r"\b(?:public|private|protected)\s*:")
-
-
-def top_level_units(src, base=0):
-    """[(offset, text)] -- one entry per declaration or definition at static-storage scope.
-
-    The `{` disposition is the whole trick. A depth-0 brace is part of the CURRENT
-    statement when it opens an aggregate (`static struct {`) or an initialiser (`... = {`),
-    and ends it when it opens a function body. Getting that backwards merges
-    `Init_stackprof`'s body into the next declaration and the `static VALUE sym_object,
-    ...;` line after it becomes a declarator list of the function -- silently dropping 28
-    slots, which is a recall hole that reports as a clean sheet.
-
-    C++ adds a third disposition, and it is the one this walk was missing: a brace that
-    opens a scope which is NOT a new storage duration. `namespace prof {` and `extern "C" {`
-    both read as function bodies to the rule above, so their entire contents were consumed
-    as one unit and dropped -- every namespace-scope `static VALUE` in a C++ gem, invisible.
-    They are walked THROUGH: `base` carries the enclosing offset so a slot found three
-    namespaces deep still reports its own file:line.
-
-    Class BODIES are not walked here. They are a different scope with a different key
-    (`Class::member`), and _index_slots reads them through class_scopes; a class body still
-    falls out of this loop as an inert unit that _unit_slots rejects.
-    """
-    n, i, start = len(src), 0, 0
-    while i < n:
-        c = src[i]
-        if c == "{":
-            close = match_brace(src, i)
-            if close < 0:
-                return
-            pre = src[start:i].rstrip()
-            if NAMESPACE_HEAD.search(pre) or LINKAGE_HEAD.search(pre):
-                for u in top_level_units(src[i + 1:close], base + i + 1):
-                    yield u
-                i = start = close + 1
-                continue
-            if re.search(r"\b(struct|union|enum)\b\s*\w*$", pre) or pre.endswith("="):
-                i = close + 1
-                continue
-            yield base + start, src[start:close + 1]
-            i = start = close + 1
-            continue
-        if c == ";":
-            yield base + start, src[start:i + 1]
-            i = start = i + 1
-            continue
-        i += 1
 
 
 def class_scopes(src, base=0, prefix=""):
@@ -938,13 +899,26 @@ class Tree:
         storage duration -- and a `static VALUE cache;` written at column zero inside a
         function body has exactly the same storage duration and exactly the same defect,
         while matching nothing at all. The spans replace the proxy with the property.
+
+        DEPTH IS COUNTED OVER STORAGE SCOPES, NOT BRACES, and this is the fourth place in
+        the directory that has had to learn it. `namespace X {` and `extern "C" {` nest
+        their contents without giving them a new storage duration; counting raw braces put
+        every definition inside one at depth 1, so it was never indexed, its body never
+        contributed a span, and every function-local `static VALUE` in a C++ gem with the
+        ordinary layout was invisible. The measured before-state on a namespaced function
+        holding `static VALUE cache; cache = rb_str_new_cstr("x");` is `slots 0/0, HITS 0`
+        -- an emptied index, not a dropped row, which is why it reads as a clean gem and
+        why the counters rather than the hit count are what the generated red asserts.
+
+        The slot walk above was ported in round 8 and this was not, so the two halves of
+        one file disagreed about C++ for a round: file-scope slots inside a namespace were
+        found while function-local ones in the same namespace were not. tu_scope.storage_depth
+        is the same walk both now read, and predicate D's function index reads it too.
         """
         spans = self.func_spans.setdefault(path, [])
-        depth, cursor = 0, 0
+        depth_at = tu_scope.storage_depth(src)
         for m in re.finditer(r"\b([A-Za-z_]\w*)\s*(?=\()", src):
-            depth += src.count("{", cursor, m.start()) - src.count("}", cursor, m.start())
-            cursor = m.start()
-            if depth != 0 or m.group(1) in NOT_CALLS:
+            if depth_at(m.start()) != 0 or m.group(1) in NOT_CALLS:
                 continue
             args, past = call_args(src, m.end())
             if args is None:
@@ -2438,6 +2412,52 @@ unrooted(VALUE self)
 void Init_probe(void) { rb_define_method(rb_cObject, "a", rooted, 0); }
 """
 
+def RED_NAMESPACED_FUNCTION(wrapped):
+    """A function-local static inside a transparent C++ scope -- WRAPPED is the flag.
+
+    ROUND 9 REVIEW: the namespace descent was ported into the SLOT walk and not into the
+    FUNCTION index, so this fixture measured `slots 0/0, decls 0, HITS 0` while the same
+    source unwrapped measured 2 slots and one hit. Not a dropped row: an emptied index,
+    which is the failure this file's counters exist to tell apart from a clean gem.
+
+    Three things in one file on purpose. `cache` is the RED -- an unregistered
+    function-local static in a namespaced function. `keep` is the GREEN in the same scope,
+    registered, and it must still discharge by name: a descent that indexes the function
+    but cannot read its body would drop the discharge and turn one over-clear into an
+    over-report. `Init_probe` sits in the `extern "C"` block, because a linkage block is
+    the other transparent scope and a C++ gem puts its entry points in exactly one.
+    """
+    ns_open, ns_close = ("namespace prof {\n", "}\n") if wrapped else ("", "")
+    ln_open, ln_close = ("extern \"C\" {\n", "}\n") if wrapped else ("", "")
+    return ("#include <ruby.h>\n\n" + ns_open + """
+static VALUE
+cached(VALUE self)
+{
+    static VALUE cache;
+    if (!cache) {
+        cache = rb_str_new_cstr("lost");
+    }
+    return cache;
+}
+
+static VALUE
+rooted(VALUE self)
+{
+    static VALUE keep;
+    if (!keep) {
+        keep = rb_str_new_cstr("kept");
+        rb_global_variable(&keep);
+    }
+    return keep;
+}
+""" + ns_close + "\n" + ln_open + """
+void Init_probe(void) {
+    rb_define_method(rb_cObject, "c", cached, 0);
+    rb_define_method(rb_cObject, "r", rooted, 0);
+}
+""" + ln_close)
+
+
 GREEN_HEADER_STATIC_H = """
 #ifndef probe_h
 #define probe_h
@@ -2847,6 +2867,41 @@ def self_test(pool):
           "...and a namespace-scope static that IS registered discharges by name, which is "
           "what says the descent read the body rather than skipped it (%s)"
           % (ndisc["rooted"][4] if "rooted" in ndisc else "NOT DISCHARGED"), sorted(ndisc))
+
+    # 5p2. ROUND-9 REVIEW: THE FUNCTION INDEX IS THE OTHER HALF OF THE SAME DESCENT (:947).
+    #      5p above proves file-scope slots survive a namespace. This proves the FUNCTIONS
+    #      inside one do -- they did not, and the two halves of one file disagreed about C++
+    #      for a round. Unfixed, the wrapped arm measures `slots 0/0, decls 0, HITS 0` on a
+    #      file whose unwrapped twin measures 2 slots and 1 hit, so the COUNTERS are the
+    #      assertion and the hit count is the corollary: a green-for-the-wrong-reason
+    #      regression empties the index and prints the same zero a clean gem prints.
+    #
+    #      THE WRAPPER IS THE FLAG. The same source with and without `namespace prof {` /
+    #      `extern "C" {` must give the same funnel and the same rows, because a namespace
+    #      has no storage duration of its own -- comparing the two arms is what tests the
+    #      claim rather than restating it, and the flat arm is also the green the reviewer
+    #      asked for: an ordinary non-namespaced function must still index.
+    nfw = _sweep_source(RED_NAMESPACED_FUNCTION(True))
+    nff = _sweep_source(RED_NAMESPACED_FUNCTION(False), suffix=".c")
+    nfwd = {d[3]: d for d in nfw.discharges}
+    check(nfw.slots == 2 and nfw.decls == 2 and {h[3] for h in nfw.hits} == {"cache"}
+          and nfwd.get("keep", ("",))[0] == "registered-slot",
+          "namespaced-function RED: a function-local `static VALUE` inside `namespace X {` "
+          "is indexed (%d slot(s) from %d declaration(s), hits %s, keep %s) -- the unported "
+          "depth count reported slots 0/0 on an EMPTIED INDEX, not a cleared file"
+          % (nfw.slots, nfw.decls, sorted(h[3] for h in nfw.hits) or "none",
+             nfwd["keep"][0] if "keep" in nfwd else "NOT DISCHARGED"),
+          [h[3] for h in nfw.hits] + ["discharged:" + d[3] for d in nfw.discharges])
+    check((nfw.slots, nfw.decls, sorted(h[3] for h in nfw.hits),
+           sorted((d[0], d[3]) for d in nfw.discharges))
+          == (nff.slots, nff.decls, sorted(h[3] for h in nff.hits),
+              sorted((d[0], d[3]) for d in nff.discharges)),
+          "namespaced-function GREEN: the same two functions unwrapped give the same funnel "
+          "and the same rows -- a transparent scope changes nothing, and an ordinary "
+          "non-namespaced function still indexes",
+          "wrapped %d/%d %s vs flat %d/%d %s"
+          % (nfw.slots, nfw.decls, sorted(h[3] for h in nfw.hits),
+             nff.slots, nff.decls, sorted(h[3] for h in nff.hits)))
 
     # 5q. THREAD-LOCAL (thread 6).
     tlr = _sweep_source(RED_THREAD_LOCAL)

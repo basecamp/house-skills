@@ -118,9 +118,15 @@ nobody has tested.
                        guards `other`; the row stands.
     no-window          nothing between derive and last deref that can trigger GC,
                        and the pointer does not leave the frame
-    last-use-after     the source VALUE is READ again at or after the last deref. A write is
-                       not a read: `str = other;` after the last deref neither loads the old
-                       VALUE nor keeps it anywhere the GC scans.
+    last-use-after     the source VALUE is READ again at or after the last deref.
+
+                       WHAT COUNTS AS THAT READ IS ONE PREDICATE, source_reads(), SHARED
+                       WITH `guarded` -- three reviews found three ways to accept a bare
+                       token occurrence as evidence the name still held the object, and
+                       they are one question with three disqualifiers rather than three
+                       rules: a write is not a read (`str = other;`), a read after a
+                       rebinding write reads something else, and a read of an inner
+                       `VALUE str` inside a nested block reads a different variable.
                        RECALL-BIASED BY CONSTRUCTION: the compiler may drop the VALUE
                        *before* its last syntactic use -- that is RB_GC_GUARD's own
                        documented rationale (include/ruby/internal/memory.h). This rule
@@ -181,7 +187,6 @@ result: silence is a property of the query until the counts say otherwise, and a
 fixture is a FAIL rather than a quietly smaller suite.
 """
 import argparse
-import bisect
 import pathlib
 import re
 import shutil
@@ -261,17 +266,7 @@ def strip_directives(src):
     return "".join(out)
 
 
-def match_brace(src, open_idx):
-    """Index of the `}` matching the `{` at open_idx, or -1."""
-    depth = 0
-    for i in range(open_idx, len(src)):
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
+match_brace = tu_scope.match_brace
 
 
 def match_paren(src, open_idx):
@@ -299,104 +294,115 @@ def match_paren(src, open_idx):
 # index again, the shape of zero this file's ZERO MUST BE READABLE section exists to make
 # impossible, and the same failure the namespace port fixed from the other direction.
 #
-# CLOSED LIST, DELIBERATELY. Anything unrecognised stops the walk and the definition is
-# skipped exactly as before, which is the recall-losing direction but the only one that
-# cannot invent a function body out of a K&R parameter declaration (`f(str) VALUE str; {`)
-# or a macro followed by a block. Adding a spelling here is a one-line change with a
-# fixture; guessing at arbitrary tokens is not.
-POST_DECL_WORD = {"noexcept", "const", "volatile", "override", "final", "_Noreturn",
-                  "__restrict", "__restrict__", "__cdecl", "__stdcall"}
+# THE CLOSED LIST WAS THE WRONG SHAPE, AND THE THIRD VARIANT IS WHAT SAID SO. Round 9
+# shipped `__attribute__((...))` and `noexcept`; the very next review brought the C++
+# trailing return type, which the walk stopped at because `->` is not a word at all:
+#
+#     auto bad(VALUE str) -> VALUE { ... }        /* C++11 */
+#
+# Same measured symptom every time -- `0 fn(s) | derive 0/0 -> hit 0` -- so a list that has
+# to be extended once per spelling is a list that reports a clean gem once per spelling.
+#
+# So the WORDS are open and the PARENTHESES stay closed, and the split is where the danger
+# is. A bare token run between `)` and `{` cannot, by itself, turn a non-definition into a
+# definition: the constructs that would be mis-read all announce themselves with a
+# character this walk refuses. A parenthesised group is different -- it is how a SECOND
+# declarator gets between the two, which is exactly how `MACRO(x)` followed by a real
+# definition would hand this walk the real definition's body under the macro's name -- so a
+# `(` is skipped only after one of the attribute keywords that is known to introduce one.
+#
+# WHAT IT MUST STILL REJECT, and does, each because the character is not skippable:
+#
+#     f(str) VALUE str; {          K&R parameter declarations -- the `;`
+#     VALUE f(VALUE);              a prototype, then anything -- the `;`
+#     struct S s = f(x), t = {1};  a declarator list with an initialiser -- the `=`
+#     MACRO(a) static VALUE g(V x) { a macro, then a definition -- the `(` of `g(`
+#     XX(A, 1) typedef enum {       an X-macro list, then a type -- `typedef` (see below)
+#
+# THE TYPE-INTRODUCING KEYWORDS ARE REJECTED BY NAME, and they were the price of opening the
+# words: measured over the corpus, the open walk recovered 93 real definitions (74 of them
+# nio4r's bundled libev, whose every function carries an `EV_NOEXCEPT` macro the closed list
+# had never heard of) and INVENTED four -- trilogy's `XX(...)` X-macro list and ffi's
+# `__declspec(align(8))`, each followed by a `typedef enum {` or `typedef struct {` whose
+# aggregate body was then indexed as a function body under the macro's name. A keyword that
+# starts a new declaration cannot appear in a declarator suffix, so it stops the walk
+# exactly as `;` does.
+#
+# STILL UNHANDLED, named so the next one is not a surprise: a constructor member-initialiser
+# list (`Foo::Foo(int x) : a(x) {`) stops at the `(` of `a(`; a trailing return type that is
+# itself a function-pointer type (`-> VALUE (*)(int)`) stops at its `(`; and one naming an
+# elaborated type (`-> struct S`) stops at `struct`. All three are rejected the same way the
+# closed list rejected them, so none is a regression -- and all three cost recall rather
+# than clearing a row.
 POST_DECL_PAREN = {"__attribute__", "__asm__", "asm", "__declspec", "throw", "noexcept",
                    "alignas", "_Alignas"}
+POST_DECL_STOP = {"typedef", "struct", "union", "enum", "class", "namespace", "template",
+                  "using", "static", "extern", "inline", "register"}
+# The punctuation a declarator suffix may legally carry: the trailing-return arrow, pointer
+# and reference declarators, template arguments, and the `::` of a qualified return type.
+# `;`, `=`, `,`, `(`, `[`, `{` are all absent on purpose -- see the rejection table above.
+POST_DECL_PUNCT = frozenset("*&<>:~->")
 
 
 def skip_post_declarator(src, k):
-    """Advance past supported attributes/specifiers sitting between `)` and `{`."""
+    """Advance past the attributes, specifiers and trailing return type between `)` and `{`.
+
+    Returns the first offset the walk will not consume; _index_funcs accepts the definition
+    only if that offset holds the `{`. Stopping early is therefore always a REJECT, which is
+    the recall-losing direction and the one this function is allowed to be wrong in.
+    """
     n = len(src)
-    while True:
+    word_re = re.compile(r"[A-Za-z_]\w*")
+    while k < n:
         while k < n and src[k] in " \t\r\n":
             k += 1
-        m = re.compile(r"[A-Za-z_]\w*").match(src, k)
-        if not m:
+        if k >= n:
             return k
-        word, j = m.group(), m.end()
-        if word not in POST_DECL_WORD and word not in POST_DECL_PAREN:
-            return k
-        t = j
-        while t < n and src[t] in " \t\r\n":
-            t += 1
-        if word in POST_DECL_PAREN and t < n and src[t] == "(":
-            close = match_paren(src, t)
-            if close < 0:
-                return k
-            k = close + 1
+        m = word_re.match(src, k)
+        if m:
+            word, j = m.group(), m.end()
+            if word in POST_DECL_STOP:
+                return k                # a new declaration begins: not this declarator
+            t = j
+            while t < n and src[t] in " \t\r\n":
+                t += 1
+            if t < n and src[t] == "(":
+                # A parenthesised group belongs to this declarator only when a keyword
+                # known to take one introduced it. Otherwise it is a second declarator and
+                # the walk has left the definition it started from.
+                if word not in POST_DECL_PAREN:
+                    return k
+                close = match_paren(src, t)
+                if close < 0:
+                    return k
+                k = close + 1
+                continue
+            k = j                       # a bare word: `noexcept`, `const`, `VALUE`, ...
             continue
-        if word in POST_DECL_WORD:      # a bare specifier: `noexcept`, `const`, ...
-            k = j
+        if src[k] in POST_DECL_PUNCT:
+            k += 1
             continue
         return k
+    return k
 
 
-# C++ SCOPE HEADS, and the walk that treats them as transparent. Ported from
-# sweep_static_values.py by way of sweep_escaped_conversion.py, which took the same three
-# brace dispositions in the same round: a depth-0 `{` belongs to the CURRENT statement when
-# it opens an aggregate or an initialiser, ENDS it when it opens a function body, and --
-# the disposition C++ adds -- opens a scope with no storage duration of its own when it
-# follows `namespace X` or `extern "C"`. This predicate only ever had the first two, so
-# every definition in a namespaced or `extern "C"`-wrapped tree sat at nonzero brace depth
-# and _index_funcs skipped it: `0 fn(s)`, `0 derivations`, `0 hits` -- a clean sheet on an
-# empty index, which is exactly the shape of zero this file's ZERO MUST BE READABLE section
-# exists to make impossible.
+# C++ SCOPE HEADS AND THE WALK THAT TREATS THEM AS TRANSPARENT -- one implementation, in
+# tu_scope.py, beside the linkage rule the same four scripts kept re-deriving. Three brace
+# dispositions, not two: a depth-0 `{` belongs to the CURRENT statement when it opens an
+# aggregate or an initialiser, ENDS it when it opens a function body, and -- the disposition
+# C++ adds -- opens a scope with no storage duration of its own when it follows
+# `namespace X` or `extern "C"`.
 #
-# `extern "C"` reaches here AFTER strip_noise, which blanks string BODIES and keeps the
-# quotes -- the text is `extern " " {`, so the pattern has to allow a blanked literal.
-NAMESPACE_HEAD = re.compile(r"\bnamespace(?:\s+\w+(?:\s*::\s*\w+)*)?\s*$")
-LINKAGE_HEAD = re.compile(r"\bextern\s*\"[^\"]*\"\s*$")
-
-
-def top_level_units(src, base=0, transparent=None):
-    """Walk the declarations at static-storage scope, collecting transparent braces.
-
-    `transparent`, when a set is passed, collects the offsets of the `{` and `}` of every
-    namespace and linkage block the walk descends through. The walk that knows which braces
-    are scopes is the walk that knows which braces are not, so _index_funcs reads it from
-    here rather than keeping a second opinion about C++ syntax.
-    """
-    n, i, start = len(src), 0, 0
-    while i < n:
-        c = src[i]
-        if c == "{":
-            close = match_brace(src, i)
-            if close < 0:
-                return
-            pre = src[start:i].rstrip()
-            if NAMESPACE_HEAD.search(pre) or LINKAGE_HEAD.search(pre):
-                if transparent is not None:
-                    transparent.add(i)
-                    transparent.add(close)
-                for u in top_level_units(src[i + 1:close], base + i + 1, transparent):
-                    yield u
-                i = start = close + 1
-                continue
-            if re.search(r"\b(struct|union|enum)\b\s*\w*$", pre) or pre.endswith("="):
-                i = close + 1          # an aggregate or an initialiser: same statement
-                continue
-            yield base + start, src[start:close + 1]
-            i = start = close + 1
-            continue
-        if c == ";":
-            yield base + start, src[start:i + 1]
-            i = start = i + 1
-            continue
-        i += 1
-
-
-def scope_zero_braces(src):
-    """Offsets of the `{`/`}` that open and close a namespace or linkage block."""
-    transparent = set()
-    for _u in top_level_units(src, 0, transparent):
-        pass
-    return transparent
+# This predicate only ever had the first two until round 9, so every definition in a
+# namespaced or `extern "C"`-wrapped tree sat at nonzero brace depth and _index_funcs
+# skipped it: `0 fn(s)`, `0 derivations`, `0 hits` -- a clean sheet on an empty index, which
+# is exactly the shape of zero this file's ZERO MUST BE READABLE section exists to make
+# impossible. Predicate C shipped the identical hole in its own function index a round
+# later, which is why the walk now has one home rather than three.
+NAMESPACE_HEAD = tu_scope.NAMESPACE_HEAD
+LINKAGE_HEAD = tu_scope.LINKAGE_HEAD
+top_level_units = tu_scope.top_level_units
+scope_zero_braces = tu_scope.scope_zero_braces
 
 
 def split_args(text):
@@ -603,27 +609,148 @@ def base_name(expr):
 def writes(body, name):
     """Offsets of every plain assignment `name = ...` -- the WRITES, not the reads.
 
-    ONE ROOT CAUSE, TWO SYMPTOMS. Both of the discharge defects found in review were the
-    same mistake: a rule took a bare token occurrence as evidence that the variable held
-    the object, without asking what the occurrence DID.
-
-      `guarded`         `guard = str; guard = other; ... RB_GC_GUARD(guard)` -- the write
-                        rebound the name, so the guard names a different object.
-      `last-use-after`  `p = RSTRING_PTR(str); rb_funcall(...); consume(p); str = other;`
-                        -- the trailing `str =` was counted as the source's last use, but an
-                        assignment's left-hand side neither reads the old VALUE nor keeps it
-                        anywhere the GC scans. The frame is free to drop it at `consume`.
-
-    Both discharge, so both LOSE FINDINGS rather than adding noise. liveness() calls this
-    once and uses the answer for both.
-
     A COMPOUND assignment is a read: `x += y` loads `x` first, so `\\s*=` deliberately does
     not match `+=`. `&x` is a read too, and a load-bearing one -- taking the address forces
     a stack slot, which is the second pin this skill measured on `StringValueCStr` -- and it
     cannot be the left-hand side of an assignment, so it is never matched here.
+
+    One of the three disqualifiers in source_reads(), which is the only caller that matters.
     """
     return [m.start() for m in
             re.finditer(r"(?<![=!<>+\-*/%%&|^])\b%s\s*=(?!=)" % re.escape(name), body)]
+
+
+# A declaration statement leads with a type, and nothing else in C leads with a bare
+# identifier sequence. The prefix between the last statement boundary and the name may
+# therefore hold only identifiers, `*`, `&`, and the commas and brackets of a declarator
+# list -- one `(`, one `=` or one operator and it is an expression, not a declaration.
+DECL_PREFIX = re.compile(r"^[\s\w*&,\[\]]+$")
+# ...unless the leading word is one of these, which are the statement keywords that can be
+# followed by a bare name. `return str;` is the one that would otherwise read as a
+# declaration of `str`, and reading it as one would suppress every later use.
+NOT_DECL_LEAD = frozenset(("return", "case", "goto", "else", "do", "break", "continue",
+                           "default", "sizeof", "typedef"))
+
+
+def _blocks(body):
+    """[(open, close)] byte offsets for every brace-delimited block in `body`."""
+    stack, out = [], []
+    for m in re.finditer(r"[{}]", body):
+        if m.group() == "{":
+            stack.append(m.start())
+        elif stack:
+            out.append((stack.pop(), m.start()))
+    return out
+
+
+def _declarations(body, name):
+    """Offsets where `name` is DECLARED, as opposed to used.
+
+    Best-effort and deliberately under-inclusive: a shape this misses leaves the old
+    behaviour in place, and the old behaviour over-clears, so the bias is stated rather
+    than assumed. Known miss: a declaration split across a macro.
+    """
+    out = []
+    for m in re.finditer(r"\b%s\b" % re.escape(name), body):
+        pre = body[:m.start()]
+        stmt = pre[max(pre.rfind(";"), pre.rfind("{"), pre.rfind("}")) + 1:]
+        if not DECL_PREFIX.match(stmt):
+            continue
+        words = re.findall(r"[A-Za-z_]\w*", stmt)
+        if not words or words[0] in NOT_DECL_LEAD:
+            continue
+        out.append(m.start())
+    return out
+
+
+def source_reads(body, name, since):
+    """Offsets of the occurrences of `name` that READ the object it held at `since`.
+
+    ONE ROOT CAUSE, THREE SYMPTOMS, ONE PREDICATE. Every discharge defect this predicate's
+    liveness stage has shipped was the same mistake: a rule took a BARE TOKEN OCCURRENCE of
+    a name as evidence that the name still held the object the derivation came from,
+    without asking what that occurrence actually did. Three reviews found three spellings
+    of it, and the third is what made it worth writing the question down instead of adding
+    a third special case:
+
+      `guarded`         `guard = str; guard = other; ... RB_GC_GUARD(guard)`
+                        the occurrence is a genuine read of a genuine variable -- of the
+                        WRONG OBJECT, because a write rebound the name in between.
+      `last-use-after`  `p = RSTRING_PTR(str); rb_funcall(...); consume(p); str = other;`
+                        the occurrence is not a read at all. An assignment's left-hand side
+                        neither loads the old VALUE nor leaves it anywhere conservative
+                        scanning can find it, so the frame may drop it at `consume`.
+      `last-use-after`  `... consume(p); { VALUE str = other; use(str); }`
+                        the occurrence is a genuine read of the wrong VARIABLE -- an inner
+                        declaration shadows the source, and the outer `str` is dead.
+
+    All three DISCHARGE, so all three lose findings rather than add noise, and all three
+    answer the same question: does this occurrence read the object the derivation came
+    from? Three disqualifiers, in the order the shapes above name them:
+
+      1. the occurrence IS the write (`name =`, never `+=`, never `==`)
+      2. a write to `name` COMPLETES between `since` and the occurrence, in either
+         direction -- whatever the occurrence reads, it is not what was live at `since`
+      3. an inner block declares `name`, contains the occurrence and does NOT contain
+         `since` -- two variables, one spelling
+
+    "COMPLETES" is load-bearing in 2 and was learned on the corpus. A write takes effect at
+    the `;`, not at its left-hand side: in iconv's `val = rb_str_subseq(val, 0, slash-ptr);`
+    the `val` in the ARGUMENT list is textually after the write's LHS token and is a genuine
+    read of the object still live at the derivation. Measuring the write by its LHS offset
+    disqualified it and raised a row on a correct site -- over-reporting, so cheap, but
+    wrong, and it would have been read as a finding.
+
+    NOT IMPLEMENTED, AND IT COSTS ROWS: disqualifier 2 is path-INSENSITIVE, the same blind
+    spot the window scan states. openssl's `to_der_internal` writes `str` in BOTH arms of an
+    if/else and reads it after the join, so the else-arm's write disqualifies the then-arm's
+    read although the two cannot both run. That direction over-REPORTS, which is the side
+    this predicate is built to fail on; the mirror choice -- ignoring a write that is not
+    provably on every path -- would re-open `if (c) { str = other; } use(str);` as a clear.
+
+    `since` is the offset at which `name` provably held the object: the derivation, for the
+    source; the copying assignment, for a guard alias. Disqualifier 2 is stated in both
+    directions because callers ask about occurrences on both sides of it.
+
+    THE RULE THIS DOES NOT IMPLEMENT is the compiler's. Even a qualifying read is only
+    evidence that the SOURCE TEXT mentions the VALUE again; an optimised build may reuse
+    the slot before its last syntactic use, which is RB_GC_GUARD's own documented
+    rationale and the reason liveness() calls itself recall-biased. This narrows an
+    over-clear; it does not make `last-use-after` sound.
+    """
+    wr = writes(body, name)
+    # Where each write takes EFFECT: the `;` that ends the assignment statement, so the
+    # right-hand side of the write itself still reads the old object.
+    done = [(w, body.find(";", w) if body.find(";", w) >= 0 else len(body)) for w in wr]
+    # The region each shadowing declaration owns: its INNERMOST enclosing block, kept only
+    # when that block does not also contain `since`. Innermost and not merely "some
+    # enclosing block", or an inner redeclaration would suppress reads of the outer
+    # variable elsewhere in the same `if` -- over-reporting rather than over-clearing, but
+    # wrong, and the two directions are not interchangeable just because one is cheaper.
+    blocks = _blocks(body)
+    shadow = []
+    for d in _declarations(body, name):
+        encl = [(o, c) for o, c in blocks if o <= d < c]
+        if not encl:
+            continue                      # declared at the frame's own top level
+        o, c = min(encl, key=lambda oc: oc[1] - oc[0])
+        if not o <= since < c:
+            shadow.append((d, o, c))
+    out = []
+    for m in re.finditer(r"\b%s\b" % re.escape(name), body):
+        at = m.start()
+        if at in wr:
+            continue
+        lo, hi = (at, since) if at < since else (since, at)
+        # Strictly after `since`, and complete by the occurrence. The strict bound is what
+        # keeps a guard alias's OWN defining write (`guard = str;`, whose offset IS the
+        # `since` it establishes) from disqualifying every later read of the alias.
+        if any(lo < w and end <= hi for w, end in done):
+            continue
+        if any(d < at and o <= at < c for d, o, c in shadow):
+            continue
+        out.append(at)
+    return out
 
 
 # PERSISTENT-STORAGE SINKS. Ported from sweep_escaped_conversion.py's file_scope_objects,
@@ -638,7 +765,51 @@ def writes(body, name):
 DECL_NOT_OBJECT = re.compile(r"^(?:typedef|using|template|namespace)\b")
 # A function-local `static` has the same storage duration as a file-scope one and the same
 # consequence for an interior pointer, so it is collected too -- by declaration, in the body.
-LOCAL_STATIC_RE = re.compile(r"\bstatic\b[^;{}()]*?\*\s*([A-Za-z_]\w*)\s*(?==|;|\[)")
+# One declaration statement: from `static` to the `;` that ends it.
+LOCAL_STATIC_DECL = re.compile(r"\bstatic\b[^;{}]*;")
+
+
+def local_statics(body):
+    """Names declared `static` inside a function body -- BY IDENTITY, NOT BY TYPE.
+
+    THE SINK IS A LIFETIME, AND THE DECLARED TYPE IS NOT THE LIFETIME. This collector used
+    to require a `*` in the declaration (`\\bstatic\\b[^;{}()]*?\\*\\s*(name)`), so
+
+        static uintptr_t saved;
+        saved = (uintptr_t)RSTRING_PTR(str);      /* read back on a LATER invocation */
+
+    was not a persistent sink at all: no `->`, no `[`, no pointer-parameter base and no
+    entry in `statics`, so both escape branches declined the store, the row discharged
+    `no-window`, and the sweep reported `derive 1/1 -> windowed 0/0 -> hit 0` on an address
+    that outlives the String by every call the process makes afterwards.
+
+    The same evasion is already in the scent library on the Class A side -- an object
+    "stored as an integer, key, handle or index, not as a `void *`", which is
+    prometheus-client-mmap keying a WeakMap on `str.as_raw()`. Same laundering, one class
+    down: the predicate was keyed on the SPELLING of the store rather than on the fact that
+    something outliving the frame now holds the address. A `long`, a `size_t`, a
+    `uintptr_t`, an array index into a table of buffers -- all of them keep the bytes
+    reachable and none of them writes a `*`.
+
+    file_scope_objects() has always been type-agnostic; only this half asked about the
+    type, and the asymmetry is what made the defect invisible while its file-scope twin was
+    a shipped positive control. Both halves now collect the same way: split the declarator
+    list, drop initialisers and prototypes, keep the name.
+    """
+    names = set()
+    for m in LOCAL_STATIC_DECL.finditer(body):
+        decl = m.group(0)
+        decl = decl[decl.index("static") + len("static"):-1]
+        for d in split_args(decl):
+            d = d.split("=")[0]
+            # a prototype declares no object; a function POINTER does, and is spelled
+            # `(*fp)(...)`, so only the un-parenthesised declarator is dropped
+            if "(" in d and not re.search(r"\(\s*\*", d):
+                continue
+            nm = param_name(d)
+            if nm:
+                names.add(nm)
+    return names
 
 
 def file_scope_objects(src):
@@ -757,22 +928,14 @@ class Tree:
         walks an empty list, and the run reports `0 fn(s) | derive 0/0 -> hit 0`. That zero
         is indistinguishable from racc's, which is the one this file's counters were added
         to tell apart. sweep_static_values.py needed the same three dispositions first and
-        sweep_escaped_conversion.py ported them the same round; this is the same walk, not
-        a third opinion.
+        sweep_escaped_conversion.py ported them the same round -- and predicate C then
+        shipped the raw-brace count in its OWN function index for a round after fixing its
+        slot walk, which is why the walk is now tu_scope.storage_depth and not a fourth
+        opinion in a fourth file.
         """
-        transparent = scope_zero_braces(src)
-        # brace offsets and the storage depth after each, so a name's depth is a bisect
-        # rather than a re-count of the file
-        bpos, bdepth, depth = [], [], 0
-        for m in re.finditer(r"[{}]", src):
-            if m.start() in transparent:
-                continue
-            depth += 1 if m.group() == "{" else -1
-            bpos.append(m.start())
-            bdepth.append(depth)
+        depth_at = tu_scope.storage_depth(src)
         for m in re.finditer(r"\b([A-Za-z_]\w*)\s*(?=\()", src):
-            k = bisect.bisect_left(bpos, m.start())
-            if (bdepth[k - 1] if k else 0) != 0 or m.group(1) in NOT_CALLS:
+            if depth_at(m.start()) != 0 or m.group(1) in NOT_CALLS:
                 continue
             args, past = call_args(src, m.end())
             if args is None:
@@ -969,12 +1132,33 @@ def _pointer_typed(fn, lhs, upto):
     return "*" in stmt or bool(re.search(r"\*\s*%s\b" % re.escape(lhs), fn.body[:upto]))
 
 
+# `p`, or `p + n` / `p - n` / `p++` -- a base name with pointer arithmetic on it. The base
+# comes FIRST, because `n + p` is legal C and `e - p` is not a pointer at all; see
+# _local_copies for why that asymmetry is the whole test.
+COPY_RHS = re.compile(r"([A-Za-z_]\w*)\s*(?:[-+][^;]*)?$")
+
+
 def _local_copies(fn, rel):
-    """[(off, lhs, rhs)] for every `lhs = rhs;` after `rel` whose rhs is one bare name.
+    """[(off, lhs, rhs)] for every `lhs = rhs;` after `rel` that carries the same buffer.
 
     Casts and redundant parentheses are stripped from the right-hand side for the same
     reason pointer_alias strips them from the left: `q = (const char *)p;` is the same
     copy as `q = p;` and matching only the bare spelling loses it.
+
+    POINTER ARITHMETIC IS STILL THE POINTER. `q = p + 1` points into the same String bytes
+    as `p` and dangles for exactly the same reason, but the right-hand side had to be one
+    bare name, so `q` never entered the alias set, `last_use` stopped at the copy, the
+    window scan found nothing after it and the row discharged `no-window`: a clean sheet on
+    a live derivation. `q = p; ... use(q)` reported the window on the same source.
+
+    THE EXCLUSION IT MUST NOT LOSE is the mirror shape, and it is load-bearing: `off = e - p`
+    is a pointer DIFFERENCE -- a `ptrdiff_t`, an integer, nothing that can dangle -- and
+    stringio's `ptr->pos = e - RSTRING_PTR(ptr->string)` is the one gem in the corpus that
+    is safe by design. Two things keep it out and both are needed. The base must be the
+    LEFT operand, so `e - p` offers `e` and not `p`; and the LEFT-HAND SIDE must be
+    pointer-typed, which `off` is not. The type test is the same one pointer_alias uses --
+    subtracting two pointers yields an integer, so no pointer-typed lvalue can be assigned
+    a difference, and the two tests fail this shape independently.
     """
     body, out = fn.body, []
     for m in re.finditer(r"(?<![=!<>+\-*/%&|^])=(?!=)", body):
@@ -991,8 +1175,9 @@ def _local_copies(fn, rel):
             if stripped == rhs:
                 break
             rhs = stripped
-        if re.fullmatch(r"[A-Za-z_]\w*", rhs) and _pointer_typed(fn, d.group(1), m.start()):
-            out.append((m.start(), d.group(1), rhs))
+        base = COPY_RHS.fullmatch(rhs)
+        if base and _pointer_typed(fn, d.group(1), m.start()):
+            out.append((m.start(), d.group(1), base.group(1)))
     return out
 
 
@@ -1073,6 +1258,24 @@ def carrier_sites(fn, deriv_off, alias):
     return sorted(set(sites))
 
 
+# The base of an assignment's left-hand side, allowing a C++ qualified name. `Cache::saved`
+# and `prof::inner::cache` are single OBJECTS with a `::` in the spelling, not a member
+# access -- so the qualifier is part of group 1 and group 2 stays empty, which is what puts
+# them on the bare-scalar branch where a static-storage sink belongs.
+#
+# THE NORMALISATION IS DELIBERATELY LOOSE HERE, AND DELIBERATELY STRICT IN PREDICATE C, and
+# the two are not inconsistent -- they are the same bias pointing at opposite rules. What C
+# matches with a qualified name is a REGISTRATION, and a registration DISCHARGES: matching
+# `rb_global_variable(&Registry::cache)` against a bare `cache` would clear an unrelated
+# file-scope slot, so C keys members qualified, fails to match `&prof::cache` against a
+# namespace-scope `cache`, and OVER-REPORTS -- which is why C's docstring records that miss
+# as a known limit rather than a bug. What D matches is a SINK, and a sink REPORTS: failing
+# to match here loses the finding outright. So both files resolve the ambiguity toward
+# reporting, and that is exactly why one drops the qualifier and the other keeps it.
+LVALUE_BASE = re.compile(
+    r"^\*?\s*((?:[A-Za-z_]\w*\s*::\s*)*[A-Za-z_]\w*)\s*(->|\[|\.|$)")
+
+
 def escapes(fn, deriv_off, expr, names, cons, tree=None):
     """[(kind, off, text, extra)] -- ways the pointer outlives or leaves this frame.
 
@@ -1084,7 +1287,7 @@ def escapes(fn, deriv_off, expr, names, cons, tree=None):
     ptrp = fn.ptr_params()
     alias_re = _names_re(names)
     statics = set(tree.statics.get(fn.path, ()) if tree is not None else ())
-    statics.update(LOCAL_STATIC_RE.findall(body))
+    statics.update(local_statics(body))
 
     def carries(text):
         # Pointer DIFFERENCE is an offset, not a pointer. stringio's
@@ -1117,16 +1320,24 @@ def escapes(fn, deriv_off, expr, names, cons, tree=None):
         if m.start() < rel - 200:
             continue
         stmt = statement_before(body, m.start()).strip()
-        b = re.match(r"^\*?\s*([A-Za-z_]\w*)\s*(->|\[|\.|$)", stmt)
+        b = LVALUE_BASE.match(stmt)
         if not b:
             continue
+        lv = re.sub(r"\s+", "", b.group(1))
+        # THE IDENTITY OF A STATIC-STORAGE SINK IS ITS LAST COMPONENT, on BOTH sides.
+        # `Cache::saved = RSTRING_PTR(str)` used to yield `Cache` here while
+        # file_scope_objects recorded the object as `saved` -- the same sink, computed two
+        # ways, so the membership test could never fire and a C++ static data member
+        # outliving the deriving call discharged `no-window`. Same defect as the
+        # integer-typed local static: the sink was real and the identity did not match.
+        sink = lv.split("::")[-1]
         semi = body.find(";", m.end())
         if semi < 0:
             continue
         rhs = body[m.end():semi]
         if not carries(rhs):
             continue
-        if not b.group(2) and b.group(1) in statics:
+        if not b.group(2) and sink in statics:
             # A BARE SCALAR AT STATIC-STORAGE SCOPE IS A SINK, AND IT HAD NO BRANCH.
             # `saved = RSTRING_PTR(str);` where `saved` is a file static or a global has no
             # pointer-parameter base and no `->`/`[`/`.`, so the STORES-INTERIOR test and the
@@ -1139,9 +1350,9 @@ def escapes(fn, deriv_off, expr, names, cons, tree=None):
             found.append(("ESCAPES-INTO-STATIC", fn.bstart + m.start(),
                           (stmt + " =" + rhs).strip(), "static-storage lifetime"))
             continue
-        if b.group(1) in names:
+        if lv in names:
             continue                      # an aliasing assignment, not an escape
-        if b.group(1) in ptrp and (stmt.startswith("*") or b.group(2) in ("->", "[")):
+        if lv in ptrp and (stmt.startswith("*") or b.group(2) in ("->", "[")):
             found.append(("STORES-INTERIOR", fn.bstart + m.start(),
                           (stmt + " =" + rhs).strip(), ""))
         elif b.group(2) in ("->", "[", "."):
@@ -1527,11 +1738,16 @@ def liveness(fn, deriv_off, expr, tree, last_use_off=None):
     # it provably does -- and the scan below rejects the guard if the name is rebound after
     # that. `var` itself is in the table under the same rule with the derivation as its
     # offset, which closes the sibling hole `str = other; RB_GC_GUARD(str);`.
-    reassigned = writes(body, var)
+    #
+    # Both halves ask source_reads() rather than keeping their own rule. Here the question
+    # is about the RIGHT-HAND SIDE of `guard = str;` -- that occurrence of `str` has to read
+    # the object live at the derivation, or the copy carries something else -- which is the
+    # same question the guard site below asks about `guard`, and the same one
+    # `last-use-after` asks about the source. One predicate, three sites; see source_reads().
+    src_reads = source_reads(body, var, rel)
     guardable = {var: rel}
-    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*=(?!=)\s*%s\s*;" % re.escape(var), body):
-        lo, hi = min(m.start(), rel), max(m.start(), rel)
-        if not any(lo < r < hi for r in reassigned):
+    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*=(?!=)\s*(%s)\s*;" % re.escape(var), body):
+        if m.start(2) in src_reads:
             nm = m.group(1)
             guardable[nm] = max(guardable.get(nm, -1), m.start())
 
@@ -1548,8 +1764,10 @@ def liveness(fn, deriv_off, expr, tree, last_use_off=None):
         since = guardable.get(nm)
         if since is None or m.start() < floor:
             continue
-        if any(since < a < m.start() for a in writes(body, nm)):
-            continue          # rebound between here and there: it guards a different object
+        # rebound in between, or shadowed by an inner declaration: either way the name at
+        # the guard is not holding the object the derivation came from.
+        if m.start(1) not in source_reads(body, nm, since):
+            continue
         return "GUARDED", ("RB_GC_GUARD(%s) at or after the last use" % nm
                            + ("" if nm == var else " (a copy of %s)" % var))
 
@@ -1596,21 +1814,33 @@ def liveness(fn, deriv_off, expr, tree, last_use_off=None):
                                 % replaced)
         return "ARGV-PINNED", "argv[] pins the un-coerced original and no coercion ran"
 
-    # Last syntactic READ of the VALUE at or after the last deref.
+    # Last READ OF THIS OBJECT at or after the last deref.
     #
-    # A WRITE IS NOT A USE. `p = RSTRING_PTR(str); rb_funcall(...); consume(p); str = other;`
-    # was discharged `last-use-after` on the strength of that trailing `str =`, but assigning
-    # to `str` neither reads the old VALUE nor leaves it anywhere conservative scanning can
-    # find it -- the frame is entitled to drop it at `consume`, and the String can move
-    # during the `rb_funcall`. This rule is already the most recall-biased thing in the file
-    # (see the docstring: the compiler may drop the VALUE before its last syntactic use even
-    # when that use is a genuine read), so accepting a write as well made it clear rows on no
-    # evidence at all. Same root cause as the guard-alias defect above; see writes().
+    # A whole-body token scan is not that, and got it wrong three ways -- a write counted as
+    # a read, a read counted after the name was rebound, a read of an inner variable that
+    # merely spells the same. All three are one question and source_reads() is where it is
+    # asked; this rule is the most recall-biased in the file (the compiler may drop the
+    # VALUE before its last syntactic use even when that use IS a genuine read of the right
+    # object), so accepting anything weaker cleared rows on no evidence at all.
+    #
+    # DEFERRED, DELIBERATELY, WITH THE NUMBER: MEASURE A READ TO THE END OF ITS STATEMENT.
+    # `>= ld` compares raw offsets, and evaluation order WITHIN a statement is unspecified
+    # -- the reason window_between() gives for counting a sibling call in the same
+    # statement. iconv's `val = rb_str_subseq(val, 0, slash - ptr);` reads the source and
+    # makes the pointer's last use in ONE call's argument list, with the source's token 20
+    # bytes to the left, so both operands are live at the call and the row is noise; it is
+    # in the corpus as one, at iconv.c:216, rather than papered over.
+    #
+    # It is not built here because it WIDENS a discharge, in the round whose whole subject
+    # is discharges that fire when they should not. Measured over the 99-tree corpus:
+    # -1 iconv (the row above, correctly) and -5 bigdecimal (`BigDecimal_split`, where
+    # `rb_str_resize(str, strlen(psz1))` reads the source in the same call as the last
+    # deref -- also correct, and also five rows cleared by a rule shipped in the same pass
+    # that wrote it). A discharge that clears six rows on its first run needs its own red
+    # and its own green, and it is a separate decision from narrowing three over-clears.
     ld = last_use_off
     if ld is not None:
-        skip = set(writes(body, var))
-        uses = [m.start() for m in re.finditer(r"\b%s\b" % re.escape(var), body)
-                if m.start() not in skip]
+        uses = source_reads(body, var, rel)
         if uses and fn.bstart + max(uses) >= ld:
             return "LAST-USE-AFTER", "%s is read again at or after the last deref" % var
     return "UNROOTED", "nothing roots %s across the window" % var
@@ -2040,10 +2270,40 @@ NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-"]
 # `last-use-after` refusing a WRITE as evidence (thread 5) moved ZERO corpus rows. All 13 of
 # its clears are genuine reads at or after the last deref. Recorded as corpus-neutral rather
 # than left to look like coverage -- the generated red is the only thing testing it.
-TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 20, "iconv-": 14, "zstd-": 6,
+#
+# ROUND 9, THIRD REVIEW PASS: +6 rows over the 99-tree corpus (454 -> 460), 0 removed, and
+# every one of them is the same direction -- a discharge that stopped firing. Each triaged:
+#
+#   openssl 4 -> 5    ossl_asn1.c `to_der_internal`, in all four trees. `str` is written in
+#   (3.3.0, 3.3.1,      BOTH arms of an if/else and read after the join, so the else-arm's
+#    3.3.3, 4.0.0)      write disqualifies the then-arm's read although the two cannot both
+#                       run. That is this file's stated ORDERING blind spot -- no CFG -- in
+#                       the disqualifier direction, the same disposition as puma's row and
+#                       mysql2's `_mysql_client_options` three. NOISE, and the alternative
+#                       (ignore a write that is not provably on every path) re-opens
+#                       `if (c) { str = other; } use(str);` as a clear.
+#   iconv 14 -> 15    iconv.c:216 `strip_glibc_option`. `val = rb_str_subseq(val, 0, slash -
+#                       ptr);` makes the pointer's last use and reads the source in ONE
+#                       call's argument list, with the source's token 20 bytes to the left,
+#                       so `max(uses) >= ld` compares the layout of the line. NOISE, with
+#                       the fix written down and deliberately deferred at the `ld` comparison
+#                       in liveness(): it would clear this row and five bigdecimal rows, and
+#                       widening a discharge is not this pass's business.
+#   date 17 -> 18     date_parse.c:1935 `parse_ddd_cb`, and the most interesting of the six.
+#                       `s1 = cs5 + 1` is a pointer-arithmetic alias the copy scan could not
+#                       see until this pass, and `*s1` is read after `rb_str_subseq()`
+#                       allocates. There IS an `RB_GC_GUARD(s5)` at the end of the block --
+#                       and it guards the REASSIGNED `s5` (`s5 = rb_str_subseq(s5, ...)`),
+#                       not the String `cs5` points into. So it is the first corpus witness
+#                       for the round-9 guard-rebind rule, produced by the round-9 alias
+#                       rule. Not cleared: the source's last read before the rebind is the
+#                       ARGUMENT of the allocating call itself, so nothing roots it at `*s1`.
+#                       Pinned here rather than left floating in a positive-control tree.
+TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 20, "iconv-": 15, "zstd-": 6,
            "sqlite3-2.9.5": 3, "websocket-driver-": 2, "stringio-": 1,
            "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 2, "puma-": 6,
-           "unicorn-6.1.0": 6}
+           "unicorn-6.1.0": 6, "date-": 18, "openssl-3.3.0": 5, "openssl-3.3.1": 5,
+           "openssl-3.3.3": 5, "openssl-4.0.0": 5}
 
 
 def self_test(pool):
@@ -2583,6 +2843,257 @@ def self_test(pool):
           "funcs %d, derive %d, hits %s, discharges %s"
           % (wgrn.funcs, len(wgrn.derivations), [(h[0], h[2]) for h in wgrn.hits],
              [d[0] for d in wgrn.discharges]))
+
+    # 8p/8q. GENERATED RED AND GREEN: A SHADOWING REDECLARATION IS NOT THE SOURCE.
+    #
+    #    The third member of the family 8j/8k and 8n/8o fixed, and the reason those three
+    #    are now ONE predicate (source_reads) rather than three special cases: every one of
+    #    them accepted a bare token occurrence of the name as evidence that the name still
+    #    held the object. Here the occurrence is a genuine READ of a genuine variable that
+    #    merely SPELLS the same -- `{ VALUE str = other; use(str); }` -- while the original
+    #    `str` is dead and the String may move during the rb_funcall.
+    #
+    #    THREE ARMS, ONE FIXTURE, because the green is what says the rule was narrowed and
+    #    not deleted: `same-scope` is an ordinary later read of the real source and MUST
+    #    still discharge; `inner-block` is the same read of the same name inside a block
+    #    that does not redeclare it, and must also still discharge -- otherwise the fix is
+    #    "any read inside a brace stops counting", which would clear nothing and report
+    #    everything. Only `shadow` stands.
+    shadow_c = ("#include <ruby.h>\n\n"
+                "static void\n"
+                "helper(VALUE str, VALUE other)\n"
+                "{\n"
+                "    const char *p = RSTRING_PTR(str);\n"
+                "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+                "    consume(p);\n"
+                "%s}\n\n"
+                "static VALUE\n"
+                "entry(VALUE self, VALUE a, VALUE b)\n"
+                "{\n"
+                "    helper(a, b);\n"
+                "    return Qnil;\n"
+                "}\n\n"
+                "void Init_probe(void)\n"
+                "{\n"
+                "    rb_define_method(rb_cObject, \"e\", entry, 2);\n"
+                "}\n")
+    sh_arms = {
+        "shadow": "    {\n        VALUE str = other;\n        use(str);\n    }\n",
+        "same-scope": "    use(str);\n",
+        "inner-block": "    {\n        use(str);\n    }\n",
+    }
+    sh = {tag: _sweep(_synth("fx-shadow-%s" % tag, {"ext/probe.c": shadow_c % arm}))
+          for tag, arm in sh_arms.items()}
+    check(sh["shadow"].funcs == 3 and len(sh["shadow"].derivations) == 1
+          and len(sh["shadow"].with_window) == 1 and len(sh["shadow"].hits) == 1
+          and not any(d[0] == "last-use-after" for d in sh["shadow"].discharges),
+          "shadow red: a read of an INNER `VALUE str` no longer discharges last-use-after "
+          "-- it is a different variable, and the source is dead at the window",
+          "funcs %d, derive %d, win %d, hits %s, discharges %s"
+          % (sh["shadow"].funcs, len(sh["shadow"].derivations),
+             len(sh["shadow"].with_window), [(h[0], h[2]) for h in sh["shadow"].hits],
+             [d[0] for d in sh["shadow"].discharges]))
+    check(all(not sh[t].hits and len(sh[t].derivations) == 1
+              and any(d[0] == "last-use-after" for d in sh[t].discharges)
+              for t in ("same-scope", "inner-block")),
+          "shadow green: a genuine later read of the SOURCE still discharges "
+          "last-use-after, in the same scope and inside a nested block that does not "
+          "redeclare it -- the rule was narrowed to the right variable, not to no variable",
+          [(t, len(sh[t].hits), [d[0] for d in sh[t].discharges])
+           for t in ("same-scope", "inner-block")])
+
+    # 8r/8s. GENERATED RED AND GREEN: THE IDENTITY OF A STATIC-STORAGE SINK.
+    #
+    #    Two spellings, one defect, and 8l/8m had neither: the sink is real, and the
+    #    identity the store site computes for it does not match the identity the declaration
+    #    scan recorded. Both discharged `no-window` on a pointer read by a LATER call.
+    #
+    #      int-local   `static uintptr_t saved; saved = (uintptr_t)RSTRING_PTR(str);`
+    #                  the collector required a `*` in the declaration, so an interior
+    #                  pointer laundered through an integer was not a persistent slot at
+    #                  all. Class A already carries this evasion by name -- "stored as an
+    #                  integer, key, handle or index, not as a `void *`" -- so it is the
+    #                  same scent one class down.
+    #      qualified   `Cache::saved = RSTRING_PTR(str);`
+    #                  the lvalue match extracted `Cache` while the declaration scan
+    #                  recorded `saved`, so the membership test could not fire.
+    #
+    #    THE SINK IS THE FLAG in both arms: `local` stores the same derivation into a plain
+    #    automatic local and must still discharge, or the rule has become "every assignment
+    #    is an escape" -- the commonest local declaration in the corpus.
+    sink_cpp = ("#include <ruby.h>\n\n"
+                "class Cache {\n"
+                "public:\n"
+                "    static const char *saved;\n"
+                "};\n\n"
+                "const char *Cache::saved;\n\n"
+                "static VALUE\n"
+                "store(VALUE self, VALUE str)\n"
+                "{\n"
+                "    Check_Type(str, T_STRING);\n"
+                "%s\n"
+                "    return Qnil;\n"
+                "}\n\n"
+                "static VALUE\n"
+                "later(VALUE self)\n"
+                "{\n"
+                "    return rb_str_new_cstr(Cache::saved);\n"
+                "}\n\n"
+                "extern \"C\" void Init_probe(void)\n"
+                "{\n"
+                "    rb_define_method(rb_cObject, \"s\", store, 1);\n"
+                "    rb_define_method(rb_cObject, \"l\", later, 0);\n"
+                "}\n")
+    sink_arms = {
+        "int-local": "    static uintptr_t held;\n"
+                     "    held = (uintptr_t)RSTRING_PTR(str);\n    (void)held;",
+        "qualified": "    Cache::saved = RSTRING_PTR(str);",
+        "local": "    const char *local = RSTRING_PTR(str);\n    (void)local;",
+    }
+    sk = {tag: _sweep(_synth("fx-sink-%s" % tag, {"ext/probe.cpp": sink_cpp % arm}))
+          for tag, arm in sink_arms.items()}
+    check(all(sk[t].funcs == 3 and len(sk[t].derivations) == 1
+              and len(sk[t].with_window) == 1 and len(sk[t].hits) == 1
+              and sk[t].hits[0][0] == "ESCAPES-INTO-STATIC"
+              for t in ("int-local", "qualified")),
+          "sink-identity red: an integer-typed function-local static and a C++ qualified "
+          "static data member are both persistent sinks -- unfixed, both report "
+          "`derive 1/1 -> windowed 0/0 -> hit 0` on an address that outlives the String",
+          [(t, sk[t].funcs, len(sk[t].derivations), len(sk[t].with_window),
+            [h[0] for h in sk[t].hits], [d[0] for d in sk[t].discharges])
+           for t in ("int-local", "qualified")])
+    check(sk["local"].funcs == 3 and len(sk["local"].derivations) == 1
+          and not sk["local"].hits
+          and any(d[0] == "no-window" for d in sk["local"].discharges),
+          "sink-identity green: the same derivation into a plain automatic local still "
+          "discharges -- a sink is still recognised POSITIVELY, by name",
+          "funcs %d, derive %d, hits %s, discharges %s"
+          % (sk["local"].funcs, len(sk["local"].derivations),
+             [(h[0], h[2]) for h in sk["local"].hits],
+             [d[0] for d in sk["local"].discharges]))
+
+    # 8t/8u. GENERATED RED AND GREEN: POINTER ARITHMETIC CARRIES THE POINTER.
+    #
+    #    `q = p + 1` points into the same String bytes as `p`, but the copy scan required a
+    #    bare name on the right, so `q` never joined the alias set, the last use stopped at
+    #    the copy and the row discharged `no-window` -- `derive 2/2 -> windowed 0/0 -> hit
+    #    0` on a pointer read after a compaction. THE ARITHMETIC IS THE FLAG: the `plain`
+    #    arm is the same function with `q = p`, and it must give the same row, or the check
+    #    is measuring the alias machinery rather than the arithmetic.
+    #
+    #    AND THE EXCLUSION IS ASSERTED IN THE SAME FIXTURE. `off = e - p` is a pointer
+    #    DIFFERENCE -- an integer, which cannot dangle -- and stringio is the corpus gem
+    #    that is safe by exactly this distinction. It must stay out of the alias set, and
+    #    its funnel is asserted too: a `derive 0/0` there would clear it for the wrong
+    #    reason and read the same as this pass.
+    arith_c = ("#include <ruby.h>\n\n"
+               "static VALUE\n"
+               "arith(VALUE self, VALUE str)\n"
+               "{\n"
+               "    const char *p = RSTRING_PTR(str);\n"
+               "    const char *e = RSTRING_END(str);\n"
+               "%s"
+               "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+               "%s"
+               "}\n\n"
+               "void Init_probe(void)\n"
+               "{\n"
+               "    rb_define_method(rb_cObject, \"a\", arith, 1);\n"
+               "}\n")
+    ar_arms = {
+        "offset": ("    const char *q = p + 1;\n", "    return rb_str_new_cstr(q);\n"),
+        "plain": ("    const char *q = p;\n", "    return rb_str_new_cstr(q);\n"),
+        "difference": ("    long off = e - p;\n", "    return LONG2NUM(off);\n"),
+    }
+    ar = {tag: _sweep(_synth("fx-arith-%s" % tag, {"ext/probe.c": arith_c % arm}))
+          for tag, arm in ar_arms.items()}
+    check(ar["offset"].funcs == 2 and len(ar["offset"].derivations) == 2
+          and len(ar["offset"].with_window) == 1 and len(ar["offset"].hits) == 1
+          and ar["offset"].hits[0][0] == "ESCAPES-BY-RETURN"
+          and (len(ar["offset"].hits), len(ar["offset"].with_window))
+          == (len(ar["plain"].hits), len(ar["plain"].with_window)),
+          "pointer-arithmetic red: `q = p + 1` carries the buffer and gives the same funnel "
+          "and the same row as `q = p` -- unfixed it left the alias set and discharged "
+          "no-window",
+          "offset %d/%d/%s vs plain %d/%d/%s"
+          % (len(ar["offset"].derivations), len(ar["offset"].with_window),
+             [h[0] for h in ar["offset"].hits], len(ar["plain"].derivations),
+             len(ar["plain"].with_window), [h[0] for h in ar["plain"].hits]))
+    check(len(ar["difference"].derivations) == 2 and not ar["difference"].with_window
+          and not ar["difference"].hits
+          and any(d[0] == "no-window" for d in ar["difference"].discharges),
+          "pointer-difference green: `off = e - p` is an integer and stays OUT of the alias "
+          "set -- the exclusion stringio depends on, asserted with its funnel so a parse "
+          "failure cannot pass as it",
+          "derive %d, win %d, hits %s, discharges %s"
+          % (len(ar["difference"].derivations), len(ar["difference"].with_window),
+             [(h[0], h[2]) for h in ar["difference"].hits],
+             [d[0] for d in ar["difference"].discharges]))
+
+    # 8v/8w. GENERATED RED AND GREEN: A TRAILING RETURN TYPE IS NOT THE END OF THE
+    #    DECLARATOR EITHER -- and the third variant is why the walk stopped being a list.
+    #
+    #    8f/8g fixed `__attribute__((...))` and `noexcept` by naming them. `auto bad(VALUE
+    #    str) -> VALUE {` broke it again, because `->` is not a word at all: same measured
+    #    symptom, `0 fn(s) | derive 0/0 -> hit 0`, the empty index that reads as a clean gem.
+    #    So the words are open and the parentheses stay closed (see skip_post_declarator),
+    #    and THE HEADER IS THE FLAG: four spellings of one function must give one funnel and
+    #    one row.
+    #
+    #    The REJECTION TABLE is asserted beside it, because an open walk that accepts too
+    #    much invents a function body out of the next definition. Each of these must index
+    #    exactly the one real definition, `bad`, and nothing else.
+    def _hdr_tree(tag, header):
+        return _synth("fx-hdr-%s" % tag, {"ext/probe.cpp":
+            "#include <ruby.h>\n\n" + header + "\n"
+            "{\n"
+            "    const char *p = RSTRING_PTR(str);\n"
+            "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+            "    return rb_str_new(p, RSTRING_LEN(str));\n"
+            "}\n\n"
+            "void Init_probe(void)\n"
+            "{\n"
+            "    rb_define_method(rb_cObject, \"b\", (VALUE(*)(ANYARGS))bad, 1);\n"
+            "}\n"})
+    hdrs = {
+        "plain": "static VALUE bad(VALUE str)",
+        "trailing": "static auto bad(VALUE str) -> VALUE",
+        "trailing-qual": "static auto bad(VALUE str) -> ns::Value",
+        "attr-trailing": "static auto bad(VALUE str) __attribute__((noinline)) -> VALUE",
+    }
+    hd = {tag: _sweep(_hdr_tree(tag, h)) for tag, h in hdrs.items()}
+    base_hd = (hd["plain"].funcs, len(hd["plain"].derivations),
+               len(hd["plain"].with_window), [h[0] for h in hd["plain"].hits])
+    check(base_hd == (2, 1, 1, ["ESCAPES-BY-RETURN"])
+          and all((hd[t].funcs, len(hd[t].derivations), len(hd[t].with_window),
+                   [h[0] for h in hd[t].hits]) == base_hd for t in hdrs),
+          "trailing-return red: a C++ trailing return type, alone and behind an attribute, "
+          "gives the same funnel and the same row as the plain header -- the closed word "
+          "list stopped at the `->` and reported 0 fn(s), 0 derivations",
+          [(t, hd[t].funcs, len(hd[t].derivations), [h[0] for h in hd[t].hits])
+           for t in hdrs])
+    rejects = {
+        # a macro invocation, then a real definition: the `(` of `bad(` stops the walk
+        "macro": "MY_EXPORT(sym)\nstatic VALUE bad(VALUE str)\n{\n    return Qnil;\n}\n",
+        # K&R parameter declarations: the `;`
+        "knr": "static VALUE bad(str) VALUE str; {\n    return Qnil;\n}\n",
+        # a prototype, then a definition: the `;`
+        "proto": "static VALUE helper(VALUE);\n"
+                 "static VALUE bad(VALUE str)\n{\n    return Qnil;\n}\n",
+        # a declarator list with a braced initialiser: the `=`
+        "init": "struct S s = mk(1), t = {2};\n"
+                "static VALUE bad(VALUE str)\n{\n    return Qnil;\n}\n",
+    }
+    indexed = {}
+    for tag, src in rejects.items():
+        indexed[tag] = sorted(
+            f.name for f in Tree(_synth("fx-rej-%s" % tag,
+                                        {"ext/probe.cpp": "#include <ruby.h>\n\n" + src})
+                                 ).funcs)
+    check(indexed == {"macro": ["bad"], "knr": [], "proto": ["bad"], "init": ["bad"]},
+          "post-declarator green: the open walk still refuses to invent a body -- a macro "
+          "call, a prototype and an initialiser list each index the ONE real definition, "
+          "and K&R indexes none (a stated recall limit, unchanged)", indexed)
 
     # 8f. ROUND 9: A DISCHARGE RESOLVED THROUGH ANOTHER TRANSLATION UNIT'S BODY (:1360).
     #

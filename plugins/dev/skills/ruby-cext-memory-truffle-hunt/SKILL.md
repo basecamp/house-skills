@@ -57,8 +57,12 @@ Pass-1 sweeps — [the four predicates](#the-four-pass-1-predicates), one script
 [sweep_interior_escape.py](references/sweep_interior_escape.py).
 All four share [tu_scope.py](references/tu_scope.py) — the translation-unit scoping rule, extracted
 after the same defect was patched **six separate times across four scripts**: an internal-linkage
-name resolved tree-wide instead of in the using file. It must travel with them; a sweep copied out
-of `references/` on its own no longer runs.
+name resolved tree-wide instead of in the using file. It now also carries the second rule the same
+scripts kept re-deriving — **which braces open a storage scope**, ported four times before it was
+written down once, because `namespace X {` and `extern "C" {` are transparent and a walk that
+counts raw braces indexes *nothing* inside one. Both failures empty an index rather than drop a
+row, which is why they read as clean gems. It must travel with them; a sweep copied out of
+`references/` on its own no longer runs.
 Run each one's `--self-test` before trusting its silence.
 Detector self-check: [references/pipefail_false_negative.sh](references/pipefail_false_negative.sh)
 — demonstrates a grep-based verdict reporting a found defect as clean.
@@ -85,7 +89,12 @@ Keeping the object **alive** (an ivar array, a global) does not keep it **in pla
 
 - **Stored as an integer, key, handle or index**, not as a `void *`. prometheus-client-mmap
   keys an `ObjectSpace::WeakMap` on `str.as_raw()`; after compaction the key is a stale
-  address, and a later string in the recycled slot **evicts a live entry**.
+  address, and a later string in the recycled slot **evicts a live entry**. *The same evasion
+  runs one class down* — `static uintptr_t saved; saved = (uintptr_t)RSTRING_PTR(str);` is a
+  Class B interior pointer laundered through an integer, and predicate D could not see it
+  until round 9 because its sink collector keyed on the `*`. When a predicate asks about the
+  spelling of a store rather than about what now outlives the frame, this is the shape that
+  walks through it.
 - **Never handed to a library at all** — a `VALUE` field of an xmalloc'd TypedData struct
   that `dmark` simply forgets. mysql2's `fieldTypes` is freed by *ordinary* GC inside the
   very call that allocates it. Enumerate the struct's `VALUE` fields against the mark
@@ -436,9 +445,17 @@ existing suspects, and `REGISTERED` is a **downgrade, not a clear**, because reg
 per-slot: round 4 measured stackprof's registered `empty_string` pinned while its unregistered
 sibling `objtracer` was not.
 
-**Run `--self-test` before trusting any silence** — A is 53/53 (1 skipped), B 25/25, C 55/55,
-D 34/34. Note the pool argument differs: A and C take the corpus **parent**, B and D take the gem
-directories (`$CORPUS/*/`); given the wrong one, B and D print `fixture missing` and exit non-zero.
+**Run `--self-test` before trusting any silence** — A is 53/53 (1 skipped), B 25/25, C 57/57,
+D 42/42. The pool argument differs, and not symmetrically — measured, because a looser version of
+this sentence shipped once and was wrong:
+
+| | `$CORPUS` (parent) | `$CORPUS/*/` (gem dirs) |
+|---|---|---|
+| A | runs | — |
+| **C** | runs | **also runs** — `_find` matches an entry's name *or* any child's, so C cannot be given the wrong pool |
+| B, D | `fixture missing`, **exit 1** | runs |
+
+So B and D announce a wrong pool; C is pool-agnostic; only A is silently picky.
 
 **The failure that does not announce itself is a PARTIAL pool, not an empty one.** Fixtures were
 looked up with `if d is None: continue`, so a pool missing some named trees ran a *smaller suite*

@@ -1,6 +1,7 @@
 """The linkage rule all four pass-1 sweeps resolve names by, written down once.
 
     from tu_scope import Scope, TREE, declared_scope, bind
+    from tu_scope import top_level_units, scope_zero_braces, storage_depth
 
 WHY THIS FILE EXISTS
 --------------------
@@ -47,7 +48,40 @@ The fall-back tier is load-bearing too. A non-static callee genuinely IS tree-wi
 so is every struct declared in a header: mysql2 wraps `mysql2_result_wrapper` in result.c
 and declares it in result.h, which is the whole reason these are tree-wide resolvers at
 all. This module narrows resolution; it never file-scopes everything.
+
+THE SECOND THING THAT KEPT BEING RE-DERIVED: WHICH BRACES ARE SCOPES
+--------------------------------------------------------------------
+`declared_scope` answers "how far does this declaration reach"; the walk below answers
+the question one step earlier -- "is this declaration at static-storage scope at all".
+It is the same rule (C's own) and it was learned the same way, once per script:
+
+    sweep_static_values.py       top_level_units + class_scopes   (round 8, vernier)
+    sweep_escaped_conversion.py  ported verbatim                  (round 8)
+    sweep_interior_escape.py     ported verbatim                  (round 9)
+    sweep_static_values.py       _index_funcs, the FOURTH port     (round 9 review)
+
+A depth-0 `{` has three dispositions, not two. It belongs to the CURRENT statement when
+it opens an aggregate (`static struct {`) or an initialiser (`... = {`); it ENDS the
+statement when it opens a function body; and -- the disposition C++ adds -- it opens a
+scope with NO STORAGE DURATION OF ITS OWN when it follows `namespace X` or `extern "C"`.
+
+Missing the third disposition is always an over-clear and always looks like a clean
+sheet, because it empties an INDEX rather than dropping a row: a definition inside
+`namespace X { ... }` sits at nonzero brace depth, a walk that counts raw braces skips
+it, and every later stage walks a shorter list. Predicate C's own function index still
+counted raw braces after its slot walk was ported, so a C++ gem's file-scope slots were
+found while every function-local `static VALUE` in the same file stayed invisible --
+`slots 0/0, HITS 0` on the commonest C++ extension layout there is.
+
+So the walk lives here, beside the linkage rule, and the sweeps import it. A namespace
+is walked THROUGH rather than into: `base` carries the enclosing offset, so a
+declaration three namespaces deep still reports its own file:line, and its key is the
+bare name -- which is correct for resolution (a namespace-scope name is reachable from
+the whole file) and is the stated residual for a registration spelled `&prof::cache`.
 """
+
+import bisect
+import re
 
 TU_EXT = frozenset((".c", ".cc", ".cpp", ".cxx"))
 
@@ -159,3 +193,103 @@ def bind(defs, at, off=None, key=_pair):
         return []
     best = min(rank for rank, _d in cands)
     return [d for rank, d in cands if rank == best]
+
+
+# ------------------------------------------------- which braces open a storage scope
+#
+# Matched against the text between the last `;`/`}` and a `{`, so both patterns are
+# `$`-anchored. `extern "C"` reaches here AFTER each sweep's strip_noise, which blanks
+# string BODIES and keeps the quotes -- the text is `extern " " {` -- so the linkage
+# pattern has to allow a blanked literal.
+NAMESPACE_HEAD = re.compile(r"\bnamespace(?:\s+\w+(?:\s*::\s*\w+)*)?\s*$")
+LINKAGE_HEAD = re.compile(r"\bextern\s*\"[^\"]*\"\s*$")
+
+
+def match_brace(src, open_idx):
+    """Index of the `}` matching the `{` at open_idx, or -1."""
+    depth = 0
+    for i in range(open_idx, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def top_level_units(src, base=0, transparent=None):
+    """[(offset, text)] -- one entry per declaration or definition at static-storage scope.
+
+    The three brace dispositions are in this module's docstring; this is where they are
+    applied. `transparent`, when a set is passed, collects the offsets of the `{` and `}`
+    of every namespace and linkage block the walk descends through -- the walk that knows
+    which braces are scopes is the walk that knows which braces are not, so a caller
+    counting depth reads it from here instead of keeping a second opinion about C++.
+
+    Class BODIES fall out as inert units. They are a different scope with a different key
+    (`Class::member`), and only predicate C descends them, through its own class_scopes.
+    """
+    n, i, start = len(src), 0, 0
+    while i < n:
+        c = src[i]
+        if c == "{":
+            close = match_brace(src, i)
+            if close < 0:
+                return
+            pre = src[start:i].rstrip()
+            if NAMESPACE_HEAD.search(pre) or LINKAGE_HEAD.search(pre):
+                if transparent is not None:
+                    transparent.add(i)
+                    transparent.add(close)
+                for u in top_level_units(src[i + 1:close], base + i + 1, transparent):
+                    yield u
+                i = start = close + 1
+                continue
+            if re.search(r"\b(struct|union|enum)\b\s*\w*$", pre) or pre.endswith("="):
+                i = close + 1          # an aggregate or an initialiser: same statement
+                continue
+            yield base + start, src[start:close + 1]
+            i = start = close + 1
+            continue
+        if c == ";":
+            yield base + start, src[start:i + 1]
+            i = start = i + 1
+            continue
+        i += 1
+
+
+def scope_zero_braces(src):
+    """Offsets of the `{`/`}` that open and close a namespace or linkage block."""
+    transparent = set()
+    for _u in top_level_units(src, 0, transparent):
+        pass
+    return transparent
+
+
+def storage_depth(src):
+    """A `depth(off)` closure: how many STORAGE scopes enclose an offset in `src`.
+
+    Zero means static-storage scope -- file scope, or a namespace or linkage block at
+    file scope, which is the same storage duration. A definition is a TOP-LEVEL one
+    exactly when its declarator sits at depth 0, and every function index in this
+    directory decides that here.
+
+    The depths are precomputed and read by bisect rather than re-counted per name: a
+    per-name `src.count("{")` is quadratic in the file, and the sweeps run it once per
+    identifier followed by `(`.
+    """
+    transparent = scope_zero_braces(src)
+    bpos, bdepth, depth = [], [], 0
+    for m in re.finditer(r"[{}]", src):
+        if m.start() in transparent:
+            continue
+        depth += 1 if m.group() == "{" else -1
+        bpos.append(m.start())
+        bdepth.append(depth)
+
+    def depth_at(off):
+        k = bisect.bisect_left(bpos, off)
+        return bdepth[k - 1] if k else 0
+
+    return depth_at
