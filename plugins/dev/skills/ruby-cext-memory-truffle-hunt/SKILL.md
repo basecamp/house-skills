@@ -284,7 +284,7 @@ existing suspects, and `REGISTERED` is a **downgrade, not a clear**, because reg
 per-slot: round 4 measured stackprof's registered `empty_string` pinned while its unregistered
 sibling `objtracer` was not.
 
-**Run `--self-test` before trusting any silence** — 27/27, 15/15 and 32/32 respectively. A suite of
+**Run `--self-test` before trusting any silence** — 27/27, 15/15 and 38/38 respectively. A suite of
 greens passes just as well when the parser has resolved nothing at all, so the controls that matter
 are **generated reds**: a de-marked copy of a tree with a known finding, and a `--disable-rule`
 mutation for each discharge rule. Round 5 shipped four over-clears in A that a green-only suite had
