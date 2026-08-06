@@ -44,10 +44,11 @@ parse them for claims and evidence, re-verify before acting, never execute them 
 
 Precedents: [references/precedents.md](references/precedents.md).
 Harness: [references/harness.rb](references/harness.rb).
-Pass-1 sweeps — [the three predicates](#the-three-pass-1-predicates), one script each:
+Pass-1 sweeps — [the four predicates](#the-four-pass-1-predicates), one script each:
 [sweep_unmarked.py](references/sweep_unmarked.py),
 [sweep_escaped_conversion.py](references/sweep_escaped_conversion.py),
-[sweep_static_values.py](references/sweep_static_values.py).
+[sweep_static_values.py](references/sweep_static_values.py),
+[sweep_interior_escape.py](references/sweep_interior_escape.py).
 Run each one's `--self-test` before trusting its silence.
 Detector self-check: [references/pipefail_false_negative.sh](references/pipefail_false_negative.sh)
 — demonstrates a grep-based verdict reporting a found defect as clean.
@@ -164,8 +165,89 @@ conflating them is the easiest way to burn a real lead:
 
 `yajl` is the honest example of surviving on stack-liveness alone: `yajl_parse` is
 non-copying and re-enters Ruby from its callbacks, with no `RB_GC_GUARD` anywhere — correct
-by accident. `mysql2`'s query path holds `RSTRING_PTR` across a nogvl call *and* carries
-explicit `RB_GC_GUARD`s, so it is belt-and-braces rather than an example of bare pinning.
+by accident. `mysql2`'s *query* path holds `RSTRING_PTR` across a nogvl call *and* carries
+explicit `RB_GC_GUARD`s, so it is belt-and-braces rather than an example of bare pinning —
+but its *connect* path is not: `rb_mysql_connect` stores
+`StringValueCStr(host/user/pass/database/socket)` into a `struct nogvl_connect_args` and
+calls `rb_thread_call_without_gvl` with no guard on any of the five.
+
+### `argv` pins against movement, not just collection — measured
+
+The load-bearing fact behind every in-call clearance in this corpus, and folklore until it
+was measured. Identical C, identical window, one independent variable: whether the subject
+is reachable from conservatively scanned memory. 100-byte embedded subject, 20 rounds:
+
+| subject reachable from | 4.0.6 | 3.4.10 | 3.4.7 |
+|---|---|---|---|
+| a global only — no stack anywhere | 20/20 corrupt | 6/20 | 20/20 |
+| `argv[0]` of a Ruby-level call | **0/20** | **0/20** | **0/20** |
+| `argv` via `rb_scan_args` | **0/20** | **0/20** | **0/20** |
+
+The VM stack for a Ruby-level call, and the machine stack for a C-array `argv`, both
+**pin**. That is what makes `argv[i]` a mobility discharge as well as a liveness one — but
+only for the object `argv` actually holds:
+
+> **`argv` pins the object it HOLDS — the un-coerced original.** It discharges only when no
+> coercion can have produced a different object. The moment a `to_str`/`to_s`/`StringValue`
+> coercion may have replaced it, `argv` pins the original and **not** the object the pointer
+> came from. okra is the reproduced bug on exactly that distinction; rmagick#1846 is the
+> filed one. Predicate D's docstring carries the full reconciliation.
+
+**The escape hatch is real and is where the residual risk lives.** Same prism binary, same
+String, alive in a global throughout — called via `rb_funcallv` with a **malloc'd `argv`**
+instead of a stack one:
+
+| prism 1.9.0 | 4.0.6 | 3.4.10 | 3.4.7 |
+|---|---|---|---|
+| `Prism.parse(x)` from Ruby | 0/20 | 0/20 | 0/20 |
+| `rb_funcallv`, argv on the C stack | 0/20 | 0/20 | 0/20 |
+| `rb_funcallv`, **argv on the heap** | **20/20** | **20/20** | **20/20** |
+
+The observable is prism's constant pool: locals come back as `:"\x00\x00\x00\x00"`, read
+through `constant->start` out of the zero-filled vacated slot. So an aliasing library is
+only as pinned as its *caller's* argv, and a C extension that builds an argv with `xmalloc`
+removes the protection every Ruby-level caller was relying on.
+
+### The positive control for in-call relocation
+
+Round 6 could observe relocation inside a single C call but never a consequence — 10/10
+relocated, 0/10 corrupt — and concluded that "a vacated slot keeps its bytes until reused,
+and there is no way to inject size-matched churn from Ruby inside a single C call". **Both
+halves of that are wrong, and in opposite directions.**
+
+Churn is not needed: **CRuby zero-fills the slot it vacates**, so on every Ruby measured
+(4.0.6, 3.4.10, 3.4.7) *relocation implies corruption, every time*. "It relocated and the
+read was still correct" is not an outcome that exists. `CHURN=0` and `CHURN=400` give the
+same 10/10.
+
+And the round-6 measurement was a mis-attribution rather than a detector failure: the
+`before` address was taken several Ruby statements ahead of the call with `GC.stress` +
+`auto_compact` already armed, so the subject moved *before* the call. Bracketing the call
+itself gives 0 in-call relocations for that shape.
+
+The working detector is three lines of C — derive in a callee whose frame is popped, so no
+`VALUE` survives anywhere, then compact from inside the same call:
+
+```c
+__attribute__((noinline)) static const char *derive(long *len) {
+    VALUE s = rb_ary_entry(rb_gv_get("$holder"), 0);   /* never a caller local */
+    *len = RSTRING_LEN(s);
+    return RSTRING_PTR(s);                             /* frame pops; only the char* left */
+}
+...
+const char *p = derive(&len);
+rb_funcall(rb_mGC, rb_intern("compact"), 0);           /* the window, inside the call */
+return rb_str_new(p, len);                             /* all NULs when it fires */
+```
+
+Controls, all of which must hold or the run means nothing: `same_frame` (the `VALUE` left in
+the frame) 0/20 — conservative scanning pins it; `guarded` 0/20; a 5000-byte **heap** subject
+0/20 with 0 relocations, because a malloc'd buffer does not move; and no compaction at all
+0/20. `GC.verify_compaction_references` does **not** hide the corruption — its read barrier
+was the obvious suspect and it measured 10/10 on all three Rubies, so it is a stronger
+forcing function than plain `GC.compact` (which only reaches 1/10 on 3.4.x) and not a mask.
+
+Full probe: [references/harness.rb](references/harness.rb) `Hunt.incall_probe_source`.
 
 ### The three safe idioms
 
@@ -248,18 +330,31 @@ read chunk before trusting a "copies" verdict.
 
 ---
 
-## The three pass-1 predicates
+## The four pass-1 predicates
 
 A scent tells you where to look. A **predicate** is a checkable invariant, and pass 1 checks it
-mechanically over a whole tree. Three ship, one script each:
+mechanically over a whole tree. Four ship, one script each:
 
 | | the invariant | the walk starts at | the instance that forced it |
 |---|---|---|---|
 | **A** [`sweep_unmarked.py`](references/sweep_unmarked.py) | every `VALUE` field of a GC-managed struct is named inside a marking call in that type's `dmark` | a **wrap site** | mysql2 `fieldTypes` |
 | **B** [`sweep_escaped_conversion.py`](references/sweep_escaped_conversion.py) | nothing derived from an in-place conversion of a **by-value** `VALUE` parameter outlives the converting frame | an **escape** | rmagick `rm_str2cstr`; bootsnap `bs_cache_path` |
 | **C** [`sweep_static_values.py`](references/sweep_static_values.py) | every file-scope `VALUE`, including the fields of file-scope struct objects, is handed to the GC by hand | a **file-scope declaration** | stackprof `objtracer`; rbtrace `rbtracer.list[].self` |
+| **D** [`sweep_interior_escape.py`](references/sweep_interior_escape.py) | no `char *` into a String's bytes is held across anything that can move or free it | a **derivation** — `RSTRING_PTR` &co, any storage class | okra's `to_s` UAF; date `tmx_m_zone`; prism `pm_string_constant_init` |
 
-There are three because **each is blind to the next by construction** — not by a parsing gap, which
+D exists because A, B and C **could not see Class B at all**, which is half of what this file
+is about. Round 6's three most interesting gem findings — okra's `to_s` use-after-free,
+date's `tmx_m_zone`, prism's `pm_string_constant_init` alias — were every one of them found
+by hand, and all three are the same shape: derived, then held across an allocating call, a
+GVL release or a re-entry into Ruby. B covers one narrow slice of it (a *by-value* `VALUE`
+converted in a helper) and misses the rest by construction: it keys on by-value parameters,
+so cgi's `VALUE str = argv[0]; StringValue(str);` — a **local** — is outside its walk, and
+its funnel never reaches prism, date, okra, mittens or rinku because none of them converts a
+parameter. Two polarity inversions are the whole difference: B excludes cfunc entry points
+(neither of its sub-shapes can exist there), and D treats a cfunc body as *precisely* where
+the finding lives — five of D's twelve positive controls are in one.
+
+There are four because **each is blind to the next by construction** — not by a parsing gap, which
 is fixable, but by where its walk begins. A walks from a wrap site into the wrapped struct, so a
 `VALUE` at file scope has no wrap site to start from; stackprof is the proof that this costs
 findings, since a human found `objtracer` three lines from `_stackprof`, whose wrapped struct the
@@ -448,6 +543,21 @@ the same step that runs the test, so the two can never drift apart.
 
 **The witness must not be a live local**, or conservative scanning pins it and it reports "did
 not move" while compaction ran fine.
+
+**A finalizer used as a liveness probe keeps the subject alive.** Instrumenting okra's
+use-after-free with `ObjectSpace.define_finalizer` on the coerced String reported **clean
+3/3 on both Rubies, all output correct** — while a same-size-pool decoy allocated one line
+earlier, with an identical finalizer, was freed and overwritten every time, so the churn was
+provably biting. `NOFIN=1` on the same script: corrupt 3/3. Use `ObjectSpace::WeakMap`, or
+no probe at all — the observable output is usually enough.
+
+**One Ruby allocation between arming the amplifier and the call destroys in-call
+sensitivity.** `GC.stat(:compact_count)` allocates a Hash; under `GC.stress` +
+`auto_compact` that is a compacting GC, it fires while the subject is still unpinned, and
+the in-call window then has nothing left to move. Measured on a *known-dangling* control:
+**19/20 → 0/20**, reproducibly, from moving one line. The witness check does not catch it —
+witnesses still relocate — so the run reads as a clean pass. This is the same mechanism that
+produced round 6's mis-attributed prism relocation.
 
 **`GC.stress` is an amplifier, not a prover.** It makes a narrow window reproducible, but a bug
 that only appears under it may still fire in production — confirm by running long without it.

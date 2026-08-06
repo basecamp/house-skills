@@ -60,12 +60,29 @@ has no C-level caller (so CALLER-DEREFS cannot exist) and returns `VALUE` (so
 RETURNS-INTERIOR cannot exist). Its converted local lives in its own conservatively
 scanned C frame for the whole body.
 
+THE ARGV-SEEDED LOCAL IS PREDICATE D'S, NOT THIS ONE'S
+-------------------------------------------------------
+This predicate keys on by-value PARAMETERS. cgi's `cgiesc_unescape` does
+`VALUE str = argv[0]; StringValue(str);` -- a **local**, so the conversion is outside this
+walk by construction, and no amount of tuning here reaches it. That gap was round 6's
+residual and it is now covered, deliberately and in one place only:
+`sweep_interior_escape.py` (predicate D) starts from the DERIVATION at any storage class
+and treats the argv-seeded local as its charter case, with cgi as a named acceptance item.
+Do not widen this predicate to chase it -- two predicates half-covering one shape is how a
+gem ends up cleared by both.
+
 THREE THINGS THAT ARE NOT TUNING KNOBS
 --------------------------------------
 * **`argv[i]` is the canonical RED shape, not a discharge.** rmagick#1846 is filed on
   exactly `rm_str2cstr(argv[0], &format_l)`. The VM stack pins what `argv[i]` holds, which
   is the *original* object -- never the String the callee coerced. An early cut of this had
   it backwards and discharged the filed bug.
+  Round 7 measured the other half of that sentence and it is worth stating precisely,
+  because predicate D depends on it: conservatively scanned argv memory pins against
+  MOVEMENT as well as collection (0/20 corrupt vs 20/20 for the same subject reachable only
+  from a global, on 4.0.6 / 3.4.10 / 3.4.7). So `argv` really is a discharge -- for the
+  object it holds, which on this shape is never the converted one. Both statements are true
+  at once and predicate D's docstring reconciles them.
 * **Bound the caller scan by the caller's own function body.** `--window 1500` reinstates
   the fixed-window scan and mysql2 comes straight back: four one-line callers that
   `return _mysql_client_options(self, OPT, value);` and whose windows run past their own

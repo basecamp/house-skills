@@ -306,6 +306,74 @@ module Hunt
 
     str
   end
+
+  # ------------------------------------------------- in-call relocation probe
+  #
+  # The positive control for "the String moved WHILE the C call was running". Round 6 could
+  # see the relocation and never a consequence -- 10/10 moved, 0/10 corrupt -- and concluded
+  # that a vacated slot keeps its bytes until something reuses it, and that size-matched
+  # churn cannot be injected from Ruby inside one call. Both halves are wrong:
+  #
+  #   * churn is not needed. CRuby ZERO-FILLS the slot it vacates, so relocation implies
+  #     corruption on every Ruby measured (4.0.6, 3.4.10, 3.4.7). CHURN=0 and CHURN=400 give
+  #     the same 10/10. "It moved and the read was fine" is not an outcome that exists.
+  #   * and the churn could have come from C all along -- from inside the same call.
+  #
+  # Build it with `ruby extconf.rb && make` (extconf.rb is two lines: require "mkmf";
+  # create_makefile "incall_probe"). Drive it with an EMBEDDED subject parked in a global
+  # array element -- a local is conservatively pinned and the run reports clean at
+  # sensitivity zero.
+  #
+  # The controls that make it a detector rather than a demo, all of which must hold:
+  #   same_frame (the VALUE left in the frame)  0/20  -- conservative scanning pins it
+  #   guarded    (RB_GC_GUARD after the read)   0/20
+  #   heap subject, 5000 B, embedded?==false    0/20 with 0 relocations
+  #   no compaction at all                      0/20
+  # GC.verify_compaction_references does NOT mask it -- the read barrier was the obvious
+  # suspect and it measures 10/10 on all three Rubies, so it is a stronger forcing function
+  # than plain GC.compact (which reaches only 1/10 on 3.4.x), not a mask.
+  def incall_probe_source
+    <<~'C'
+      #include <ruby.h>
+      #include <string.h>
+
+      /* noinline + the VALUE confined to this frame: once it returns, the only thing
+         referring to the String's bytes is the raw pointer. This is prism's shape --
+         string_options() returns, pm_string_constant_init keeps the alias. */
+      __attribute__((noinline)) static const char *derive(long *len_out)
+      {
+          VALUE s = rb_ary_entry(rb_gv_get("$holder"), 0);
+          *len_out = RSTRING_LEN(s);
+          return RSTRING_PTR(s);
+      }
+
+      static VALUE probe_run(VALUE self, VALUE mode, VALUE compactions)
+      {
+          const char *p; long len; VALUE s = Qnil;
+
+          if (mode == ID2SYM(rb_intern("popped_frame"))) {
+              p = derive(&len);                       /* RED */
+          } else {
+              s = rb_ary_entry(rb_gv_get("$holder"), 0);
+              len = RSTRING_LEN(s);
+              p = RSTRING_PTR(s);                     /* same_frame / guarded */
+          }
+
+          for (long i = 0; i < NUM2LONG(compactions); i++)
+              rb_funcall(rb_mGC, rb_intern("compact"), 0);
+
+          VALUE out = rb_str_new(p, len);
+          if (mode == ID2SYM(rb_intern("guarded"))) RB_GC_GUARD(s);
+          return out;                                 /* all NULs when it fires */
+      }
+
+      void Init_incall_probe(void)
+      {
+          VALUE m = rb_define_module("Probe");
+          rb_define_singleton_method(m, "run", probe_run, 2);
+      }
+    C
+  end
 end
 
 if __FILE__ == $PROGRAM_NAME
@@ -315,6 +383,7 @@ if __FILE__ == $PROGRAM_NAME
   # Self-check the instrument before trusting it on a gem. peek shipped returning "<null>"
   # unconditionally, and nothing in this file would have told you.
   probe = +("PEEKPEEKPEEK" * 4)
+
   %w[bytes_ptr object_addr].each do |how|
     got = Hunt.peek(Hunt.public_send(how, probe), 12)
     warn "[harness] peek via #{how}: #{got.inspect}"
