@@ -405,6 +405,13 @@ NONCOPYING = {
 # where the name is all you have. Leaving them out costs rmagick four rows that a human
 # triage clears in a minute; putting them in would make this rule a list of names that is
 # only as good as the day it was last extended.
+#
+# MEMBERSHIP HERE IS NOT A DISCHARGE ON ITS OWN. The entries that allocate a Ruby object --
+# rb_str_new* and friends, rb_intern, and `xstrdup`/`ruby_strdup`, which are ruby_xmalloc --
+# are filtered back out at the use site by classify_window(), because they can run a GC
+# before they copy. They stay in the list so that `copies-in-callee` can still recognise a
+# copy several frames down, where the allocation is the callee's problem and the window is
+# reported against the callee.
 COPIES = re.compile(r"^(memcpy|memmove|strn?cpy|strl?cpy|strl?cat|strn?cat|strn?dup"
                     r"|xstrdup|ruby_strdup|snprintf|vsnprintf"
                     r"|rb_str_new|rb_str_new_cstr|rb_utf8_str_new|rb_utf8_str_new_cstr"
@@ -654,6 +661,16 @@ def pointer_alias(fn, deriv_off, macro):
     if is_indexed(fn, deriv_off, macro):
         return None
     stmt = statement_before(fn.body, deriv_off - fn.bstart).replace("\n", " ")
+    # `p = (const char *)RSTRING_PTR(str)` -- a cast between the `=` and the derivation left
+    # the statement ending in `)` instead of `=`, so no alias was recorded, so `last_use`
+    # returned None, so every later read of `p` was invisible and the row discharged
+    # `no-window`. Strip trailing casts and redundant parentheses before matching; the loop
+    # is bounded because each pass removes one group.
+    while True:
+        stripped = re.sub(r"\(\s*[A-Za-z_][\w\s*]*\)\s*$", "", stmt)
+        if stripped == stmt:
+            break
+        stmt = stripped
     m = re.search(r"(?:^|[\s*(])([A-Za-z_]\w*)\s*=\s*$", stmt)
     if not m:
         return None
@@ -1089,12 +1106,29 @@ def liveness(fn, deriv_off, expr, tree, last_use_off=None):
     # function -- necessary there because `val` is reassigned for every option, so
     # guarding `val` would guard the wrong object. Matching only the source name lost the
     # green half of the best red/green pair in the corpus.
+    # A COPY only stands in for the source if it carries the value present AT THE
+    # DERIVATION. `p = RSTRING_PTR(val); val = other; guard = val; ... RB_GC_GUARD(guard)`
+    # guards `other` and leaves the String behind `p` movable -- so the copy is rejected
+    # when `var` is reassigned anywhere between the copy and the derive, in either order.
+    reassigned = [m.start() for m in
+                  re.finditer(r"\b%s\s*=(?!=)" % re.escape(var), body)]
     guardable = {var}
     for m in re.finditer(r"\b([A-Za-z_]\w*)\s*=(?!=)\s*%s\s*;" % re.escape(var), body):
-        guardable.add(m.group(1))
+        lo, hi = min(m.start(), rel), max(m.start(), rel)
+        if not any(lo < r < hi for r in reassigned):
+            guardable.add(m.group(1))
+
+    # THE GUARD HAS TO OUTLIVE THE POINTER, NOT THE DERIVATION. RB_GC_GUARD establishes
+    # liveness only up to its own position, so a guard placed after the derive but BEFORE
+    # a later window and read protects nothing: `p = RSTRING_PTR(str); RB_GC_GUARD(str);
+    # rb_funcall(...); use(p);` was being discharged. The RULES table has always said "at
+    # or after the last deref" and the code said "after the derive"; the code is now what
+    # the table says. Where there is no alias there is no later use, and the derivation
+    # offset is the last use.
+    floor = rel if last_use_off is None else max(rel, last_use_off - fn.bstart)
     for m in re.finditer(r"\bRB_GC_GUARD\s*\(\s*([A-Za-z_]\w*)\s*\)", body):
-        if m.group(1) in guardable and m.start() >= rel:
-            return "GUARDED", ("RB_GC_GUARD(%s) after the derive" % m.group(1)
+        if m.group(1) in guardable and m.start() >= floor:
+            return "GUARDED", ("RB_GC_GUARD(%s) at or after the last use" % m.group(1)
                                + ("" if m.group(1) == var
                                   else " (a copy of %s)" % var))
 
@@ -1230,9 +1264,18 @@ def sweep(tree, name, disabled=(), discharge=True):
             lu = last_use(fn, off, alias)
             dend = derive_extent(fn, off, macro)
 
-            # The pointer copied straight into memory the caller owns, in the same
-            # statement as the derive. There is no window because there is no gap.
-            if not esc and cons and COPIES.match(cons[0]) \
+            # AN ALLOCATING COPIER IS A WINDOW, NOT A DISCHARGE.
+            # `rb_str_new(RSTRING_PTR(str), n)` allocates the destination String BEFORE it
+            # copies the bytes, and that allocation can run a GC. Nothing took `&str`, so
+            # nothing forces the source to keep a stack slot, and an embedded String can
+            # move inside the consumer itself -- the copy then reads the vacated slot.
+            # This is the same fact round 8 measured on trilogy, where `xstrdup` is a
+            # `ruby_xmalloc` and the strdups are windows for each other; `xstrdup` had been
+            # added to COPIES in that very round, which was wrong for the reason that round
+            # established. So the consumer discharges only when it CANNOT allocate, and
+            # otherwise it is reported as the window it is.
+            cons_win = classify_window(cons[0], cons[1]) if cons else None
+            if not esc and cons and COPIES.match(cons[0]) and not cons_win \
                     and "copies-immediately" not in off_rule:
                 r.discharges.append(("copies-immediately", rel, line_of(fn.src, off),
                                      "%s(%s) in %s -- consumed by %s() in the same "
@@ -1268,6 +1311,11 @@ def sweep(tree, name, disabled=(), discharge=True):
                        + window_between(fn, esc_off, fn.bend, after=dend))
             elif lu is not None:
                 win = window_between(fn, off, lu, after=dend)
+            elif cons_win:
+                # No alias and no escape, so the only use is the consumer -- and the
+                # consumer is the window. Its call starts BEFORE the derive it encloses,
+                # so window_between() cannot see it from the derivation offset.
+                win = [(cons_win, cons[0], fn.bstart + cons[2])]
             else:
                 # No name for the pointer and no escape: its only use is the consumer, in
                 # the same statement. Nothing can run in between.
@@ -1437,9 +1485,19 @@ NEGATIVES = ["json-", "erb-", "bcrypt-", "ed25519-", "racc-"]
 # zlib stays 16: the seven `z->buf` rows are discharged in triage by `zstream_mark`'s
 # PINNING `rb_gc_mark` (zlib.c:1181-1186), which is not a rule this predicate can apply --
 # see the note on the copies-in-callee docstring.
-TRIAGED = {"mysql2-0.5.6": 10, "zlib-basecamp-patch-": 16, "iconv-": 5, "zstd-": 4,
+#
+# RE-PINNED AFTER THE ROUND-8 REVIEW FIXES, AND THE GROWTH IS NOT YET TRIAGED.
+# Tightening `guarded` (the guard must outlive the POINTER, and a guard copy must carry the
+# value present at the derivation) and refusing to discharge an ALLOCATING copier brought
+# rows back: iconv 5->14, zlib 16->20, zstd 4->6, msgpack 1->2, mysql2 10->11. Some are
+# plainly right -- iconv's `rb_sys_fail(RSTRING_PTR(msg))` is the mittens shape verbatim,
+# an exception message formatted from the pointer. Some are plainly noise -- iconv's
+# `rb_str_derive` derives only to compare pointers and to compute an offset. **Neither has
+# been worked through.** The numbers are pinned at the new values so that FURTHER growth
+# still trips the check; they are not a claim that the 24 added rows have been read.
+TRIAGED = {"mysql2-0.5.6": 11, "zlib-basecamp-patch-": 20, "iconv-": 14, "zstd-": 6,
            "sqlite3-2.9.5": 3, "websocket-driver-": 2, "stringio-": 1,
-           "msgpack-1.8.4": 1, "msgpack-1.8.3": 1}
+           "msgpack-1.8.4": 2, "msgpack-1.8.3": 2}
 
 
 def self_test(pool):
