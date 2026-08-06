@@ -492,6 +492,7 @@ class Tree:
         self.files = {}
         self.macros = {}         # function-like #define name -> concatenated bodies
         self.macro_defs = {}     # name -> [(params, body)], for token-paste expansion
+        self.predirective = {}   # path -> comment-stripped text WITH directives intact
         for p in sorted(self.root.rglob("*")):
             if p.is_file() and p.suffix in C_EXT and ".git" not in p.parts:
                 try:
@@ -501,6 +502,11 @@ class Tree:
                 except OSError:
                     continue
                 self._index_macros(decommented)
+                # Kept undirectived for _index_get_struct_types: date reads its payload
+                # back through `#define get_d1(x) TypedData_Get_Struct(x, union DateData,
+                # &d_lite_type, dat)`, and strip_directives blanks the whole line, so the
+                # only place the union is ever named is inside a directive.
+                self.predirective[p] = decommented
                 self.files[p] = strip_directives(decommented)
         self.all = "\n".join(self.files.values())
         self.structs = {}        # name -> body text
@@ -529,6 +535,7 @@ class Tree:
             self._index_statics(src)
         for path, src in self.files.items():
             self._index_wraps(path, src)
+        self._index_get_struct_types()
         self.pasted = self._expand_pastes()
 
     # -- function-like macros -----------------------------------------------
@@ -1039,6 +1046,15 @@ class Tree:
 
     # -- resolution ---------------------------------------------------------
 
+    def _index_get_struct_types(self):
+        """dtype -> {struct type names it is READ BACK as}. See struct_types_for()."""
+        self.get_struct_types = {}
+        for src in self.predirective.values():
+            for m in re.finditer(
+                    r"TypedData_Get_Struct\s*\(\s*[^,]+?,\s*(?:struct\s+|union\s+|class\s+)?"
+                    r"(\w+)\s*,\s*&\s*(\w+)\s*,", src):
+                self.get_struct_types.setdefault(m.group(2), set()).add(m.group(1))
+
     def struct_type_for(self, dtype):
         """Infer the wrapped struct even when only Wrap_Struct is used."""
         if dtype in self.type_of_dtype:
@@ -1201,6 +1217,68 @@ def value_fields(body):
     return fields
 
 
+NAMED_AGGREGATE_MEMBER = re.compile(
+    r"\b(?:struct|union|class)\s+(\w+)\s+(\w+)\s*(?:\[[^\]]*\])?\s*;")
+
+
+TYPED_GET = re.compile(
+    r"TypedData_Get_Struct\s*\(\s*[^,]+,\s*(?:struct|union|class)\s+(\w+)\s*,")
+
+
+def struct_types_for(tree, dtype, primary):
+    """EVERY struct type this dtype is used with, not just the first one resolved.
+
+    Round 6's residual again, and the diagnosis is not the one it looked like. date's
+    `d_lite_type` is *allocated* as `struct SimpleDateData` and *read back* as
+    `union DateData` on every single access:
+
+        TypedData_Make_Struct(klass, struct SimpleDateData, &d_lite_type, dat)
+        TypedData_Get_Struct(x, union DateData, &d_lite_type, dat)
+
+    struct_type_for() resolves the allocation type and stops, so the union -- and with it
+    `ComplexDateData.nth` and `.sf`, the whole other arm of the payload -- was never
+    enumerated. That is the round-5 over-clear family mirrored: there, one struct wrapped
+    by two dtypes let iteration order pick the verdict; here, one dtype used with two
+    struct types does the same thing. Taking the UNION of the fields is the only answer
+    that does not depend on which site the parser reached first.
+    """
+    out = []
+    if primary:
+        out.append(primary)
+    for name in tree.get_struct_types.get(dtype, ()):
+        r = tree.resolve(name)
+        if r in tree.structs and r not in out:
+            out.append(r)
+    return out
+
+
+def value_fields_deep(tree, struct_name, _seen=None):
+    """value_fields(), plus the VALUE fields of NAMED aggregate members, recursively.
+
+    Round 6's residual, found by breadth rather than by the self-test: date wraps
+    `union DateData { unsigned flags; struct SimpleDateData s; struct ComplexDateData c; }`
+    and the flat scan enumerated **one** field. `ComplexDateData.nth` and `.sf` -- the
+    other arm of the union -- were never looked at. Benign in date, because
+    `d_lite_gc_mark` marks all three with the pinning `rb_gc_mark`, but a struct member
+    is an ordinary way to organise a wrapped payload and every VALUE inside one was
+    invisible.
+
+    Only NAMED members recurse. Anonymous struct/union members are already reached by
+    value_fields()'s brace split, and going through them again would double-count.
+    """
+    _seen = _seen or set()
+    if struct_name in _seen or struct_name not in tree.structs:
+        return []
+    _seen.add(struct_name)
+    body = tree.structs[struct_name]
+    out = list(value_fields(body))
+    for m in NAMED_AGGREGATE_MEMBER.finditer(body):
+        inner, member = m.group(1), m.group(2)
+        for nm, ptr in value_fields_deep(tree, inner, _seen):
+            out.append(("%s.%s" % (member, nm), ptr))
+    return out
+
+
 def sweep(tree, verbose=False):
     suspects, clears = [], []
     seen, reported, typed_seen = set(), set(), set()
@@ -1223,7 +1301,13 @@ def sweep(tree, verbose=False):
         m_direct, m_helper, m_named = idx["dmark"]
         c_direct, c_helper, _ = idx["dcompact"]
         decl_in = tree.struct_file.get(st, path)
-        for field, is_ptr in value_fields(tree.structs[st]):
+        fields, seen_field = [], set()
+        for sub in struct_types_for(tree, dtype, st):
+            for f in value_fields_deep(tree, sub):
+                if f[0] not in seen_field:
+                    seen_field.add(f[0])
+                    fields.append(f)
+        for field, is_ptr in fields:
             # Round 5 (a): the key carries the dtype. The old (struct, field) key let
             # msgpack's marking `buffer_data_type` clear `msgpack_buffer_t` on behalf of
             # `buffer_view_data_type`, whose .dmark is NULL. Two wrappers of one struct
@@ -1240,15 +1324,27 @@ def sweep(tree, verbose=False):
             if not inline:
                 typed_seen.add((st, field))
 
-            kind = stronger(m_direct.get(field), m_helper.get(field))
-            via_helper = field not in m_direct and field in m_helper
-            in_compact = bool(c_direct.get(field) or c_helper.get(field))
+            # A qualified field (`c.sf`, from a NAMED aggregate member) is written
+            # `dat->c.sf` at the mark site, and mark_index keys on the member token. Try
+            # the qualified name first and fall back to the leaf, or every field reached
+            # through the new deep enumeration reports UNMARKED on code that marks it --
+            # a recall improvement that ships a false positive is worse than the gap.
+            leaf = field.rsplit(".", 1)[-1]
+            keys = (field, leaf) if leaf != field else (field,)
+            def _pick(d):
+                for k in keys:
+                    if d.get(k):
+                        return d[k]
+                return None
+            kind = stronger(_pick(m_direct), _pick(m_helper))
+            via_helper = not _pick(m_direct) and bool(_pick(m_helper))
+            in_compact = bool(_pick(c_direct) or _pick(c_helper))
             cat = None
             if kind is None:
                 # Round 5 (b): presence in the body is not a mark. Separating these two
                 # keeps the recall honest -- MENTIONED says "we saw the name and it was
                 # not in a marking call", which is a question for pass 2, not a verdict.
-                cat = "MENTIONED" if field in m_named else "UNMARKED"
+                cat = "MENTIONED" if any(k in m_named for k in keys) else "UNMARKED"
             elif is_ptr:
                 cat = "VALUE*"
             elif kind == "movable" and not in_compact:
