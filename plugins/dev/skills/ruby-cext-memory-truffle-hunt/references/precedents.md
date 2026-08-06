@@ -772,3 +772,35 @@ number that looks like overwhelming evidence. Two rules follow:
 - **Read a 100% rate as a bug in the harness until proven otherwise.** Round 4 recorded the mirror
   of this — a green fixture that passed on `slots=0`. Both are the same disease: the assertion was
   calibrated on the wrong side.
+
+### Hit-set identity proves the pin's IN-CLASS posture, and nothing else
+
+Rounds 6–8 upheld labels across a version boundary by showing the four predicates produced an
+identical hit set on both versions. The method's own warning was that for **msgpack and cbor the
+predicate output is byte-identical across the boundary while a real memory-safety fix sits in the
+diff** — which reads as the method refuting itself. Round 9 chased it, and it does not:
+
+**All four predicates key on invariants about objects the *Ruby GC owns*** — a `VALUE` field of a
+managed struct, a file-scope `VALUE`, a by-value `VALUE` coerced in place, a `char *` derived from a
+String. msgpack 1.8.4's fix is a use-after-free of a page in msgpack's **own `rmem` allocator**,
+whose dangling pointers are `char *` / `void **` fields that never touch a Ruby object. cbor
+0.5.10.3's is an integer constant and a control-flow assignment. **Both sit outside all four domains
+by construction**, so the silence measures the instruments, not the gems.
+
+The correction is to the *claim*, not the technique:
+
+> Hit-set identity soundly proves **"the pin's in-class posture equals the audited version's."**
+> It proves **nothing about what else the pin carries.**
+
+Round 8 wrote both claims into one table cell, and that is the actual defect. State the narrow one,
+and note that anything out of class is unmeasured — a version bump can carry a real fix your
+predicate cannot see, and identity across the boundary is exactly what you would expect in that case.
+
+Two rows in that section were also simply mislabelled, and re-running settled them in the other
+direction: **rbtrace 0.5.2** and **rmagick 6.1.1** had been carried by identity and turned out to be
+**confirmable by execution at the pin** — rmagick 3/3 corrupt under **ordinary GC**, with a positive
+identification rather than a crash (the lookup returned the value registered under the churn
+content, proving the dangling read hit the recycled slot), firing at ≥1000 same-pool allocations in
+the window and clean at ≤100. Four of the six rows never belonged in the section at all: they had
+been executed at their pinned versions in an earlier round, and one gem's hit sets were never
+identical across the boundary to begin with.
