@@ -268,12 +268,27 @@ to. rb_global_variable and rb_gc_register_address root the ADDRESS. Only the sec
 covers a later store, and the first pair was discharging slots on the name alone. See the
 registered-value and const-published entries above for the position rule and its floor.
 
+NAME RESOLUTION IS SHARED, AND LIVES IN tu_scope.py
+---------------------------------------------------
+Every lookup that turns a NAME at a use site into a DEFINITION goes through
+`tu_scope.bind`, which states C's linkage rule once for all four predicates: a use binds
+to a definition in its own file first, a `static` definition in another .c/.cc/.cpp/.cxx
+is not a candidate at all, and everything else -- non-static definitions, and anything
+declared in a HEADER -- stays tree-wide. That module is a sibling file and these scripts
+will not run without it; references/ is the unit that ships.
+
 ACCEPTANCE (--self-test): see self_test(). Run it before trusting any result -- silence is
-a property of the query until the counters say otherwise. 53 checks; fifteen of them are
+a property of the query until the counters say otherwise. 55 checks; seventeen of them are
 the round-9 review threads, and every one of those was measured GREEN on the pre-fix script
 -- six of the eight shapes with `slots 0`, a clean sheet produced by the parser finding
-nothing. The corpus is NEUTRAL on all of them (zero new hit rows across 99 trees), so these
-fixtures are the only evidence in the repository that the fixes do anything.
+nothing. The corpus is nearly neutral on all of them -- zero new HIT rows across 99 trees --
+so these fixtures are most of the evidence in the repository that the fixes do anything. The
+one exception is worth reading: block-scoping function-local statics takes date 3.5.1 from
+19 slots to 65, because it declares 46 `static VALUE pat = Qnil;` in 46 different functions
+and the file-scoped key merged them by name. All 65 still discharge, and the one discharge
+REASON that moves is the finding: date_parse.c's merged `pat` had been cleared by an
+`rb_gc_register_mark_object` inside `regcomp()` -- a call that roots that function's OWN
+LOCAL `pat`, in a different function entirely, and never touched any static at all.
 """
 import argparse
 import pathlib
@@ -281,6 +296,12 @@ import re
 import shutil
 import sys
 import tempfile
+
+# The linkage rule, shared with the other three predicates. Sibling module, so
+# `python3 .../sweep_static_values.py` finds it wherever it is run from; references/ is the
+# unit that ships, and a script copied out of it on its own will not import.
+import tu_scope
+from tu_scope import TREE, Scope
 
 C_EXT = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp")
 # A TRANSLATION UNIT, as opposed to a header. The distinction only matters for internal
@@ -294,7 +315,7 @@ C_EXT = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp")
 # this sweep still merges into one row, so a registration in one includer still discharges
 # the other's slot -- the very shape scoping fixes for .c files. Closing it needs include
 # resolution, which is not in this pass.
-TU_EXT = (".c", ".cc", ".cpp", ".cxx")
+TU_EXT = tu_scope.TU_EXT
 
 ALL_RULES = ("registered-slot", "registered-value", "immediate", "const-table",
              "const-published", "wrapped")
@@ -722,8 +743,10 @@ class Slot:
         self.decl = decl        # the declaration text, trimmed
         self.opath = opath or path   # the file-scope object's declaration
         self.ooff = ooff or off
-        # INTERNAL LINKAGE IS PER TRANSLATION UNIT, and this is the file it belongs to --
-        # None for a slot that is one object tree-wide. `static VALUE cache;` in two .c files
+        # INTERNAL LINKAGE IS PER TRANSLATION UNIT, and this is the REGION the object
+        # belongs to -- a tu_scope.Scope, `TREE` for a slot that is one object tree-wide,
+        # `Scope(path)` for a file static, and `Scope(path, span)` for one declared inside a
+        # function body, which is one object per FUNCTION. `static VALUE cache;` in two .c files
         # is TWO objects with one name; a `rb_global_variable(&cache)` in the first roots the
         # first and says nothing about the second. Name-only dedupe merged the pair into one
         # row, the registration discharged the merged row, and the unregistered slot in the
@@ -739,7 +762,15 @@ class Slot:
         # External-linkage slots stay tree-wide keyed, deliberately. rmagick declares 67
         # `EXTERN VALUE x;` in a header and assigns them across 40 .cpp files; scoping those
         # per file would raise 67 UNSOURCED headers plus 67 unresolvable stores.
-        self.scope = scope
+        #
+        # ROUND 9: THE FILE IS NOT THE INNERMOST SCOPE THERE IS. Two functions in ONE
+        # translation unit may each declare `static VALUE cache;`, and those are two objects
+        # too -- neither can name the other's. Keyed `(file, "cache")` they merged, one
+        # function's `rb_global_variable(&cache)` discharged the merged row, and the other's
+        # unrooted `cache = rb_str_new(...)` vanished behind HITS 0: the cross-TU defect
+        # above, one scope level down. A Scope carries the function's body span for those,
+        # and `contains()` is what every source, registration and publication is filtered by.
+        self.scope = scope if scope is not None else TREE
 
     @property
     def field(self):
@@ -1002,13 +1033,23 @@ class Tree:
                 for decl in split_args(m.group(1)):
                     nm, arr, ptr = declarator(decl)
                     if nm and not ptr:
-                        # A function-local static is internal to its TU by construction:
-                        # nothing outside the file can even name it.
+                        # A function-local static is internal to its BLOCK, which is one
+                        # scope narrower than the file the round-8 split gave it. Two
+                        # functions in one TU may each declare `static VALUE cache;` and
+                        # they are two objects: keyed `(file, "cache")` they merged, and a
+                        # `rb_global_variable(&cache)` in the first discharged the second's
+                        # unrooted store. The span is the function body the scan is already
+                        # iterating, so the identity costs nothing to carry.
+                        #
+                        # Still gated on TU_EXT, for the header reason in that constant's
+                        # comment -- a `static inline` helper in a .h is one object per
+                        # INCLUDER, and this pass cannot resolve includes. Those stay
+                        # tree-wide keyed, the same residual as a header file static.
                         self.slots.append(Slot(path, m.start(), nm + arr, nm, "scalar",
                                                re.sub(r"\s+", " ", m.group(0)).strip()
                                                .rstrip(";=").rstrip() + ";",
-                                               scope=path if path.suffix in TU_EXT
-                                               else None))
+                                               scope=Scope(path, (a, b))
+                                               if path.suffix in TU_EXT else TREE))
 
     def _class_member_slots(self, path, qual, boff, body):
         """`static VALUE` DATA MEMBERS of one C++ class body, keyed `Class::member`.
@@ -1053,8 +1094,8 @@ class Tree:
         # scoped; `EXTERN VALUE x;` and a bare `VALUE rb_mVernier;` are one object tree-wide
         # and stay unscoped. The declarator itself is cut off first, or an initialiser
         # mentioning `static` in a nested expression would flip the linkage.
-        scope = (path if path.suffix in TU_EXT
-                 and re.search(r"\bstatic\b", split_top_off(unit, "=")[0][1]) else None)
+        scope = tu_scope.declared_scope(
+            path, re.search(r"\bstatic\b", split_top_off(unit, "=")[0][1]))
         body_open = unit.find("{")
         # (1) `static struct { ... } _stackprof;` / `static struct tag { ... } x;`
         if body_open >= 0:
@@ -1195,17 +1236,30 @@ class Tree:
     def sources(self, slot):
         """[(rhs, path, offset, owner)] -- every assignment reaching this slot.
 
-        An internal-linkage slot is searched in ITS OWN FILE ONLY, plus the macro-paste
+        An internal-linkage slot is searched in ITS OWN SCOPE ONLY, plus the macro-paste
         expansion pool, which has no file attribution to give. That is not an optimisation:
         no other translation unit can name the object, so a `cache = rb_str_new2(...)` in
         another file is a store to a DIFFERENT slot of the same name, and reading it here is
         how one file's registration came to discharge another file's store.
+
+        ROUND 9: the same sentence one scope down. A function-local static's scope is its
+        BLOCK, so the pool is that function's body span -- a store to `cache` in the
+        function next door is a store to a different object, and reading it here is how one
+        function's registration came to discharge the other's.
         """
         if slot.ident in self._src_memo:
             return self._src_memo[slot.ident]
         out = []
-        pool = ([(slot.scope, self.files[slot.scope])] if slot.scope in self.files
-                else list(self.files.items())) + [(None, self.pasted)]
+        # (path, text, lo, hi) -- the byte range of the slot's own scope, so offsets stay
+        # absolute and every position rule downstream keeps working unchanged.
+        sc = slot.scope
+        if sc.path in self.files:
+            src = self.files[sc.path]
+            lo, hi = sc.span if sc.span else (0, len(src))
+            pool = [(sc.path, src, lo, hi)]
+        else:
+            pool = [(p, t, 0, len(t)) for p, t in self.files.items()]
+        pool.append((None, self.pasted, 0, len(self.pasted)))
         if slot.kind == "scalar" or "." not in slot.key:
             # A C++ static data member is spelled `Registry::cache` from outside the class
             # and bare `cache` from inside its own methods, and both name ONE object. So
@@ -1221,8 +1275,8 @@ class Tree:
                     re.escape(p) for p in scope.split("::"))
             pat = re.compile(r"(?<![\w.>])%s%s\s*(?:\[[^\[\]]*\])?\s*=(?!=)"
                              % (qual, re.escape(name)))
-            for path, src in pool:
-                for m in pat.finditer(src):
+            for path, src, lo, hi in pool:
+                for m in pat.finditer(src, lo, hi):
                     out.append((rhs_after(src, m.end() - 1), path, m.start(), None))
         else:
             # Deliberately not scoped to the owning object: the owner token is all a text
@@ -1231,8 +1285,8 @@ class Tree:
             # and the red reports UNSOURCED instead of naming the parameter it swallows.
             pat = re.compile(r"([A-Za-z_]\w*)\s*(?:\.|->)\s*%s\b\s*(?:\[[^\[\]]*\])?\s*=(?!=)"
                              % re.escape(slot.field))
-            for path, src in pool:
-                for m in pat.finditer(src):
+            for path, src, lo, hi in pool:
+                for m in pat.finditer(src, lo, hi):
                     out.append((rhs_after(src, m.end() - 1), path, m.start(), m.group(1)))
         self._src_memo[slot.ident] = out
         return out
@@ -1319,7 +1373,7 @@ class Tree:
                     _op, _oo, oscope = self.objects[tk]
                     # An object with internal linkage cannot be addressed from another TU,
                     # so a wrap call in a different file is wrapping a different object.
-                    if oscope is not None and oscope != path:
+                    if not oscope.contains(path, s):
                         continue
                     out[(oscope, tk)] = (dtype, self.dmark_of(dtype) if dtype else None,
                                          path, line_at(src, s), wrapper_dest(src, s))
@@ -1431,7 +1485,7 @@ def expand_macro(tree, fn, args):
     return None
 
 
-def returns_all(tree, pred, fn, rules, depth, seen, scope=None):
+def returns_all(tree, pred, fn, rules, depth, seen, scope=TREE):
     """Does EVERY `return` in this in-tree function satisfy `pred`?
 
     rmagick is 44 of the corpus's slots on its own: every `Class_FooType` global is assigned
@@ -1470,7 +1524,7 @@ def returns_all(tree, pred, fn, rules, depth, seen, scope=None):
     return True
 
 
-def is_immediate(tree, expr, rules, depth=3, seen=None, scope=None):
+def is_immediate(tree, expr, rules, depth=3, seen=None, scope=TREE):
     """Provably an immediate VALUE -- one GC never collects. Unknown means False.
 
     `scope` is the translation unit the expression was read in, so a bare identifier
@@ -1522,7 +1576,7 @@ def is_immediate(tree, expr, rules, depth=3, seen=None, scope=None):
     return False
 
 
-def is_const_table(tree, expr, rules, depth=3, seen=None, scope=None):
+def is_const_table(tree, expr, rules, depth=3, seen=None, scope=TREE):
     """Provably reachable from the constant table (or a core object the VM roots)."""
     seen = seen if seen is not None else set()
     e = unwrap(expr)
@@ -1561,19 +1615,19 @@ def is_const_lookup(tree, expr):
     return bool(fn and CONST_LOOKUP.match(fn))
 
 
-def _slot_named(tree, name, scope=None):
+def _slot_named(tree, name, scope=TREE):
     """The scalar slot a bare identifier names, seen from `scope`. None if unknown.
 
     The file's own internal-linkage slot wins over a tree-wide one of the same name, which
     is the resolution C itself performs.
     """
-    return tree.scalars.get((scope, name)) or tree.scalars.get((None, name))
+    return tree.scalars.get((scope, name)) or tree.scalars.get((TREE, name))
 
 
 # ------------------------------------------------------- value-rooting position
 
 
-def _store_after(tree, sources, path, off, scope=None):
+def _store_after(tree, sources, path, off, scope=TREE):
     """Describe a store this VALUE rooting cannot cover, or None if it covers them all.
 
     `rb_gc_register_mark_object(v)` and `rb_define_const(m, "N", v)` both root the OBJECT
@@ -1613,13 +1667,15 @@ def _slot_rooted(tree, slot, rules):
     Used only to decide whether a TypedData wrapper stored into a file-scope slot is
     provably unrooted, so the generosity is the safe direction: position is ignored and any
     registration kind counts. "Unrooted" here has to mean nothing anywhere claims it.
+
+    `contains` is asked the FILE-level question (no offset) for exactly that reason: a
+    block-scoped slot registered elsewhere in its own file still counts as claimed here.
     """
     for kind, target, rpath, _rl, _ro in tree.registrations:
-        if kind in rules and target == slot.key \
-                and (slot.scope is None or rpath == slot.scope):
+        if kind in rules and target == slot.key and slot.scope.contains(rpath):
             return True
     for cand in tree.published.get(slot.key, ()):
-        if slot.scope is None or cand[1] == slot.scope:
+        if slot.scope.contains(cand[1]):
             return True
     return False
 
@@ -1696,7 +1752,7 @@ def sweep(tree, name, rules=ALL_RULES):
         for kind, target, rpath, rline, roff in tree.registrations:
             if kind not in rules:
                 continue
-            if slot.scope is not None and rpath != slot.scope:
+            if not slot.scope.contains(rpath, roff):
                 continue
             tc, sc = target.split("."), slot.key.split(".")
             hit = target == slot.key
@@ -1758,7 +1814,7 @@ def sweep(tree, name, rules=ALL_RULES):
         # precede it, and the slot needs SOME publication that does.
         pub = pub_late = None
         for cand in (tree.published.get(slot.key, ()) if "const-published" in rules else ()):
-            if slot.scope is not None and cand[1] != slot.scope:
+            if not slot.scope.contains(cand[1], cand[3]):
                 continue
             after = _store_after(tree, sources, cand[1], cand[3], slot.scope)
             if after:
@@ -2349,6 +2405,39 @@ void Init_probe(void) {
 }
 """
 
+RED_TWO_LOCAL_STATICS = """
+#include <ruby.h>
+
+/* ROUND 9: TWO FUNCTIONS, ONE TRANSLATION UNIT, ONE NAME. A function-local static is
+   internal to its BLOCK, so these are two objects and nothing outside either function can
+   name the other's. Keyed `(file, "cache")` they merged into ONE slot: `slots 1/2`, the
+   first function's rb_global_variable discharged the merged row, and the second's
+   unrooted String vanished behind HITS 0. The green half is in the same file on purpose --
+   `rooted` must STILL discharge, or the split has just deleted the registration rule. */
+static VALUE
+rooted(VALUE self)
+{
+    static VALUE cache;
+    if (!cache) {
+        cache = rb_str_new2("kept");
+        rb_global_variable(&cache);
+    }
+    return cache;
+}
+
+static VALUE
+unrooted(VALUE self)
+{
+    static VALUE cache;
+    if (!cache) {
+        cache = rb_str_new2("lost");
+    }
+    return cache;
+}
+
+void Init_probe(void) { rb_define_method(rb_cObject, "a", rooted, 0); }
+"""
+
 GREEN_HEADER_STATIC_H = """
 #ifndef probe_h
 #define probe_h
@@ -2784,6 +2873,31 @@ def self_test(pool):
           "(%d slot(s), hits %s)"
           % (qlr.slots, sorted(h[3] for h in qlr.hits) or "none"),
           [h[3] for h in qlr.hits])
+
+    # 5u. ROUND-9 THREAD: TWO FUNCTION-LOCAL STATICS OF ONE NAME IN ONE FILE (:1011).
+    #     The round-8 split scoped an internal-linkage slot to its FILE, which is one level
+    #     too coarse for a function-local static: the file is not the innermost scope there
+    #     is. Measured on the fixture below, unfixed: `slots 1/2`, one `registered-slot`
+    #     discharge, HITS 0 -- a live over-clear, one function's rb_global_variable
+    #     answering for another function's object.
+    #
+    #     The DECLARATION count is asserted beside the slot count, because the two failure
+    #     modes print the same HITS: a parser that stops seeing function-local statics
+    #     reports `slots 0/0` and reads exactly as clean as the merge did.
+    tls = _sweep_source(RED_TWO_LOCAL_STATICS, suffix=".c")
+    tld = {d[3]: d for d in tls.discharges}
+    check(tls.slots == 2 and tls.decls == 2 and {h[3] for h in tls.hits} == {"cache"}
+          and len(tls.hits) == 1,
+          "two-local-statics RED: one name in two function bodies is TWO slots (%d found "
+          "from %d declarations) and the unregistered one reports (%d hit(s))"
+          % (tls.slots, tls.decls, len(tls.hits)),
+          [h[3] for h in tls.hits] + ["discharged:" + d[3] for d in tls.discharges])
+    check(len(tls.discharges) == 1 and tld.get("cache", ("",))[0] == "registered-slot"
+          and tls.hits and tls.hits[0][2] > tls.discharges[0][2],
+          "...and GREEN in the same file: `rooted`'s own rb_global_variable still "
+          "discharges ITS slot, and the row that stands is the LATER declaration -- a "
+          "block-scoping fix that clears nothing is the registration rule turned off",
+          [(d[0], d[2]) for d in tls.discharges] + [(h[0], h[2]) for h in tls.hits])
 
     # 5t. HEADER carve-out. The scope split applies to translation units; a `static VALUE`
     #     in a HEADER keeps its tree-wide key, or its stores -- which live in the .c that

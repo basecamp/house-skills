@@ -151,6 +151,15 @@ one -- that is predicate D's charter and widening B into it is how a gem gets cl
 both. 10c in particular is the escape-analysis half of `RSTRING_GETMEM`: D covers the same
 macro's argument taking part in WINDOW analysis, separately.
 
+NAME RESOLUTION IS SHARED, AND LIVES IN tu_scope.py
+---------------------------------------------------
+Every lookup that turns a NAME at a use site into a DEFINITION goes through
+`tu_scope.bind`, which states C's linkage rule once for all four predicates: a use binds
+to a definition in its own file first, a `static` definition in another .c/.cc/.cpp/.cxx
+is not a candidate at all, and everything else -- non-static definitions, and anything
+declared in a HEADER -- stays tree-wide. That module is a sibling file and these scripts
+will not run without it; references/ is the unit that ships.
+
 ACCEPTANCE (--self-test): see self_test(). Run it before trusting any result from this
 script -- silence is a property of the query until the counts say otherwise.
 """
@@ -161,6 +170,14 @@ import re
 import shutil
 import sys
 import tempfile
+
+# The linkage rule, shared with the other three predicates. It lives in its own module
+# because every one of the four had been patched for the same defect -- an
+# internal-linkage name resolved tree-wide -- once per lookup table. Sibling file, so
+# `python3 .../sweep_escaped_conversion.py` finds it wherever it is run from; the
+# references/ directory is the unit that ships, and a script copied out of it alone will
+# not import.
+import tu_scope
 
 C_EXT = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp")
 
@@ -447,7 +464,8 @@ def file_scope_objects(src):
 
 
 class Func:
-    __slots__ = ("name", "path", "src", "params", "hdr", "bstart", "bend", "is_static")
+    __slots__ = ("name", "path", "src", "params", "hdr", "bstart", "bend", "is_static",
+                 "scope")
 
     def __init__(self, name, path, src, params, hdr, bstart, bend, is_static=False):
         self.name = name
@@ -458,6 +476,10 @@ class Func:
         self.bstart = bstart      # offset just past `{`
         self.bend = bend          # offset of the matching `}`
         self.is_static = is_static  # internal linkage: this name is this file's alone
+        # Where a CALL can bind to this definition. tu_scope states the rule once for all
+        # four predicates: a `static` in a .c/.cc/.cpp/.cxx is this file's alone, and
+        # anything else -- including a `static` in a HEADER -- stays tree-wide.
+        self.scope = tu_scope.declared_scope(path, is_static)
 
     @property
     def body(self):
@@ -738,13 +760,31 @@ def escapes_by_return(fn, param, statics=()):
 
 
 def call_sites(tree, fn):
-    """[(caller, arg_list, offset_of_call, offset_past_call)] for in-tree calls of `fn`."""
+    """[(caller, arg_list, offset_of_call, offset_past_call)] for in-tree calls of `fn`.
+
+    ROUND 9: A CALL BINDS TO THE DEFINITION ITS OWN TRANSLATION UNIT CAN SEE.
+
+    The scan is textual and tree-wide, so `helper(x)` in b.c matched `fn` regardless of
+    which file `fn` was defined in. Two translation units may each define a `static
+    helper`: a.c's converts in place and returns an interior, b.c's is unrelated and its
+    caller then reads `RSTRING_LEN(x)`. Attributing b.c's call to a.c's body reports
+    CALLER-DEREFS against b.c on a helper that never ran there -- and a call site is also
+    what makes an escape REACHABLE, so the same misattribution decorates a real finding
+    with call sites that cannot reach it.
+
+    tu_scope.bind is the same rule the other three predicates resolve names by; here it
+    runs in the caller-to-callee direction rather than callee-to-caller, which is the only
+    thing that made this look like a different bug.
+    """
     out = []
     for path, src in tree.files.items():
+        peers = tree.by_name.get(fn.name, ())
         for m in re.finditer(r"\b%s\s*(?=\()" % re.escape(fn.name), src):
             caller = tree.enclosing(path, m.start())
             if caller is None or caller is fn:
                 continue            # a prototype, the definition header, or self-recursion
+            if fn not in tu_scope.bind(peers, path, m.start()):
+                continue            # this file's call binds to a different definition
             args, past = call_args(src, m.end())
             if args is None:
                 continue
@@ -1410,6 +1450,56 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 2); }
           "...and GREEN with the assignment removed: the conversion REACHES the call",
           "hits=%s discharges=%s" % ([(h[0], h[2]) for h in rg.hits],
                                      [d[3] for d in rg.discharges]))
+
+    # ---------------------------------------------------------------- round-9 thread
+    #
+    # 11. CALL RESOLUTION PER TRANSLATION UNIT (:744). `call_sites` located callers by a
+    #     tree-wide TEXT SEARCH for the name, so a call in b.c to b.c's OWN `static
+    #     helper` was attributed to a.c's same-named converting one and CALLER-DEREFS was
+    #     reported against b.c -- a caller that never runs the converting body.
+    #
+    #     The RED and the GREEN are in ONE fixture on purpose: a.c's caller is a genuine
+    #     finding and b.c's is not, so a "fix" that scopes too hard loses the row in a.c
+    #     and fails the same check. Funnel asserted, because the shape where the parser
+    #     indexes nothing prints the same single hit as a correct run of the wrong half.
+    tu_conv = """#include <ruby.h>
+static VALUE helper(VALUE x) { StringValue(x); return Qnil; }
+static VALUE a_go(VALUE self, VALUE arg)
+{
+    helper(arg);
+    return LONG2NUM(RSTRING_LEN(arg));
+}
+void Init_a(void) { rb_define_method(rb_cObject, "a_go", a_go, 1); }
+"""
+    tu_plain = """#include <ruby.h>
+static VALUE helper(VALUE x) { return rb_obj_class(x); }
+static VALUE b_go(VALUE self, VALUE arg)
+{
+    helper(arg);
+    return LONG2NUM(RSTRING_LEN(arg));
+}
+void Init_b(void) { rb_define_method(rb_cObject, "b_go", b_go, 1); }
+"""
+    r, fok = synth("t_tu_callsite", {"ext/a.c": tu_conv, "ext/b.c": tu_plain},
+                   funcs=6, conv=1, noncf=1)
+    tu_hits = sorted((h[0], h[1]) for h in r.hits)
+    check(fok and tu_hits == [("CALLER-DEREFS", "ext/a.c")],
+          "11 RED: a call in b.c binds to b.c's own `static helper`, so only a.c's caller "
+          "-- which really does run the converting body -- is a CALLER-DEREFS (%d fn, "
+          "%d conv)" % (r.funcs, len(r.conversions)), tu_hits)
+    # ...and the GREEN half of the same rule: make the converting helper TREE-WIDE and
+    # b.c's call is genuinely a call to it, so the second row comes back. Without this a
+    # `return []` in call_sites would pass the check above.
+    rg, gok = synth("t_tu_callsite_extern",
+                    {"ext/a.c": tu_conv.replace("static VALUE helper", "VALUE helper"),
+                     "ext/b.c": tu_plain.replace(
+                         "static VALUE helper(VALUE x) { return rb_obj_class(x); }\n", "")},
+                    funcs=5, conv=1, noncf=1)
+    check(gok and sorted((h[0], h[1]) for h in rg.hits)
+          == [("CALLER-DEREFS", "ext/a.c"), ("CALLER-DEREFS", "ext/b.c")],
+          "...and GREEN tree-wide: with no namesake in b.c and external linkage on the "
+          "helper, BOTH callers reach it and both report",
+          sorted((h[0], h[1]) for h in rg.hits))
 
     print("\n".join(log))
     print("\nself-test: %s" % ("PASS" if ok else "FAIL"))

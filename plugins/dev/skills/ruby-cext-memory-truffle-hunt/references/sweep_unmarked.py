@@ -168,6 +168,15 @@ vanished. Both branches are now registered.
     was blind exactly where its predicate is loudest, and said `struct type unresolved`.
     `sizeof_arg` now reads the struct off the call site, and the fallback stays.
 
+NAME RESOLUTION IS SHARED, AND LIVES IN tu_scope.py
+---------------------------------------------------
+Every lookup that turns a NAME at a use site into a DEFINITION goes through
+`tu_scope.bind`, which states C's linkage rule once for all four predicates: a use binds
+to a definition in its own file first, a `static` definition in another .c/.cc/.cpp/.cxx
+is not a candidate at all, and everything else -- non-static definitions, and anything
+declared in a HEADER -- stays tree-wide. That module is a sibling file and these scripts
+will not run without it; references/ is the unit that ships.
+
 ACCEPTANCE (--self-test): flags fieldTypes on mysql2 m2-red and not on m2-green; clears
 all six VALUE fields of sqlite3 pr-723's struct and flags whichever one a mutated tree
 stops marking; clears vernier's overloaded-`mark()` shape without clearing the unmarked
@@ -186,9 +195,9 @@ checkouts and are deliberately not committed here; rebuild the directory like so
     git clone https://github.com/sparklemotion/sqlite3-ruby sqlite3-pr723
     cd sqlite3-pr723 && git fetch origin pull/723/head && git checkout FETCH_HEAD
 
-Then: python3 sweep_unmarked.py --self-test acceptance   (expects 48/48 PASS)
+Then: python3 sweep_unmarked.py --self-test acceptance   (expects 53/53 PASS)
 
-Two of the forty-eight run against the REAL gem rather than a generated reduction, and look for
+Two of the fifty-three run against the REAL gem rather than a generated reduction, and look for
 fixtures beside the acceptance dir: `../corpus/stackprof-0.2.28` for the target grades, and
 `../fixtest/sp-pristine` + `../fixtest/sp-fixed` for the red/green pair (sp-fixed is the
 tree with `VALUE interval` changed to `long`, which is the upstream fix's shape). When they
@@ -209,6 +218,11 @@ import re
 import subprocess
 import sys
 import tempfile
+
+# The linkage rule, shared with the other three predicates. Sibling module, so
+# `python3 .../sweep_unmarked.py` finds it wherever it is run from; references/ is the unit
+# that ships, and a script copied out of it on its own will not import.
+import tu_scope
 
 # C only, and `.rs` is deliberately absent -- see SKILL.md, "Rust extensions need a
 # different sweep, not these three". A magnus extension has no rb_data_type_t initialiser
@@ -312,6 +326,49 @@ def match_brace(src, open_idx):
             if depth == 0:
                 return i
     return -1
+
+
+def callback_name(text):
+    """The function a dtype callback slot names, with casts and parentheses removed.
+
+    ROUND 9: `.dmark = (RUBY_DATA_FUNC)mark_wrap` -- a cast on a callback field. The
+    designator pattern demanded `[\w:]+` immediately after the `=`, so the cast made the
+    field read as ABSENT; the positional fallback then ran, found no `{`-prefixed group in
+    a designated initialiser and recovered nothing, and the descriptor reported `dmark=-`.
+    Every VALUE field of the wrapped struct then reported UNMARKED against a callback that
+    marks them -- the whole struct mis-graded on a cast, and in the OVER-REPORTING
+    direction only by luck: the mirror shape is a `.dcompact` cast, where a missing
+    dcompact turns a correct movable mark into NO-COMPACT.
+
+    The cast spelling is not exotic. `RUBY_DATA_FUNC` is what the legacy Data_Wrap_Struct
+    API takes, and code migrated to TypedData keeps the casts it already had.
+
+    A leading parenthesised group is stripped whether it is a cast (`(T)f`) or the value
+    itself (`(f)`, which is what ffi's `.dcompact = (x)` macro expands to). Returns None
+    for anything that is not a plain identifier once stripped -- an expression in a
+    callback slot is not a name this pass can resolve, and inventing one would be worse
+    than the `-` it prints.
+    """
+    t = (text or "").strip()
+    for _ in range(4):
+        if not t.startswith("("):
+            break
+        depth, close = 0, -1
+        for i, ch in enumerate(t):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    close = i
+                    break
+        if close < 0:
+            return None
+        rest = t[close + 1:].strip()
+        t = rest if rest else t[1:close].strip()
+    t = t.lstrip("&").strip()
+    return t if re.fullmatch(r"[\w:]+", t) else None
+
 
 
 def split_args(text):
@@ -481,6 +538,33 @@ def arg_tokens(args):
     return set(re.findall(r"[A-Za-z_]\w*", " ".join(args)))
 
 
+MEMBER_CHAIN = re.compile(r"[A-Za-z_]\w*(?:\s*(?:->|\.)\s*[A-Za-z_]\w*)+")
+
+
+def arg_paths(args):
+    """MEMBER-ACCESS PATHS in an argument list, base pointer dropped: `w->left.held` ->
+    {"left.held"}.
+
+    ROUND 9: the companion to arg_tokens, and the reason it exists is that arg_tokens
+    THROWS THE PATH AWAY. `rb_gc_mark(w->left.held)` credited the bare token `held`, and
+    the field lookup falls back to the leaf, so one member's mark cleared its sibling:
+    `outer { left_t left; right_t right; }` with both inner types holding a `VALUE held`
+    reported ZERO suspects when only `w->left.held` was marked. The deep enumeration that
+    made `right.held` visible and this loss of the path shipped in the same round, so the
+    recall improvement was cancelled by an over-clear on exactly the fields it added.
+
+    A one-component result is not returned: `w->held` says nothing the bare token does not
+    already say, and recording it as a path would make every unqualified mark look like
+    evidence about a specific nesting.
+    """
+    out = set()
+    for m in MEMBER_CHAIN.finditer(" ".join(args)):
+        parts = [p.strip() for p in re.split(r"->|\.", m.group(0))]
+        if len(parts) > 2:
+            out.add(".".join(parts[1:]))
+    return out
+
+
 # ---------------------------------------------------------------- tree model
 
 
@@ -528,6 +612,7 @@ class Tree:
         # `mysql2_result_wrapper` lives in result.h). See `shadowed`.
         self.structs_at = {}     # (path, name) -> body text
         self.funcs_at = {}       # (path, bare name) -> body text
+        self.func_sites = {}     # bare name -> [(tu_scope.Scope, path)], in index order
         self.sigs_at = {}        # (path, bare name) -> parameter-list text
         self.func_spans_at = {}  # (path, bare name) -> (body_start, body_end)
         self.dtypes_at = {}      # (path, name) -> {"dmark": fn, ...}
@@ -789,12 +874,35 @@ class Tree:
     def body_of(self, name, at=None):
         """The body of an in-tree callee, function or function-like macro.
 
-        `at` is the file the call was resolved FROM; a definition there wins over the
-        tree-wide first-wins one, because a `static` callee is file-local. See the
-        file-scoped resolution note above.
+        `at` is the file the call was resolved FROM, and resolution is `tu_scope.bind` --
+        the one linkage rule all four predicates share. A definition in `at` wins; a
+        `static` definition in ANOTHER translation unit is not a candidate at all; a
+        non-static one, or one in a header, stays tree-wide. Round 7 shipped the first
+        half of that ("prefer this file"); the exclusion is the second half, and it is
+        what stops a file-local callback in a.c answering for a call in b.c that cannot
+        see it -- the same defect predicates B, C and D were each patched for separately.
+
+        `funcs` remains the fall-back: it also carries the `Cls::method` keys the C++
+        receiver resolution builds, and macros are not functions with linkage at all.
         """
-        if at is not None and (at, name) in self.funcs_at:
-            return self.funcs_at[(at, name)]
+        sites = self.func_sites.get(name)
+        if sites:
+            picks = tu_scope.bind(sites, at, key=lambda d: d)
+            for _scope, path in picks:
+                body = self.funcs_at.get((path, name))
+                if body is not None:
+                    if path != at:
+                        self._cross_pick("callback", name, at)
+                    return body
+            if picks:
+                # Every candidate is visible but none has a body indexed here. Fall
+                # through rather than invent one.
+                pass
+            elif at is not None:
+                # Declared in this tree and NOT visible from `at`. That is a real answer,
+                # and the caller reads None as unresolved -- resolving it anyway is the
+                # defect this rule exists to remove.
+                return self.macros.get(name)
         body = self.funcs.get(name, self.macros.get(name))
         if body is not None:
             self._cross_pick("callback", name, at)
@@ -1089,6 +1197,15 @@ class Tree:
                         self.sigs_at[(path, name)] = src[m.end():j]
                         self.func_spans_at[(path, name)] = (k + 1, close)
                         self._shadow("callback", name)
+                        # The LINKAGE of this definition, for tu_scope.bind. The
+                        # declaration specifiers run back to the previous statement
+                        # boundary, which is the only place `static` can be.
+                        head = src[max(0, m.start(1) - 300):m.start(1)]
+                        head = head[max(head.rfind(";"), head.rfind("}"),
+                                        head.rfind("{")) + 1:]
+                        self.func_sites.setdefault(name, []).append(
+                            (tu_scope.declared_scope(
+                                path, re.search(r"\bstatic\b", head)), path))
                     # Offsets, not just text: predicate A reports the file:line of the
                     # coercion it found, and a body extracted into a string has none.
                     self.func_spans.setdefault(name, (path, k + 1, close))
@@ -1119,8 +1236,13 @@ class Tree:
                 continue
             body = self._expand_designator_macros(src[open_idx + 1:close])
             entry = {}
-            for f in re.finditer(r"\.(dmark|dfree|dsize|dcompact)\s*=\s*([\w:]+)", body):
-                entry[f.group(1)] = f.group(2)
+            for f in re.finditer(r"\.(dmark|dfree|dsize|dcompact)\s*=\s*([^,}]+)", body):
+                # `[^,}]+` then callback_name(), not `[\w:]+` in the pattern: a CAST is the
+                # commonest thing between the `=` and the name and it made the whole
+                # designator invisible. See callback_name.
+                v = callback_name(f.group(2))
+                if v:
+                    entry[f.group(1)] = v
             if not entry:
                 # Two positional forms, and json 2.20.0 uses the *hybrid* one:
                 #   { "name", { dmark, dfree, dsize, dcompact }, ... }   -- fully positional
@@ -1141,8 +1263,8 @@ class Tree:
                 if grp and grp.startswith("{"):
                     fns = split_args(grp.strip()[1:-1])
                     for key, val in zip(("dmark", "dfree", "dsize", "dcompact"), fns):
-                        v = val.strip()
-                        if re.fullmatch(r"[\w:]+", v):
+                        v = callback_name(val)
+                        if v:
                             entry[key] = v
             self.dtypes.setdefault(m.group(1), entry)
             if (path, m.group(1)) not in self.dtypes_at:
@@ -1369,7 +1491,11 @@ class Tree:
         for name, args, recv, op in find_calls(body):
             kind = loc_kind(name) if key == "dcompact" else prim_kind(name)
             if kind:
-                for tok in arg_tokens(args):
+                # BOTH keys. The bare tokens are the index as it has always been -- an
+                # unqualified field resolves through them and nothing about that changes.
+                # The dotted paths are what tells `left.held` from `right.held`, which the
+                # leaf-name fallback in sweep() cannot do on its own. See arg_paths.
+                for tok in arg_tokens(args) | arg_paths(args):
                     direct[tok] = stronger(direct.get(tok), kind)
                 continue
             if depth <= 0:
@@ -1387,7 +1513,7 @@ class Tree:
                 # a helper that marks a global.
                 for i in marked:
                     if i < len(args):
-                        for tok in arg_tokens([args[i]]):
+                        for tok in arg_tokens([args[i]]) | arg_paths([args[i]]):
                             helper[tok] = stronger(helper.get(tok), hk)
             self._collect_marks(callee, key, direct, helper, mentioned, at, depth - 1)
 
@@ -1562,7 +1688,10 @@ def struct_types_for(tree, dkey, primary):
     return out
 
 
-def value_fields_deep(tree, struct_name, at=None, _seen=None):
+VALUE_FIELDS_DEPTH = 6
+
+
+def value_fields_deep(tree, struct_name, at=None, _stack=()):
     """value_fields(), plus the VALUE fields of NAMED aggregate members, recursively.
 
     Round 6's residual, found by breadth rather than by the self-test: date wraps
@@ -1575,16 +1704,35 @@ def value_fields_deep(tree, struct_name, at=None, _seen=None):
 
     Only NAMED members recurse. Anonymous struct/union members are already reached by
     value_fields()'s brace split, and going through them again would double-count.
+
+    ROUND 9: THE GUARD IS THE RECURSION STACK, NOT A VISITED SET.
+
+    A shared `_seen` set was added once and never removed, so the FIRST member of a given
+    type consumed it and every later member of that same type enumerated NOTHING:
+
+        struct outer { struct inner left; struct inner right; };
+
+    yielded `left.held` alone. A dmark marking `left.held` and forgetting `right.held`
+    then reported ZERO suspects -- the field was not merely mis-graded, it never entered
+    the funnel, which is the failure this file's coverage counters exist to make visible
+    and the one shape they cannot: the count really is smaller and nothing says why. Two
+    same-typed members is the ordinary way to write a pair.
+
+    A stack guard still terminates. `_stack` holds only the types on the path from the
+    root, so a cycle -- `struct a { struct b b; }; struct b { struct a a; };`, which no
+    conforming C program can instantiate but a parser can certainly read -- stops at the
+    repeat instead of recursing forever; the explicit cycle fixture in self_test() is what
+    keeps that true. VALUE_FIELDS_DEPTH bounds the work a legal but deep DAG can cost,
+    since a stack guard alone re-walks a shared sub-aggregate once per path to it.
     """
-    _seen = _seen or set()
     body = tree.struct_body(struct_name, at)
-    if struct_name in _seen or body is None:
+    if body is None or struct_name in _stack or len(_stack) >= VALUE_FIELDS_DEPTH:
         return []
-    _seen.add(struct_name)
+    _stack = _stack + (struct_name,)
     out = list(value_fields(body))
     for m in NAMED_AGGREGATE_MEMBER.finditer(body):
         inner, member = m.group(1), m.group(2)
-        for nm, ptr in value_fields_deep(tree, inner, at, _seen):
+        for nm, ptr in value_fields_deep(tree, inner, at, _stack):
             out.append(("%s.%s" % (member, nm), ptr))
     return out
 
@@ -1641,17 +1789,37 @@ def sweep(tree, verbose=False):
                 typed_seen.add((st, field))
 
             # A qualified field (`c.sf`, from a NAMED aggregate member) is written
-            # `dat->c.sf` at the mark site, and mark_index keys on the member token. Try
-            # the qualified name first and fall back to the leaf, or every field reached
-            # through the new deep enumeration reports UNMARKED on code that marks it --
-            # a recall improvement that ships a false positive is worse than the gap.
+            # `dat->c.sf` at the mark site. mark_index now keys BOTH the bare tokens and
+            # the member-access path (arg_paths), so the qualified name is tried first and
+            # matches exactly.
+            #
+            # ROUND 9: THE LEAF FALLBACK IS CONDITIONAL, AND THE CONDITION IS THE WHOLE FIX.
+            # Falling back to the leaf unconditionally let one member's mark clear its
+            # sibling: `outer { left_t left; right_t right; }`, both inner types holding a
+            # `VALUE held`, a dmark marking only `w->left.held` -- and `right.held`
+            # discharged on the token `held`, so the tree reported ZERO suspects on a field
+            # ordinary GC can free. The fallback now stands down whenever the index holds a
+            # DIFFERENT qualified path ending in the same leaf: that is positive evidence
+            # that the mark was about some other member, and it is exactly the case the
+            # leaf name cannot distinguish.
+            #
+            # It is kept otherwise, and that is not a hedge. A helper marking `p->held` on
+            # a pointer to the inner struct records the leaf and no path at all -- msgpack's
+            # shape -- and without the fallback every field reached through the deep
+            # enumeration would report UNMARKED on code that marks it. The residual, stated:
+            # a dmark that marks one member by path AND another through such a helper loses
+            # the fallback for the second and over-REPORTS it. That is the direction this
+            # predicate is allowed to be wrong in.
             leaf = field.rsplit(".", 1)[-1]
-            keys = (field, leaf) if leaf != field else (field,)
             def _pick(d):
-                for k in keys:
-                    if d.get(k):
-                        return d[k]
-                return None
+                if d.get(field):
+                    return d[field]
+                if leaf == field:
+                    return None
+                if any(k != field and "." in k and k.rsplit(".", 1)[-1] == leaf
+                       for k in d):
+                    return None
+                return d.get(leaf)
             kind = stronger(_pick(m_direct), _pick(m_helper))
             via_helper = not _pick(m_direct) and bool(_pick(m_helper))
             in_compact = bool(_pick(c_direct) or _pick(c_helper))
@@ -1660,7 +1828,8 @@ def sweep(tree, verbose=False):
                 # Round 5 (b): presence in the body is not a mark. Separating these two
                 # keeps the recall honest -- MENTIONED says "we saw the name and it was
                 # not in a marking call", which is a question for pass 2, not a verdict.
-                cat = "MENTIONED" if any(k in m_named for k in keys) else "UNMARKED"
+                cat = ("MENTIONED" if field in m_named or leaf in m_named
+                       else "UNMARKED")
             elif is_ptr:
                 cat = "VALUE*"
             elif kind == "movable" and not in_compact:
@@ -2655,6 +2824,85 @@ def _first_dir(*candidates):
     return candidates[0]
 
 
+
+# ---------------------------------------------------------------- round 9
+
+RED_CAST_DMARK = """
+#include <ruby.h>
+/* A CAST ON A CALLBACK FIELD. `.dmark = (RUBY_DATA_FUNC)w_mark` is what code migrated from
+   the legacy Data_Wrap_Struct API looks like, and the designator pattern demanded an
+   identifier immediately after the `=`. The descriptor therefore reported dmark=- and the
+   positional fallback recovered nothing (there is no `{`-prefixed group in a designated
+   initialiser), so the field reported UNMARKED against a dmark that marks it with the
+   PINNING rb_gc_mark. */
+typedef struct { VALUE held; } cast_t;
+static void w_mark(void *p) { cast_t *w = (cast_t *)p; rb_gc_mark(w->held); }
+static void w_free(void *p) { xfree(p); }
+static const rb_data_type_t cast_type = {
+    .wrap_struct_name = "cast",
+    .function = { .dmark = (RUBY_DATA_FUNC)w_mark, .dfree = (RUBY_DATA_FUNC)w_free },
+};
+static VALUE c_alloc(VALUE k) { cast_t *c; return TypedData_Make_Struct(k, cast_t, &cast_type, c); }
+"""
+
+# Two members of ONE inner type. `_seen` was a shared visited set, so the first member
+# consumed the type and the second enumerated nothing at all. Both are marked here BY
+# PATH, so the check is about the FUNNEL -- 2 fields enumerated, 0 suspects -- and it is
+# red before the guard became a recursion stack whatever the leaf-fallback rule does.
+RED_REPEATED_MEMBER = """
+#include <ruby.h>
+struct inner { VALUE held; };
+struct outer { struct inner left; struct inner right; };
+static void o_mark(void *p)
+{
+    struct outer *w = (struct outer *)p;
+    rb_gc_mark(w->left.held);
+    rb_gc_mark(w->right.held);
+}
+static void o_free(void *p) { xfree(p); }
+static const rb_data_type_t outer_type = { "outer", { o_mark, o_free, }, };
+static VALUE o_alloc(VALUE k) { struct outer *o; return TypedData_Make_Struct(k, struct outer, &outer_type, o); }
+"""
+
+# The same two members, and only ONE of them marked. Leaf-name matching cleared both.
+RED_SIBLING_LEAF = RED_REPEATED_MEMBER.replace(
+    "    rb_gc_mark(w->right.held);\n", "")
+
+# A genuinely cyclic pair. No conforming C program can instantiate this -- a struct cannot
+# contain itself by value -- but a parser reads it happily, and a recursion-stack guard has
+# to terminate on it. The check is that the sweep RETURNS.
+RED_CYCLIC_MEMBER = """
+#include <ruby.h>
+struct b_t;
+struct a_t { VALUE held; struct b_t b; };
+struct b_t { VALUE also; struct a_t a; };
+static void a_mark(void *p) { struct a_t *w = (struct a_t *)p; rb_gc_mark(w->held); }
+static void a_free(void *p) { xfree(p); }
+static const rb_data_type_t a_type = { "a", { a_mark, a_free, }, };
+static VALUE a_alloc(VALUE k) { struct a_t *a; return TypedData_Make_Struct(k, struct a_t, &a_type, a); }
+"""
+
+# GREEN for the leaf fallback. A helper that marks the inner struct through a POINTER to it
+# records the leaf and no path at all -- msgpack's shape -- and both members must still
+# clear through it. Without this, "stop falling back to the leaf" passes the sibling red
+# and turns every helper-marked nested field in the corpus into a row.
+GREEN_NESTED_HELPER = """
+#include <ruby.h>
+struct inner { VALUE held; };
+struct outer { struct inner left; struct inner right; };
+static void inner_mark(struct inner *i) { rb_gc_mark(i->held); }
+static void o_mark(void *p)
+{
+    struct outer *w = (struct outer *)p;
+    inner_mark(&w->left);
+    inner_mark(&w->right);
+}
+static void o_free(void *p) { xfree(p); }
+static const rb_data_type_t outer_type = { "outer", { o_mark, o_free, }, };
+static VALUE o_alloc(VALUE k) { struct outer *o; return TypedData_Make_Struct(k, struct outer, &outer_type, o); }
+"""
+
+
 def self_test(base, siblings=()):
     """Fail loudly rather than let a broken query clear the corpus by accident.
 
@@ -2883,6 +3131,63 @@ def self_test(base, siblings=()):
         _c, fields = flagged_from_sources(files)
         check(len(fields) == 1, "green %s the marking file's own field still clears" % label,
               sorted(fields))
+
+    # -- round 9: a cast, a repeated member type, and a leaf-name match ------------
+    #
+    # THREE DEFECTS THAT COMPOUND, SO EACH GETS A CHECK THAT FAILS ON ITS OWN. The `_seen`
+    # visited set stops `right.held` being ENUMERATED; the leaf-name fallback stops it being
+    # counted as unmarked even when it is. One fixture asserting only the suspect list would
+    # have gone green on either fix alone, which is why the repeated-member check asserts
+    # the FUNNEL (2 fields) on a fixture where both members are marked, and the sibling
+    # check asserts the SUSPECT on a fixture where only one is. Measured with each fix
+    # reverted alone: cast -> `UNMARKED held`, `_seen` -> `1 field` on both, leaf ->
+    # `0 suspects, both cleared`.
+    cast_clear = cleared_from_source(RED_CAST_DMARK)
+    cast_cats, cast_fields = flagged_from_source(RED_CAST_DMARK)
+    _cs, cast_n = funnel_from_sources({"t.c": RED_CAST_DMARK})
+    check(cast_n == 1 and not cast_fields
+          and "marked pin" in cast_clear.get("held", ""),
+          "red (cast-dmark) `.dmark = (RUBY_DATA_FUNC)w_mark` is a dmark: the descriptor "
+          "resolves it and the field it marks CLEARS (%d field(s) enumerated, cleared %s)"
+          % (cast_n, cast_clear.get("held", "NOTHING")),
+          "%s %s" % (sorted(cast_cats), sorted(cast_fields)))
+
+    _rs, rep_n = funnel_from_sources({"t.c": RED_REPEATED_MEMBER})
+    rep_clear = cleared_from_source(RED_REPEATED_MEMBER)
+    _rc, rep_fields = flagged_from_source(RED_REPEATED_MEMBER)
+    check(rep_n == 2 and not rep_fields and set(rep_clear) == {"left.held", "right.held"},
+          "red (repeated-member) two members of ONE inner type enumerate TWO fields -- the "
+          "recursion guard is the stack, not a visited set (%d field(s): %s)"
+          % (rep_n, sorted(rep_clear) or "none"), sorted(rep_fields))
+
+    sib_cats, sib_fields = flagged_from_source(RED_SIBLING_LEAF)
+    _ss, sib_n = funnel_from_sources({"t.c": RED_SIBLING_LEAF})
+    check(sib_n == 2 and sib_fields == {"right.held"},
+          "red (sibling-leaf) marking `w->left.held` does not clear `w->right.held` -- the "
+          "mark index keeps the member path (%d field(s) enumerated, suspects %s)"
+          % (sib_n, sorted(sib_fields) or "NONE"),
+          "%s %s" % (sorted(sib_cats), sorted(sib_fields)))
+
+    # ...and the GREEN that stops "keep the path" turning into "never match the leaf". A
+    # helper marking `i->held` through a POINTER to the inner struct records no path at
+    # all, which is how msgpack marks, and both members must still clear through it.
+    hlp_clear = cleared_from_source(GREEN_NESTED_HELPER)
+    _hs, hlp_n = funnel_from_sources({"t.c": GREEN_NESTED_HELPER})
+    check(hlp_n == 2 and set(hlp_clear) == {"left.held", "right.held"},
+          "green (nested-helper) a mark reached through a pointer to the inner struct has "
+          "no member path, so the leaf still clears BOTH members (%d field(s): %s)"
+          % (hlp_n, sorted(hlp_clear) or "none"), sorted(hlp_clear))
+
+    # TERMINATION. A stack guard is only correct if it stops, and the pair below is
+    # genuinely cyclic -- illegal C that a parser reads without complaint. The check is
+    # that the sweep RETURNS at all; the field list is asserted beside it so that a guard
+    # which terminates by enumerating nothing fails too.
+    cyc_cats, cyc_fields = flagged_from_source(RED_CYCLIC_MEMBER)
+    _ys, cyc_n = funnel_from_sources({"t.c": RED_CYCLIC_MEMBER})
+    check(cyc_n == 2 and "b.also" in cyc_fields,
+          "cycle: `struct a { struct b b; }; struct b { struct a a; }` terminates and "
+          "still enumerates one level of each (%d field(s), suspects %s)"
+          % (cyc_n, sorted(cyc_fields)), "%s %s" % (sorted(cyc_cats), sorted(cyc_fields)))
 
     # C++ default member initialisers: the member reports, the method-body locals do not.
     cats, fields = flagged_from_source(RED_CXX_INIT, ".cc")

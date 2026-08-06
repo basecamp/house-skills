@@ -156,6 +156,15 @@ for this: it has zero `RSTRING_PTR`/`StringValue`/`char *`-from-String in the wh
 so its zero is `0 derivations`, not `0 hits after 40 discharges`, and the counters are
 the only thing that tells those two apart.
 
+NAME RESOLUTION IS SHARED, AND LIVES IN tu_scope.py
+---------------------------------------------------
+Every lookup that turns a NAME at a use site into a DEFINITION goes through
+`tu_scope.bind`, which states C's linkage rule once for all four predicates: a use binds
+to a definition in its own file first, a `static` definition in another .c/.cc/.cpp/.cxx
+is not a candidate at all, and everything else -- non-static definitions, and anything
+declared in a HEADER -- stays tree-wide. That module is a sibling file and these scripts
+will not run without it; references/ is the unit that ships.
+
 ACCEPTANCE (--self-test): see self_test(). Twelve positive controls, four clean negative
 controls, twelve pinned-residue trees, a per-rule mutation table, and generated reds rather
 than a green-only suite. Seven of the reds are SYNTHETIC TREES WRITTEN BY THE TEST, because
@@ -178,6 +187,11 @@ import re
 import shutil
 import sys
 import tempfile
+
+# The linkage rule, shared with the other three predicates. Sibling module, so
+# `python3 .../sweep_interior_escape.py` finds it wherever it is run from; references/ is
+# the unit that ships, and a script copied out of it on its own will not import.
+import tu_scope
 
 C_EXT = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp")
 
@@ -657,9 +671,10 @@ def file_scope_objects(src):
 
 
 class Func:
-    __slots__ = ("name", "path", "src", "params", "hdr", "bstart", "bend")
+    __slots__ = ("name", "path", "src", "params", "hdr", "bstart", "bend", "is_static",
+                 "scope")
 
-    def __init__(self, name, path, src, params, hdr, bstart, bend):
+    def __init__(self, name, path, src, params, hdr, bstart, bend, is_static=False):
         self.name = name
         self.path = path
         self.src = src            # the whole stripped file text
@@ -667,6 +682,11 @@ class Func:
         self.hdr = hdr            # offset of the function name
         self.bstart = bstart      # offset just past `{`
         self.bend = bend          # offset of the matching `}`
+        self.is_static = is_static   # internal linkage: this name is this file's alone
+        # Where a CALL can bind to this definition. See tu_scope: one rule, four
+        # predicates. A `static` in a .c/.cc/.cpp/.cxx is that file's alone; a header
+        # definition, or any non-static one, stays tree-wide.
+        self.scope = tu_scope.declared_scope(path, is_static)
 
     @property
     def body(self):
@@ -765,7 +785,12 @@ class Tree:
                 continue
             params = [(a, param_name(a)) for a in args
                       if a.strip() and a.strip() not in ("void", "...")]
-            self.funcs.append(Func(m.group(1), path, src, params, m.start(), k + 1, close))
+            # The declaration specifiers, back to the previous statement boundary -- the
+            # only place `static` can be, and the whole of what decides linkage.
+            head = src[max(0, m.start() - 300):m.start()]
+            head = head[max(head.rfind(";"), head.rfind("}"), head.rfind("{")) + 1:]
+            self.funcs.append(Func(m.group(1), path, src, params, m.start(), k + 1, close,
+                                   bool(re.search(r"\bstatic\b", head))))
 
     def _index_cfuncs(self, src):
         for name, args, _s, _e in find_calls(src):
@@ -784,13 +809,20 @@ class Tree:
 
 
 def call_sites(tree, fn):
-    """[(caller, arg_list, offset_of_call, offset_past_call)] for in-tree calls of `fn`."""
+    """[(caller, arg_list, offset_of_call, offset_past_call)] for in-tree calls of `fn`.
+
+    Linkage-scoped like predicate B's namesake (tu_scope.bind): a textual match on the
+    name in b.c is a call to b.c's own `static` definition, not to this one.
+    """
     out = []
+    peers = tree.by_name.get(fn.name, ())
     for path, src in tree.files.items():
         for m in re.finditer(r"\b%s\s*(?=\()" % re.escape(fn.name), src):
             caller = tree.enclosing(path, m.start())
             if caller is None or caller is fn:
                 continue            # a prototype, the definition header, or self-recursion
+            if fn not in tu_scope.bind(peers, path, m.start()):
+                continue            # this file's call binds to a different definition
             args, past = call_args(src, m.end())
             if args is None:
                 continue
@@ -1152,7 +1184,11 @@ def escapes(fn, deriv_off, expr, names, cons, tree=None):
             idx = next((i for i, a in enumerate(cons[1])
                         if any(d + "(" in re.sub(r"\s+", "", a) for d in INTERIOR)
                         or (alias_re and alias_re.search(a))), None)
-            for callee in tree.by_name[cons[0]]:
+            # The same linkage rule as `copied_in_callee`, in the REPORTING direction:
+            # descending into another TU's namesake here invents an ESCAPES-INTO-CALLEE
+            # against a body that never runs. Same table, same fix (tu_scope.bind).
+            for callee in tu_scope.bind(tree.by_name[cons[0]], fn.path,
+                                        fn.bstart + cons[2]):
                 if callee is fn or idx is None or idx >= len(callee.params):
                     continue
                 pname = callee.params[idx][1]
@@ -1357,7 +1393,18 @@ def copied_in_callee(fn, start_off, base, field, tree, depth=0, seen=None):
             return "%s() at %s:%d" % (name, fn.path.name,
                                       line_of(fn.src, fn.bstart + s))
         if touches and tree is not None and name in tree.by_name and dominates(e):
-            for callee in tree.by_name[name]:
+            # ROUND 9: THE CALLEE THIS FILE CAN SEE, NOT EVERY NAMESAKE IN THE TREE.
+            #
+            # `by_name` is keyed by the bare name, so a call in b.c descended into a.c's
+            # same-named `static` helper -- and this is a DISCHARGE, so the wrong body did
+            # not merely mis-describe a row, it CLEARED one: b.c's helper holds the pointer
+            # across an rb_funcall, a.c's copies it immediately, and `copies-in-callee`
+            # discharged b.c's derivation through a.c's body. Zero hits on a real finding.
+            #
+            # tu_scope.bind is the same rule predicates A, B and C resolve names by. The
+            # tree-wide fall-back is kept where C keeps it: a non-static callee, or one
+            # defined in a header, genuinely is visible from here.
+            for callee in tu_scope.bind(tree.by_name[name], fn.path, fn.bstart + s):
                 if callee is fn:
                     continue
                 mapped = _map_carrier(args, base, field, callee)
@@ -2536,6 +2583,63 @@ def self_test(pool):
           "funcs %d, derive %d, hits %s, discharges %s"
           % (wgrn.funcs, len(wgrn.derivations), [(h[0], h[2]) for h in wgrn.hits],
              [d[0] for d in wgrn.discharges]))
+
+    # 8f. ROUND 9: A DISCHARGE RESOLVED THROUGH ANOTHER TRANSLATION UNIT'S BODY (:1360).
+    #
+    #     `copied_in_callee` looked its callee up in `tree.by_name`, which is keyed by the
+    #     BARE NAME, so a call in b.c descended into a.c's same-named `static` helper. Of
+    #     the four places this bug lives, this is the worst: the others resolve to the
+    #     wrong body and MISREPORT, this one resolves to the wrong body and then CLEARS a
+    #     real row on the strength of it. Measured on the fixture below, unfixed:
+    #     `derive 2/2 -> windowed 0/0 -> hit 0`, both rows discharged `copies-in-callee`,
+    #     and b.c's reason line even names `strncpy() at a.c:9` -- a file b.c does not
+    #     include.
+    #
+    #     ONE fixture carries the red and the green, which is the only way to tell the fix
+    #     from switching the rule off: a.c really does copy in its own frame and must stay
+    #     discharged, b.c holds the pointer across an rb_funcall and must report. The
+    #     funnel is asserted on both sides -- a parser that indexes nothing prints
+    #     `derive 0/0 -> hit 0`, which is not the same clean sheet and must not read as one.
+    tu_head = ("#include <ruby.h>\n"
+               "\n"
+               "struct box { const char *p; };\n"
+               "\n"
+               "static void\n"
+               "stash(const char *q)\n"
+               "{\n")
+    tu_tail = ("}\n"
+               "\n"
+               "static VALUE\n"
+               "%s(VALUE self, VALUE str)\n"
+               "{\n"
+               "    struct box b;\n"
+               "    b.p = RSTRING_PTR(str);\n"
+               "    stash(b.p);\n"
+               "    return Qnil;\n"
+               "}\n"
+               "\n"
+               "void Init_%s(void) { rb_define_method(rb_cObject, \"%s\", %s, 1); }\n")
+    tu = _sweep(_synth("fx-tu-callee", {
+        # copies its argument immediately, in its own frame -- a genuine discharge
+        "ext/a.c": tu_head + "    static char keep[64];\n"
+                             "    strncpy(keep, q, sizeof(keep));\n"
+                  + tu_tail % (("a_go",) * 4),
+        # holds it across a re-entry into Ruby -- a genuine finding
+        "ext/b.c": tu_head + "    rb_funcall(rb_mKernel, rb_intern(\"hook\"), 0);\n"
+                             "    rb_str_new(q, 4);\n"
+                  + tu_tail % (("b_go",) * 4)}))
+    tu_hits = sorted((h[0], h[1]) for h in tu.hits)
+    tu_dis = sorted((d[0], d[1]) for d in tu.discharges)
+    check(tu.funcs == 6 and len(tu.derivations) == 2 and len(tu.with_window) == 1
+          and tu_hits == [("ESCAPES-INTO-CONTAINER", "ext/b.c")],
+          "8f RED: b.c's derivation is no longer discharged through a.c's `static stash` "
+          "-- the callee a call binds to is its own file's (funnel derive %d/%d, win %d)"
+          % (len(tu.derivations), tu.deriv_fns, len(tu.with_window)),
+          "hits %s discharges %s" % (tu_hits, tu_dis))
+    check(tu_dis == [("copies-in-callee", "ext/a.c")],
+          "...and GREEN in the same fixture: a.c's copy is in a.c's OWN callee, so "
+          "copies-in-callee still discharges it -- a scoping fix that clears nothing is "
+          "the rule turned off", tu_dis)
 
     # 9. PER-RULE MUTATION TABLE. A discharge rule with no generated red is a rule nobody
     #    has tested; round 5 shipped four over-clears in predicate A that a green-only

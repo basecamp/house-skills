@@ -55,6 +55,10 @@ Pass-1 sweeps — [the four predicates](#the-four-pass-1-predicates), one script
 [sweep_escaped_conversion.py](references/sweep_escaped_conversion.py),
 [sweep_static_values.py](references/sweep_static_values.py),
 [sweep_interior_escape.py](references/sweep_interior_escape.py).
+All four share [tu_scope.py](references/tu_scope.py) — the translation-unit scoping rule, extracted
+after the same defect was patched **six separate times across four scripts**: an internal-linkage
+name resolved tree-wide instead of in the using file. It must travel with them; a sweep copied out
+of `references/` on its own no longer runs.
 Run each one's `--self-test` before trusting its silence.
 Detector self-check: [references/pipefail_false_negative.sh](references/pipefail_false_negative.sh)
 — demonstrates a grep-based verdict reporting a found defect as clean.
@@ -432,8 +436,8 @@ existing suspects, and `REGISTERED` is a **downgrade, not a clear**, because reg
 per-slot: round 4 measured stackprof's registered `empty_string` pinned while its unregistered
 sibling `objtracer` was not.
 
-**Run `--self-test` before trusting any silence** — A is 48/48 (1 skipped), B 23/23, C 53/53,
-D 32/32. Note the pool argument differs: A and C take the corpus **parent**, B and D take the gem
+**Run `--self-test` before trusting any silence** — A is 53/53 (1 skipped), B 25/25, C 55/55,
+D 34/34. Note the pool argument differs: A and C take the corpus **parent**, B and D take the gem
 directories (`$CORPUS/*/`); given the wrong one, B and D print `fixture missing` and exit non-zero.
 
 **The failure that does not announce itself is a PARTIAL pool, not an empty one.** Fixtures were
