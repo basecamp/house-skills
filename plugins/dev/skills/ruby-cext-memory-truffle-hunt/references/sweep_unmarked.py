@@ -2065,9 +2065,43 @@ void n_syms(void) { sym_a = ID2SYM(rb_intern("a")); sym_b = ID2SYM(rb_intern("b"
 """
 
 
-def self_test(base):
-    """Fail loudly rather than let a broken query clear the corpus by accident."""
+def _first_dir(*candidates):
+    """The first candidate that exists, or the first one, so SKIP names a real path."""
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return candidates[0]
+
+
+def self_test(base, siblings=()):
+    """Fail loudly rather than let a broken query clear the corpus by accident.
+
+    THE ARGUMENT IS THE CORPUS DIRECTORY, not a list of trees -- and that asymmetry with
+    predicates B, C and D, whose `--self-test` takes a glob, cost two rounds a false
+    failure. `--self-test ~/.cache/truffle-hunt-corpus/*` makes argparse bind the FIRST
+    expanded path (`bcrypt_pbkdf-1.1.2`) to this parameter and the other 58 to `dirs`, so
+    `base / "m2-red"` does not exist, the sweep of a missing directory returns an empty
+    set, and two acceptance items report FAIL. Round 7 recorded those two as stale
+    fixtures and verified them "identical with and without the change" -- which they were,
+    because the invocation was wrong both times. The fixtures were correct throughout:
+    m2-red flags `fieldTypes`, m2-green clears it, and the pair differs by exactly that.
+
+    So this now RESOLVES the glob form rather than punishing it, and aborts loudly if the
+    fixtures are nowhere to be found. A suite that reports FAIL because it was pointed at
+    the wrong directory is worse than one that refuses to run: the first trains people to
+    ignore two red checks, and that is how a real regression gets through.
+    """
     base = pathlib.Path(base)
+    if not (base / "m2-red").is_dir():
+        for cand in (base.parent, *(pathlib.Path(s).parent for s in siblings)):
+            if (cand / "m2-red").is_dir():
+                base = cand
+                break
+        else:
+            print("ABORT: no acceptance fixtures under %s (looked for m2-red/).\n"
+                  "       Pass the CORPUS DIRECTORY, not a glob of trees:\n"
+                  "           --self-test ~/.cache/truffle-hunt-corpus" % base)
+            return 2
     ok = True
     tally = [0, 0, 0]        # pass, total, skipped
 
@@ -2253,7 +2287,12 @@ def self_test(base):
     # The generated controls above prove the mechanism; only stackprof proves the ANSWER.
     # A missing fixture prints SKIP rather than nothing, because the round-4 rule is that
     # absence of a failure signal is not a negative result.
-    sp = base.parent / "corpus" / "stackprof-0.2.28"
+    # `base` FIRST, then the pre-round-7 layout. The durable corpus moved to
+    # `~/.cache/truffle-hunt-corpus` and this path was left pointing at `~/.cache/corpus`,
+    # so the one item that proves the ANSWER rather than the mechanism had been printing
+    # SKIP ever since -- against a fixture that is sitting in the corpus directory.
+    sp = _first_dir(base / "stackprof-0.2.28",
+                    base.parent / "corpus" / "stackprof-0.2.28")
     want = {("_stackprof", "interval"): "HEAP-IF-COERCED",
             ("_stackprof", "mode"): "IMMEDIATE-ONLY",
             ("_stackprof", "empty_string"): "REGISTERED",
@@ -2268,8 +2307,8 @@ def self_test(base):
     else:
         skip("A: stackprof 0.2.28 grades all five as measured", "absent: %s" % sp)
 
-    pris, fixed = base.parent / "fixtest" / "sp-pristine", \
-        base.parent / "fixtest" / "sp-fixed"
+    pris = _first_dir(base / "sp-pristine", base.parent / "fixtest" / "sp-pristine")
+    fixed = _first_dir(base / "sp-fixed", base.parent / "fixtest" / "sp-fixed")
     if pris.is_dir() and fixed.is_dir():
         gr = {k: v[1] for k, v in graded(pris).items()}
         gf = {k: v[1] for k, v in graded(fixed).items()}
@@ -2300,7 +2339,7 @@ def main():
                          "changed no (struct, field) pair")
     a = ap.parse_args()
     if a.self_test:
-        sys.exit(self_test(a.self_test))
+        sys.exit(self_test(a.self_test, a.dirs))
     total = 0
     for d in a.dirs:
         tree = Tree(d)
