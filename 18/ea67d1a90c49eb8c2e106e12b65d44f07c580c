@@ -1,0 +1,36 @@
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/sweep_interior_escape.py
+  s_7f3f0e6f0e91af::t_8745d1add938e2 2745-2805
+  s_7f3f0e6f0e91af::t_e20789482f0d83 2705-2721,2726
+  s_7f3f0e6f0e91af::t_e94da152c8987b 2211-2214,2216-2225,2227-2229,2231-2237
+  s_7f3f0e6f0e91af::t_5899c3e03ddd8c 2238,2242,2704,2722-2725,2727-2744,2806-2841
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/tu_scope.py
+  s_e4dc5311e27670::t_7a7be0e6abd45d 825-858
+  s_e4dc5311e27670::t_c5a48ab10e1520 788-794,798
+  s_e4dc5311e27670::t_040bb875ee083e 993-994
+  s_e4dc5311e27670::t_634caca59a4526 859-893
+  s_e4dc5311e27670::t_ae097e4a404ad1 991-992
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "18ea67d1a90c49eb8c2e106e12b65d44f07c580c",
+  "prompts": {},
+  "sessions": {
+    "s_7f3f0e6f0e91af": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c8e61efb-34f6-40cd-a60f-e0a4ef99e3b4",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    },
+    "s_e4dc5311e27670": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b4125831-cfa6-4336-96d7-6e128ffcf078",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
