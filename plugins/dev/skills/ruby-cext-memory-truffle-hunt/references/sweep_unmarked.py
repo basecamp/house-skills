@@ -186,9 +186,9 @@ checkouts and are deliberately not committed here; rebuild the directory like so
     git clone https://github.com/sparklemotion/sqlite3-ruby sqlite3-pr723
     cd sqlite3-pr723 && git fetch origin pull/723/head && git checkout FETCH_HEAD
 
-Then: python3 sweep_unmarked.py --self-test acceptance   (expects 27/27 PASS)
+Then: python3 sweep_unmarked.py --self-test acceptance   (expects 38/38 PASS)
 
-Two of the twenty-seven run against the REAL gem rather than a generated reduction, and look for
+Two of the thirty-eight run against the REAL gem rather than a generated reduction, and look for
 fixtures beside the acceptance dir: `../corpus/stackprof-0.2.28` for the target grades, and
 `../fixtest/sp-pristine` + `../fixtest/sp-fixed` for the red/green pair (sp-fixed is the
 tree with `VALUE interval` changed to `long`, which is the upstream fix's shape). When they
@@ -2692,6 +2692,29 @@ def self_test(base, siblings=()):
             s, _ = sweep(Tree(ext))
             return {c for c, _, _, _, _, _ in s}, {f for _, _, _, f, _, _ in s}
 
+    def funnel_from_sources(files):
+        """(wrap sites, VALUE fields ENUMERATED) for a generated tree.
+
+        The counters, not the verdict. Every green check below is satisfied just as
+        well by a parser that resolved NOTHING -- "no local reported as a field" and
+        "the other file's field still clears" both hold trivially at zero fields --
+        and the round-7 fixtures are exactly the shapes where an index can come back
+        empty: C++ class bodies and two-file trees. So each fixture pins the width of
+        the funnel it walked as well as what came out of it. Two of them are red on
+        the counter alone: RED_TU_STRUCT enumerated 0 fields before the struct fix and
+        RED_CXX_INIT 0 before the initialiser fix, which is the same zero a bundled-gem
+        glob produced in round 5.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            ext = pathlib.Path(tmp) / "ext"
+            ext.mkdir()
+            for name, text in files.items():
+                (ext / name).write_text(text)
+            tree = Tree(ext)
+            s, c = sweep(tree)
+            return (len(tree.wrap_sites),
+                    len(s) + len([x for x in c if x[2] != "-"]))
+
     def cleared_from_source(src, suffix=".c"):
         """{field: why} for everything a one-file tree CLEARED."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -2817,6 +2840,35 @@ def self_test(base, siblings=()):
           sorted(fields))
     check("other" in cleared, "green (helper-param) a direct mark beside it still clears",
           cleared)
+
+    # -- the funnel each round-7 fixture walked, not just what came out of it -------
+    #
+    # Measured, both versions, so the numbers are a control and not a transcription:
+    #
+    #   fixture         wrap sites   fields enumerated
+    #                                before      after
+    #   tu-struct           2          0           1     <- the whole defect
+    #   tu-callback         2          2           2
+    #   tu-dtype            2          1           2     <- second descriptor invisible
+    #   c++ init            1          0           2     <- the whole defect
+    #   helper-param        1          2           2
+    #   store-flow          3          2           2     <- a GRADE defect: same rows
+    #
+    # The last row is the point of grading against the funnel too: threads 4 and 5 move
+    # no row at all, so a suite that watched only the row count could not tell their fix
+    # from their absence, and the two rows it must NOT lose are asserted here by count.
+    for label, files, want in (
+        ("(tu-struct)", RED_TU_STRUCT, (2, 1)),
+        ("(tu-callback)", RED_TU_CALLBACK, (2, 2)),
+        ("(tu-dtype)", RED_TU_DTYPE, (2, 2)),
+        ("(c++ init)", {"t.cc": RED_CXX_INIT}, (1, 2)),
+        ("(helper-param)", {"t.c": RED_HELPER_PARAM}, (1, 2)),
+        ("(store-flow)", {"t.c": RED_STORE_FLOW}, (3, 2)),
+    ):
+        got = funnel_from_sources(files)
+        check(got == want,
+              "funnel %s %d wrap site(s), %d field(s) enumerated" % ((label,) + want),
+              "got %s" % (got,))
 
     # -- predicate A: a severity COLUMN on the rows above --------------------------
     #
