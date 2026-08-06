@@ -2208,33 +2208,39 @@ NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-"]
 # it was protecting -- stringio's `ptr->pos = e - RSTRING_PTR(ptr->string)` -- still holds and
 # still has its green.
 #
-# ROUND 9 FOLLOW-UP, ONE ROW: date- 18 -> 17. The alias kill (tu_scope's fifth rule applied
-# to the alias set) drops date_parse.c:230, and the shape is exactly the "spurious window"
-# the follow-up predicted this predicate would grow:
+# ROUND 9 FOLLOW-UP: THE TRIAGED RESIDUE DOES NOT MOVE, and it took two corpus rounds to
+# keep it that way. The alias kill (tu_scope's fifth rule applied to the alias set) shipped
+# in #29 item 1 and immediately over-cleared in two places, one in each direction of the
+# same brace-counting mistake, and neither was caught by a suite:
 #
-#     ep = RSTRING_END(d);          <- the derivation the row was reported at
-#     ...
-#     ep = s + l;                   <- ep no longer holds RSTRING_END(d)
-#     buf = ALLOCV_N(char, vbuf, ep - bp + 1);   <- the "window" it was held across
+#   date_parse.c:230    `ep = RSTRING_END(d); ... if (s >= ep) goto no_mday; ... ep = s + l;`
+#   (this predicate)    -- the rebinding write is in the same block as the derivation and
+#                       dominates it on the braces alone, but the `goto` in between says
+#                       control need not arrive. tu_scope.straight_line. The same rule
+#                       restores yajl_ext.c:255's RUBY-REENTRY window, lost the same way
+#                       across the `break` between two `case` arms.
+#   ossl_asn1.c/ossl_ts.c  `if (!a1obj) a1obj = OBJ_txt2obj(...)` -- a write with NO BLOCK
+#   (predicate B, 8 rows)  of its own, so its innermost enclosing block is the whole
+#                       function and it reads as unconditional. tu_scope.conditional_stmt.
+#                       B is the caller that pays for this one; D's corpus does not move.
 #
-# The read that bounded the window is a read of `s + l`, not of the derivation, so the row
-# was a window measured on a different value. THE POINTER IS STILL REPORTED: `s + l` is an
-# interior pointer of the same String, `ep` rejoins the alias set of the :229 derivation at
-# the copy, and :229 is a HELD-ACROSS-WINDOW hit before and after. One row of duplicate
-# coverage of one defect, not a cleared defect -- the gem's verdict does not move.
+# Both holes are closed in tu_scope and all nine rows are back. Both rules have a generated
+# red in this file's 8h3 -- the corpus staying green is not a test of a constant added to
+# keep the corpus green.
 #
-# Its sibling :204 (the `m` block, byte-identical shape) survives, and NOT for a good
-# reason: the shadowing disqualifier is `d < at`, so the *declaration* token of the
-# shadowing `const char *s, *bp, *ep;` at :225 counts as a read of the outer `ep` and
-# bounds the window there. Tightening it to `d <= at` is correct and is NOT this pass's
-# thread -- `_declarations` is deliberately under-inclusive, so the tightening can suppress
-# a genuine read, and it moves rows in D's liveness stage where the polarity is the other
-# way round. Recorded here so the next round finds it written down rather than re-deriving
-# it from the asymmetry.
+# What the kill DOES remove, correctly, is five rows, all one shape, none of them in this
+# table: bigdecimal's `BigDecimal_to_s` in 3.3.1/4.0.1/4.1.0/4.1.1/4.1.2. `psz =
+# StringValueCStr(f)` is rebound 41 lines later -- the same 41 in all five trees -- by
+# `psz = RSTRING_PTR(str)`, a different String freshly allocated by rb_usascii_str_new,
+# and the reads AFTER that rebinding were what stretched the window back across that
+# allocation, `NUM2INT(f)` and `rb_raise`. All three sit in the `else` arm and cannot run
+# on the path the derivation ran on; on the path where it does run there is no window at
+# all. The row was a window measured on a pointer the derivation never produced. The
+# trees keep their other rows and no gem's verdict moves.
 TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 21, "iconv-": 15, "zstd-": 6,
            "sqlite3-2.9.5": 3, "websocket-driver-": 2, "stringio-": 1,
            "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 3, "puma-": 6,
-           "unicorn-6.1.0": 6, "date-": 17, "openssl-3.3.0": 5, "openssl-3.3.1": 5,
+           "unicorn-6.1.0": 6, "date-": 18, "openssl-3.3.0": 5, "openssl-3.3.1": 5,
            "openssl-3.3.3": 5, "openssl-4.0.0": 5}
 
 
@@ -2695,6 +2701,144 @@ def self_test(pool):
           [(t, kv[t].funcs, len(kv[t].derivations), len(kv[t].with_window),
             sorted(h[0] for h in kv[t].hits), sorted(d[0] for d in kv[t].discharges))
            for t in kill_arms])
+
+    # 8h3. THE DOMINANCE TEST HAS TWO HOLES A BRACE COUNT CANNOT SEE (#29 item 1).
+    #
+    #    Both were found by the CORPUS and not by this suite, and both are over-clears:
+    #    the first cost predicate B eight openssl RETURNS-INTERIOR rows, the second cost
+    #    this predicate date_parse.c:230 and yajl_ext.c:255's RUBY-REENTRY window. They are
+    #    pinned here because "the corpus stayed green" is not a test of a constant added to
+    #    keep the corpus green -- both rules live in tu_scope and both are asserted here,
+    #    including the one whose only corpus witness is another predicate's:
+    #
+    #      bare-arm   `if (!a1obj) a1obj = f(...);`  -- the write has NO BLOCK, so its
+    #                 innermost enclosing block is the whole function and it reads as
+    #                 unconditional. openssl's obj_to_asn1obj, exactly.
+    #      switch-arm `case 0: p = ...; break; case 2: p = ...;` -- two arms share ONE pair
+    #                 of braces, so the second arm's write is in the same block as the
+    #                 first arm's derivation. yajl's encoder, and `goto` for date's.
+    #
+    #    THE UNCONDITIONAL ARM IS THE FLAG: `plain` and `same-arm` write the same name in
+    #    the same block with nothing in front of it, and must still discharge, or the two
+    #    rules above have simply switched the kill off.
+    dom_c = ("#include <ruby.h>\n\n"
+             "static VALUE\n"
+             "dom(VALUE self, VALUE str, VALUE n)\n"
+             "{\n"
+             "    const char *p = RSTRING_PTR(str);\n"
+             "    const char *other = \"safe\";\n"
+             "    int c;\n"
+             "%s"
+             "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+             "    c = p[0];\n"
+             "    return INT2FIX(c);\n"
+             "}\n\n"
+             "void Init_probe(void)\n"
+             "{\n"
+             "    rb_define_method(rb_cObject, \"d\", dom, 2);\n"
+             "}\n")
+    dom_arms = {
+        "plain":      "    p = other;\n",
+        "bare-arm":   "    if (n) p = other;\n",
+        "bare-else":  "    if (!n) c = 1;\n    else p = other;\n",
+    }
+    dm = {t: _sweep(_synth("fx-dom-%s" % t, {"ext/probe.c": dom_c % arm}))
+          for t, arm in dom_arms.items()}
+    # THE SWITCH SHAPE NEEDS ALL THREE OFFSETS INSIDE THE SWITCH BODY, and getting that
+    # wrong is how a fixture ends up asserting nothing. The dominance test already skips
+    # any write whose innermost block does not contain BOTH the derivation and the
+    # occurrence, so a derivation before the switch, or a read after it, is saved by the
+    # brace count alone -- the first cut of this fixture put the read after the closing
+    # brace and passed with `straight_line` deleted. Derive in one arm, kill in a second,
+    # read in a third, and the brace count says "dominates" for all three: only the
+    # `break` between the arms says control need not arrive.
+    #
+    # yajl's `yajl_encode_part` is the shape, byte for byte -- `cptr = RSTRING_PTR(str)`
+    # in the T_FLOAT arm, rewritten in the T_STRING and T_SYMBOL arms, read again in the
+    # `default` arm after an `rb_funcall`. `same-arm` is the flag: the same write with no
+    # transfer in front of it still kills, so the rule is narrowed and not switched off.
+    sw_c = ("#include <ruby.h>\n\n"
+            "static VALUE\n"
+            "sw(VALUE self, VALUE str, VALUE n)\n"
+            "{\n"
+            "    const char *p = \"x\";\n"
+            "    const char *other = \"safe\";\n"
+            "    int c = 0;\n"
+            "    switch (FIX2INT(n)) {\n"
+            "      case 0:\n"
+            "        p = RSTRING_PTR(str);\n"
+            "%s"
+            "        break;\n"
+            "%s"
+            "      default:\n"
+            "        rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+            "        c = p[0];\n"
+            "        break;\n"
+            "    }\n"
+            "    return INT2FIX(c);\n"
+            "}\n\n"
+            "void Init_probe(void)\n"
+            "{\n"
+            "    rb_define_method(rb_cObject, \"s\", sw, 2);\n"
+            "}\n")
+    sw_arms = {
+        "no-write":  ("", ""),
+        "other-arm": ("", "      case 2:\n        p = other;\n        break;\n"),
+        "same-arm":  ("        p = other;\n", ""),
+    }
+    sw = {t: _sweep(_synth("fx-switch-%s" % t, {"ext/probe.c": sw_c % arm}))
+          for t, arm in sw_arms.items()}
+    check(all(dm[t].funcs == 2 for t in dom_arms)
+          and len(dm["plain"].hits) == 0
+          and any(d[0] == "no-window" for d in dm["plain"].discharges)
+          and [len(dm[t].hits) for t in ("bare-arm", "bare-else")] == [1, 1]
+          and all(sw[t].funcs == 2 for t in sw_arms)
+          and [len(sw[t].hits) for t in ("no-write", "other-arm")] == [1, 1]
+          and len(sw["same-arm"].hits) == 0
+          and any(d[0] == "no-window" for d in sw["same-arm"].discharges),
+          "#29 item 1, the dominance holes: a write in a BRACELESS `if`/`else` arm and a "
+          "write in another `switch` case do not kill the alias -- neither has a block of "
+          "its own to be conditional in. The same write at the frame's top level, and the "
+          "same write in the deriving arm with no `break` in front of it, still do, so the "
+          "kill is narrowed and not switched off",
+          [(t, dm[t].funcs, len(dm[t].hits), sorted(d[0] for d in dm[t].discharges))
+           for t in dom_arms]
+          + [(t, sw[t].funcs, len(sw[t].hits), sorted(d[0] for d in sw[t].discharges))
+             for t in sw_arms])
+
+    # 8h4. AND A MEMBER OF THE SAME NAME IS NOT THE NAME. `parser->state.start = start;`
+    #    counted as a write to the local `start`: `>` was already in writes()' lookbehind
+    #    so the `->` spelling was excluded and the `.` spelling was not. One character
+    #    between the two halves of one rule, and under the alias kill it dropped two real
+    #    ESCAPES-INTO-CONTAINER rows in json's cResumableParser_feed.
+    memb_c = ("#include <ruby.h>\n\n"
+              "struct st { const char *start; const char *end; };\n"
+              "static struct st g_state;\n\n"
+              "static VALUE\n"
+              "feed(VALUE self, VALUE str)\n"
+              "{\n"
+              "    const char *start = RSTRING_PTR(str);\n"
+              "%s"
+              "    g_state.start = start;\n"
+              "    g_state.end = start + 1;\n"
+              "    return Qnil;\n"
+              "}\n\n"
+              "void Init_probe(void)\n"
+              "{\n"
+              "    rb_define_method(rb_cObject, \"f\", feed, 1);\n"
+              "}\n")
+    mb = {t: _sweep(_synth("fx-memb-%s" % t, {"ext/probe.c": memb_c % arm}))
+          for t, arm in {"member": "", "local": "    start = \"safe\";\n"}.items()}
+    mb_esc = [d for d in (mb["member"].hits[0][4] if mb["member"].hits else [])
+              if d.startswith("escape:")]
+    check(mb["member"].funcs == 2 and len(mb["member"].hits) == 1 and len(mb_esc) == 2
+          and mb["local"].funcs == 2 and not mb["local"].hits,
+          "#29 item 1: `g_state.start = start;` is a write to the MEMBER, not to the local "
+          "-- BOTH stores are still ESCAPES-INTO-STATIC, including the one AFTER that "
+          "statement's `;`, which is where json lost two rows. A real `start = \"safe\";` "
+          "before them still kills the alias",
+          [(t, mb[t].funcs, [h[0] for h in mb[t].hits],
+            sorted(d[0] for d in mb[t].discharges)) for t in mb] + mb_esc)
 
     # 8j/8k. GENERATED RED AND GREEN: A REBOUND GUARD VARIABLE GUARDS THE WRONG OBJECT.
     #

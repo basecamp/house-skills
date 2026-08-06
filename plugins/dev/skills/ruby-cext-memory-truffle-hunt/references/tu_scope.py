@@ -785,10 +785,17 @@ def writes(body, name):
     a stack slot, which is the second pin this skill measured on `StringValueCStr` -- and it
     cannot be the left-hand side of an assignment, so it is never matched here.
 
+    A MEMBER OF THE SAME NAME IS NOT THIS NAME. `parser->state.start = start;` was counted
+    as a write to the local `start` -- `>` was already in the lookbehind, so the `->`
+    spelling was excluded and the `.` spelling was not, which is one character between the
+    two halves of the same rule. Under ANY_WRITE that suppressed a genuine later read and
+    over-reported; under DOMINATING_WRITE it killed the alias and dropped two real
+    ESCAPES-INTO-CONTAINER rows in json's cResumableParser_feed. Found on the corpus.
+
     One of the three disqualifiers in source_reads(), which is the only caller that matters.
     """
     return [m.start() for m in
-            re.finditer(r"(?<![=!<>+\-*/%%&|^])\b%s\s*=(?!=)" % re.escape(name), body)]
+            re.finditer(r"(?<![=!<>+\-*/%%&|^.])\b%s\s*=(?!=)" % re.escape(name), body)]
 
 
 def blocks(body):
@@ -813,6 +820,75 @@ def innermost_block(body, off, within=None):
     """
     encl = [(o, c) for o, c in (blocks(body) if within is None else within) if o <= off < c]
     return min(encl, key=lambda oc: oc[1] - oc[0]) if encl else None
+
+
+_BARE_ARM = re.compile(r"\b(?:else|do)\s*$")
+_ARM_HEAD = re.compile(r"\b(if|for|while|switch)\s*$")
+
+
+def conditional_stmt(body, off):
+    """Is the statement containing `off` the BRACELESS arm of a conditional?
+
+        if (!a1obj) a1obj = OBJ_txt2obj(RSTRING_PTR(obj), 1);
+
+    Found on the corpus, and it is the hole a brace-counting dominance test has by
+    construction: this write has no block of its own, so its innermost enclosing block is
+    the whole function and it reads as unconditional. openssl's `obj_to_asn1obj` is the
+    shape -- two RETURNS-INTERIOR rows in four trees discharged on a write that runs only
+    when the first call failed. Anything not recognised here stays UNCONDITIONAL, which is
+    the direction that kills; the recogniser is therefore kept to the two spellings that
+    cannot be anything else, `else`/`do` and a `)` closing an `if`/`for`/`while`/`switch`.
+    """
+    pre = body[:off]
+    head = pre[max(pre.rfind(";"), pre.rfind("{"), pre.rfind("}")) + 1:].rstrip()
+    if _BARE_ARM.search(head):
+        return True
+    if not head.endswith(")"):
+        return False
+    depth = 0
+    for i in range(len(head) - 1, -1, -1):
+        if head[i] == ")":
+            depth += 1
+        elif head[i] == "(":
+            depth -= 1
+            if depth == 0:
+                return bool(_ARM_HEAD.search(head[:i]))
+    return False
+
+
+_TRANSFER = re.compile(r"[{}]|\b(?:break|continue|goto|return|case|default)\b")
+
+
+def straight_line(body, a, b):
+    """Does control reach `b` from `a` with no statement-level transfer in between?
+
+    The second hole a brace-counting dominance test has, and the corpus named it twice in
+    one run. Two arms of a `switch` share ONE pair of braces:
+
+        case 0:  ptr = StringValuePtr(str);  ...  break;
+        case 2:  ptr = StringValuePtr(str);  ...  break;
+
+    so case 2's write sits in the same innermost block as case 0's derivation and reads as
+    unconditional -- openssl's `ossl_bn.c` initialize and yajl's `yajl_encode_part` are the
+    two, and both lost a window that way. A `break`, `continue`, `goto`, `return` or a new
+    `case`/`default` label at the traversed depth says control need not arrive.
+
+    DEPTH IS RELATIVE AND MAY GO NEGATIVE, which is the whole subtlety: `a` is often nested
+    deeper than `b` (bigdecimal derives inside two `if`s and rewrites the pointer after
+    both), and LEAVING a block on the way out is not a transfer. A token counts only at
+    depth <= 0 -- its own level or an enclosing one. A `break` inside a nested loop between
+    the two is at depth >= 1 and is correctly ignored.
+    """
+    depth = 0
+    for m in _TRANSFER.finditer(body, a, b):
+        t = m.group()
+        if t == "{":
+            depth += 1
+        elif t == "}":
+            depth -= 1
+        elif depth <= 0:
+            return False
+    return True
 
 
 def source_reads(body, name, since, kill=ANY_WRITE):
@@ -912,6 +988,10 @@ def source_reads(body, name, since, kill=ANY_WRITE):
                 b = innermost_block(body, w, bl)
                 if b is not None and not (b[0] <= since < b[1] and b[0] <= at < b[1]):
                     continue      # a write that need not run cannot discharge a live row
+                if conditional_stmt(body, w):
+                    continue      # ...and a braceless arm has no block to be found in
+                if not straight_line(body, lo, w):
+                    continue      # ...and two switch arms share one pair of braces
             killed = True
             break
         if killed:
