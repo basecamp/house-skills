@@ -60,7 +60,15 @@ and "no control broke" is a statement about the controls before it is one about 
                     later stores are covered too.
                     stackprof.c:1007 `rb_global_variable(&_stackprof.empty_string)`
   registered-value  rb_gc_register_mark_object(v). Marks AND pins the VALUE that was live
-                    at that moment.  kgio accept.c:501 on `localhost`
+                    at that moment -- and NOTHING ELSE. gc.c pushes that object onto
+                    vm->mark_object_ary and never reads the C variable again, so a store
+                    made after the call puts an object in the slot that nothing roots while
+                    the first one stays rooted forever. The rule therefore requires every
+                    unsafe store to PRECEDE the call, approximated as same file and lower
+                    byte offset; a store of a provably immediate or const-table value is
+                    exempt, since it cannot leave a collectable object behind.
+                    kgio accept.c:500-501 on `localhost` is the shape that discharges: one
+                    assignment, then the registration, and never touched again.
   immediate         every source is Qnil/Qtrue/INT2FIX/ID2SYM(static intern)/another
                     immediate-only static.  stackprof's 28 `S(name)` symbols
   const-table       every source comes from rb_define_class/rb_define_module or is a core
@@ -88,13 +96,27 @@ and "no control broke" is a statement about the controls before it is one about 
                     rb_vm_register_global_object?" -- NOT "does it install a constant?".
                     vernier vernier.cc:1246
   const-published   the slot is the VALUE argument of rb_define_const / rb_const_set. The
-                    rooting is at a USE site, so no source rule can see it.
+                    rooting is at a USE site, so no source rule can see it. It is a VALUE
+                    rooting like registered-value and carries the same position rule: the
+                    constant table holds the object the argument evaluated to, so publishing
+                    one String and then storing a second roots one of the two.
                     msgpack extension_value_class.c:33
   wrapped           the file-static OBJECT is itself handed to TypedData_Wrap_Struct with a
-                    dtype whose dmark is non-NULL. Not a clear -- a HAND-OFF: those fields
-                    are exactly what sweep_unmarked.py's walk covers, and reporting them
-                    here would double-count predicate A's rows.
+                    dtype whose dmark is non-NULL, AND the wrapper it returns is not
+                    provably thrown away. Not a clear -- a HAND-OFF: those fields are
+                    exactly what sweep_unmarked.py's walk covers, and reporting them here
+                    would double-count predicate A's rows. But a dmark only runs while its
+                    wrapper is reachable from a root, so a discarded wrapper marks nothing
+                    and the hand-off would route the fields to a walk that finds a
+                    correct-looking dmark and clears them -- an over-clear laundered through
+                    a second script. Only two shapes count as proof: the call's result is
+                    unused, or it is assigned into a file-scope slot that is itself
+                    unrooted. Everything else -- returned, assigned to a local, nested in
+                    another call -- is the documented floor in wrapper_dest, because the
+                    strict reading makes the ordinary allocator cfunc a hit in every gem.
                     stackprof.c:995 `TypedData_Wrap_Struct(..., &stackprof_type, &_stackprof)`
+                    is the corpus's only wrapped site (twice, two versions) and it assigns
+                    to `gc_hook`, which rb_global_variable roots.
 
 The wrapped rule is the one that makes the stackprof/rbtrace pair discriminating rather
 than lucky. Both gems wrap a gc_hook at Init; stackprof passes `&_stackprof` and rbtrace
@@ -194,6 +216,17 @@ cannot match it.
 
 KNOWN, NOT FIXED HERE
 ---------------------
+A namespace-scope static is keyed BARE (`cache`), because top_level_units walks THROUGH a
+namespace rather than qualifying what it finds -- only class bodies qualify. So a
+registration spelled from outside the namespace, `rb_global_variable(&prof::cache)`,
+normalises to `prof::cache` and does not match. That is an OVER-REPORT, the safe direction,
+and closing it by stripping the qualifier is the one thing this file must not do: the same
+strip would let `rb_global_variable(&Registry::cache)` discharge an unrelated file-scope
+`cache`, which is the over-clear the class-member rule was written to prevent. The honest
+fix is to qualify namespace-scope keys the way class members are qualified; it is a corpus
+-visible change and it is not one of this pass's threads. Found while pinning the namespace
+descent, and pinned as a limit rather than left to be rediscovered.
+
 `_index_structs` still indexes `struct|union` only, so a file-scope OBJECT of C++ class type
 (`static ThreadTable table;`) resolves to no struct body and contributes no INSTANCE fields;
 and `_struct_slots` splits a struct body on `;` alone, so a field declared after an in-class
@@ -209,8 +242,38 @@ numbers into the stripped text both match the original file, which every hit her
 on. --self-test asserts that round-trip on a real corpus file rather than taking it on
 trust.
 
+ONE NAME IS NOT ONE SLOT
+------------------------
+Internal linkage is per translation unit. Two .c files each writing `static VALUE cache;`
+declare two objects, and a `rb_global_variable(&cache)` in one of them roots one of them.
+Deduping by NAME merged the pair into a single row, discharged it on that registration, and
+the other file's `cache = rb_str_new(...)` disappeared behind HITS 0. Slots declared
+`static` in a translation unit are therefore keyed per file, and their sources,
+registrations and publications are searched in that file alone -- the uniform rule, applied
+whether or not the name repeats, because a conditional split is a different sweep on the
+trees where it fires. External-linkage names stay tree-wide keyed, and so do statics
+declared in HEADERS (see TU_EXT).
+
+The corpus says this is a precision fix and not only a recall one. kgio goes 9 slots to 12
+and digest-3.2.0 goes from THREE hits to none: `Init_bubblebabble` declares
+`VALUE rb_mDigest, rb_mDigest_Instance, rb_cDigest_Class;` as LOCALS, in a translation unit
+that does not contain digest.c's file statics at all, and the tree-wide source scan read
+`rb_mDigest = rb_digest_namespace()` and two rb_const_get calls out of that function as
+stores to digest.c's slots. Three false rows, all of them from the merge.
+
+A VALUE ROOTING IS NOT A SLOT ROOTING
+-------------------------------------
+rb_gc_register_mark_object and rb_define_const both root the OBJECT the argument evaluated
+to. rb_global_variable and rb_gc_register_address root the ADDRESS. Only the second pair
+covers a later store, and the first pair was discharging slots on the name alone. See the
+registered-value and const-published entries above for the position rule and its floor.
+
 ACCEPTANCE (--self-test): see self_test(). Run it before trusting any result -- silence is
-a property of the query until the counters say otherwise.
+a property of the query until the counters say otherwise. 53 checks; fifteen of them are
+the round-9 review threads, and every one of those was measured GREEN on the pre-fix script
+-- six of the eight shapes with `slots 0`, a clean sheet produced by the parser finding
+nothing. The corpus is NEUTRAL on all of them (zero new hit rows across 99 trees), so these
+fixtures are the only evidence in the repository that the fixes do anything.
 """
 import argparse
 import pathlib
@@ -220,6 +283,18 @@ import sys
 import tempfile
 
 C_EXT = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp")
+# A TRANSLATION UNIT, as opposed to a header. The distinction only matters for internal
+# linkage: `static VALUE cache;` in a .c is one object belonging to that file, and scoping it
+# there is exact. The same line in a .h is one object PER INCLUDING .c -- the header is not a
+# translation unit at all, and the stores live in files this sweep cannot connect to it
+# without resolving includes. Scoping a header slot to the header therefore hides every store
+# it has and reports UNSOURCED: 10 rows across unicorn x2 and yajl-ruby, all of them noise,
+# none of them the defect. Header statics stay tree-wide keyed. THE RESIDUAL, stated rather
+# than left implicit: a `static VALUE` in a header included by two .c files is two objects
+# this sweep still merges into one row, so a registration in one includer still discharges
+# the other's slot -- the very shape scoping fixes for .c files. Closing it needs include
+# resolution, which is not in this pass.
+TU_EXT = (".c", ".cc", ".cpp", ".cxx")
 
 ALL_RULES = ("registered-slot", "registered-value", "immediate", "const-table",
              "const-published", "wrapped")
@@ -578,7 +653,18 @@ CAST = re.compile(r"^\(\s*(?:const\s+|unsigned\s+|signed\s+)*"
 
 TYPE_KW = {"const", "volatile", "register", "struct", "union", "enum", "unsigned",
            "signed", "long", "short", "int", "char", "void", "float", "double",
-           "static", "extern", "inline", "typedef", "_Atomic", "restrict"}
+           "static", "extern", "inline", "typedef", "_Atomic", "restrict",
+           # THREAD-LOCAL STORAGE IS STATIC STORAGE, for this predicate's purposes. A
+           # `thread_local VALUE` lives for the whole thread, is read across calls, and sits
+           # outside every root set Ruby scans -- worse than a plain file static, because
+           # rb_global_variable roots one address and a TLS slot has one per thread. These
+           # three spellings (C++11, C11, gcc/clang) were in NEITHER this set nor the
+           # ALL-CAPS escape hatch, so the whole declaration failed the leading-token gate
+           # and was dropped: 0 slots, which reads as a clean file.
+           "thread_local", "_Thread_local", "__thread"}
+# Storage/type qualifiers that may sit between `static` and `VALUE` in a function-local
+# declaration -- `static volatile VALUE cache;` is one slot, not zero.
+LOCAL_QUAL = r"(?:(?:const|volatile|_Atomic|register|thread_local|_Thread_local|__thread)\s+)*"
 
 
 def unwrap(expr):
@@ -621,9 +707,9 @@ def norm(expr):
 
 
 class Slot:
-    __slots__ = ("path", "off", "key", "root", "kind", "decl", "opath", "ooff")
+    __slots__ = ("path", "off", "key", "root", "kind", "decl", "opath", "ooff", "scope")
 
-    def __init__(self, path, off, key, root, kind, decl, opath=None, ooff=0):
+    def __init__(self, path, off, key, root, kind, decl, opath=None, ooff=0, scope=None):
         # path/off point at the VALUE MEMBER, which for rbtrace is rbtracer.c:94-95 inside
         # `rbtracer_t` -- a different declaration, and often a different file, from the
         # file-scope object at :107. Reporting the object's line for both sends the reader
@@ -636,11 +722,34 @@ class Slot:
         self.decl = decl        # the declaration text, trimmed
         self.opath = opath or path   # the file-scope object's declaration
         self.ooff = ooff or off
+        # INTERNAL LINKAGE IS PER TRANSLATION UNIT, and this is the file it belongs to --
+        # None for a slot that is one object tree-wide. `static VALUE cache;` in two .c files
+        # is TWO objects with one name; a `rb_global_variable(&cache)` in the first roots the
+        # first and says nothing about the second. Name-only dedupe merged the pair into one
+        # row, the registration discharged the merged row, and the unregistered slot in the
+        # other file vanished with HITS 0.
+        #
+        # The rule is UNIFORM: every internal-linkage slot is scoped, whether or not its name
+        # is declared `static` in more than one file. A conditional split ("only when the name
+        # repeats") is a different sweep on trees where it fires and this one everywhere else,
+        # and the merge it would keep is exactly the merge that hid the defect. Scoping also
+        # narrows sources, registrations and publications for that slot to its own file, which
+        # is what internal linkage means: no other TU can name the object.
+        #
+        # External-linkage slots stay tree-wide keyed, deliberately. rmagick declares 67
+        # `EXTERN VALUE x;` in a header and assigns them across 40 .cpp files; scoping those
+        # per file would raise 67 UNSOURCED headers plus 67 unresolvable stores.
+        self.scope = scope
 
     @property
     def field(self):
         """Last path component, subscript stripped -- the token a store names."""
         return self.key.split(".")[-1].replace("[]", "")
+
+    @property
+    def ident(self):
+        """The dedupe / memo identity: scope-qualified for an internal-linkage slot."""
+        return (self.scope, self.key)
 
 
 # ------------------------------------------------------- the tree
@@ -671,11 +780,12 @@ class Tree:
         self.aliases = {}        # typedef name -> underlying name
         self.dtypes = {}         # rb_data_type_t name -> initialiser body
         self.funcs = {}          # in-tree function name -> body text
+        self.func_spans = {}     # path -> [(body start, body end)] for top-level functions
         for path, src in self.files.items():
             self._index_structs(path, src)
             self._index_aliases(src)
             self._index_dtypes(src)
-            self._index_funcs(src)
+            self._index_funcs(path, src)
         self.unresolved_members = 0   # struct members whose type did not resolve
         # C++ descent coverage. A tree with 0 class members is only readable next to the
         # number of class bodies the walk actually entered: "0 members" on 0 bodies is a C
@@ -687,19 +797,21 @@ class Tree:
         for path, src in self.files.items():
             self._index_slots(path, src)
         self.class_members = sum(1 for s in self.slots if "::" in s.key)
-        # Dedupe by KEY, not by (file, key). kgio declares `static VALUE sym_wait_writable`
-        # in three separate files -- three genuinely distinct slots that a name-keyed source
-        # scan cannot tell apart anyway. Merging them makes the all-sources discharge rules
-        # strictly HARDER to earn, which is the safe direction; `decls` keeps the pre-dedupe
-        # count so the collapse is visible rather than silent.
+        # Dedupe by SLOT IDENTITY -- (scope, key) -- not by name. An internal-linkage slot is
+        # one object per translation unit, so kgio's `static VALUE sym_wait_writable` in
+        # three files is three slots and stays three; an external-linkage name is one object
+        # tree-wide however many files declare it, so rmagick's header declarations still
+        # collapse. `decls` keeps the pre-dedupe count so the collapse is visible.
         self.decls = len(self.slots)
         seen, uniq = set(), []
         for s in self.slots:
-            if s.key not in seen:
-                seen.add(s.key)
+            if s.ident not in seen:
+                seen.add(s.ident)
                 uniq.append(s)
         self.slots = uniq
-        self.scalars = {s.key for s in self.slots if s.kind == "scalar"}
+        # (scope, key) -> slot, scalars only: the alias-resolution index for is_immediate /
+        # is_const_table. Scope-keyed for the same reason the slots are.
+        self.scalars = {s.ident: s for s in self.slots if s.kind == "scalar"}
         self.registrations = self._index_registrations()
         self.published = self._index_published()
         self.wraps = self._index_wraps()
@@ -787,8 +899,16 @@ class Tree:
             return None
         return None
 
-    def _index_funcs(self, src):
-        """name -> body, top-level definitions only, for one-level return resolution."""
+    def _index_funcs(self, path, src):
+        """name -> body, top-level definitions only, for one-level return resolution.
+
+        Also records each body's SPAN. Function-local statics used to be found by requiring
+        leading whitespace (`^[ \t]+static\\s+VALUE`), which is indentation standing in for
+        storage duration -- and a `static VALUE cache;` written at column zero inside a
+        function body has exactly the same storage duration and exactly the same defect,
+        while matching nothing at all. The spans replace the proxy with the property.
+        """
+        spans = self.func_spans.setdefault(path, [])
         depth, cursor = 0, 0
         for m in re.finditer(r"\b([A-Za-z_]\w*)\s*(?=\()", src):
             depth += src.count("{", cursor, m.start()) - src.count("}", cursor, m.start())
@@ -806,6 +926,7 @@ class Tree:
             close = match_brace(src, k)
             if close > 0:
                 self.funcs.setdefault(m.group(1), src[k + 1:close])
+                spans.append((k + 1, close))
 
     def _index_dtypes(self, src):
         for m in re.finditer(r"\brb_data_type_t\s+(\w+)\s*=\s*\{", src):
@@ -854,18 +975,40 @@ class Tree:
         # top_level_units deliberately skips function bodies, so they are picked up here.
         # vernier's commented-out `static VALUE gc_hook = Data_Wrap_Struct(...)` inside
         # Init_vernier is what this branch exists for.
-        for m in re.finditer(r"^[ \t]+static\s+VALUE\s+([^;=(){}]+)[;=]", src, re.M):
-            # An INDENTED class member matches this pattern too -- which is how the sweep
-            # had accidental, bare-keyed recall on class statics before class_scopes
-            # existed. Keeping both would report one slot twice, once under a key that
-            # cannot match `rb_global_variable(&Registry::cache)`.
-            if any(a <= m.start() < b for a, b in member_spans):
-                continue
-            for decl in split_args(m.group(1)):
-                nm, arr, ptr = declarator(decl)
-                if nm and not ptr:
-                    self.slots.append(Slot(path, m.start(), nm + arr, nm, "scalar",
-                                           "static VALUE " + decl.strip()))
+        #
+        # Two things this scan used to key on that are not the property being tested:
+        #
+        #   INDENTATION. `^[ \t]+static` is a style convention doing duty for storage
+        #   duration. A body written flush left -- generated code, a macro-heavy Init, a
+        #   file that never saw a formatter -- declares the same slot with the same defect
+        #   and matched nothing, and the file then reported 0 slots. Function BODY SPANS say
+        #   the same thing without asking the author to indent.
+        #
+        #   `static` IMMEDIATELY FOLLOWED BY `VALUE`. `static volatile VALUE cache;` is the
+        #   idiom a developer reaches for precisely when a slot is written in one call and
+        #   read in another -- the shape this predicate is about -- and it was the one
+        #   spelling the pattern could not see. Qualifiers are allowed on either side of
+        #   `static` now (LOCAL_QUAL), which also picks up `static thread_local VALUE`.
+        pat = re.compile(r"\b" + LOCAL_QUAL + r"static\s+" + LOCAL_QUAL
+                         + r"VALUE\s+([^;=(){}]+)[;=]")
+        for a, b in self.func_spans.get(path, ()):
+            for m in pat.finditer(src, a, b):
+                # An INDENTED class member matches this pattern too -- which is how the
+                # sweep had accidental, bare-keyed recall on class statics before
+                # class_scopes existed. Keeping both would report one slot twice, once
+                # under a key that cannot match `rb_global_variable(&Registry::cache)`.
+                if any(x <= m.start() < y for x, y in member_spans):
+                    continue
+                for decl in split_args(m.group(1)):
+                    nm, arr, ptr = declarator(decl)
+                    if nm and not ptr:
+                        # A function-local static is internal to its TU by construction:
+                        # nothing outside the file can even name it.
+                        self.slots.append(Slot(path, m.start(), nm + arr, nm, "scalar",
+                                               re.sub(r"\s+", " ", m.group(0)).strip()
+                                               .rstrip(";=").rstrip() + ";",
+                                               scope=path if path.suffix in TU_EXT
+                                               else None))
 
     def _class_member_slots(self, path, qual, boff, body):
         """`static VALUE` DATA MEMBERS of one C++ class body, keyed `Class::member`.
@@ -905,6 +1048,13 @@ class Tree:
         head = unit.strip()
         if not head or head.startswith("typedef") or re.match(r"^\s*extern\b", head):
             return
+        # INTERNAL LINKAGE, decided on the storage-class specifier and nothing else. `static`
+        # anywhere ahead of the declarator makes this object private to the file, so it is
+        # scoped; `EXTERN VALUE x;` and a bare `VALUE rb_mVernier;` are one object tree-wide
+        # and stay unscoped. The declarator itself is cut off first, or an initialiser
+        # mentioning `static` in a nested expression would flip the linkage.
+        scope = (path if path.suffix in TU_EXT
+                 and re.search(r"\bstatic\b", split_top_off(unit, "=")[0][1]) else None)
         body_open = unit.find("{")
         # (1) `static struct { ... } _stackprof;` / `static struct tag { ... } x;`
         if body_open >= 0:
@@ -916,10 +1066,10 @@ class Tree:
                 for decl in split_args(unit[close + 1:].rstrip().rstrip(";")):
                     nm, arr, ptr = declarator(decl)
                     if nm and not ptr:
-                        self.objects[nm] = (path, head_off)
+                        self.objects[nm] = (path, head_off, scope)
                         self._struct_slots(path, head_off, nm + arr, nm,
                                            unit[body_open + 1:close], path,
-                                           off + body_open + 1, 0)
+                                           off + body_open + 1, 0, scope)
                 return
             # An INITIALISER brace, not an aggregate body. `static struct common_field
             # common_http_fields[] = { ... };` (unicorn common_field_optimization.h:17)
@@ -946,8 +1096,8 @@ class Tree:
             for decl in split_args(d.group(2)):
                 nm, arr, ptr = declarator(decl)
                 if nm and not ptr:
-                    self.objects[nm] = (path, head_off)
-                    self._struct_slots(path, head_off, nm + arr, nm, *sub, 0)
+                    self.objects[nm] = (path, head_off, scope)
+                    self._struct_slots(path, head_off, nm + arr, nm, *sub, 0, scope)
             return
         # (3) a bare `static VALUE x, y[N];` / `VALUE rb_mVernier;` / `EXTERN VALUE x;`.
         #
@@ -972,9 +1122,11 @@ class Tree:
                 nm, arr, ptr = declarator(decl)
                 if nm:
                     self.slots.append(Slot(path, head_off, nm + arr, nm,
-                                           "ptr" if ptr else "scalar", unit.strip()))
+                                           "ptr" if ptr else "scalar", unit.strip(),
+                                           scope=scope))
 
-    def _struct_slots(self, opath, ooff, prefix, root, body, bpath, boff, depth):
+    def _struct_slots(self, opath, ooff, prefix, root, body, bpath, boff, depth,
+                      scope=None):
         """Enumerate VALUE members of a file-scope object, recursively.
 
         rbtrace needs two levels -- `rbtracer` -> `rbtracer_t list[MAX_TRACERS]` ->
@@ -1008,7 +1160,7 @@ class Tree:
                     if nm and not ptr:
                         self._struct_slots(opath, ooff, "%s.%s%s" % (prefix, nm, arr),
                                            root, s[inner_open + 1:close], bpath,
-                                           moff + inner_open + 1, depth + 1)
+                                           moff + inner_open + 1, depth + 1, scope)
                 continue
             m = re.match(r"^(?:const\s+|volatile\s+|_Atomic\s+|mutable\s+)*"
                          r"(?:(struct|union)\s+)?(\w+)\s+(.+)$", s, re.S)
@@ -1021,7 +1173,8 @@ class Tree:
                     if nm:
                         self.slots.append(
                             Slot(bpath, moff, "%s.%s%s" % (prefix, nm, arr), root,
-                                 "ptr" if ptr else "field", s.strip(), opath, ooff))
+                                 "ptr" if ptr else "field", s.strip(), opath, ooff,
+                                 scope))
                 continue
             sub = self.struct_body(tname)
             if sub is not None:
@@ -1029,7 +1182,7 @@ class Tree:
                     nm, arr, ptr = declarator(decl)
                     if nm and not ptr:
                         self._struct_slots(opath, ooff, "%s.%s%s" % (prefix, nm, arr),
-                                           root, *sub, depth + 1)
+                                           root, *sub, depth + 1, scope)
             elif tname not in TYPE_KW and not re.match(
                     r"^(u?int\w*|size_t|ssize_t|time_t|pid_t|key_t|bool|ID|st_table"
                     r"|pthread\w*|FILE|off_t|socklen_t|uid_t|gid_t|mode_t|dev_t)$", tname):
@@ -1040,10 +1193,19 @@ class Tree:
     # -- stage 2: sources ----------------------------------------------------
 
     def sources(self, slot):
-        """[(rhs, path, offset, owner)] -- every assignment reaching this slot."""
-        if slot.key in self._src_memo:
-            return self._src_memo[slot.key]
+        """[(rhs, path, offset, owner)] -- every assignment reaching this slot.
+
+        An internal-linkage slot is searched in ITS OWN FILE ONLY, plus the macro-paste
+        expansion pool, which has no file attribution to give. That is not an optimisation:
+        no other translation unit can name the object, so a `cache = rb_str_new2(...)` in
+        another file is a store to a DIFFERENT slot of the same name, and reading it here is
+        how one file's registration came to discharge another file's store.
+        """
+        if slot.ident in self._src_memo:
+            return self._src_memo[slot.ident]
         out = []
+        pool = ([(slot.scope, self.files[slot.scope])] if slot.scope in self.files
+                else list(self.files.items())) + [(None, self.pasted)]
         if slot.kind == "scalar" or "." not in slot.key:
             # A C++ static data member is spelled `Registry::cache` from outside the class
             # and bare `cache` from inside its own methods, and both name ONE object. So
@@ -1059,7 +1221,7 @@ class Tree:
                     re.escape(p) for p in scope.split("::"))
             pat = re.compile(r"(?<![\w.>])%s%s\s*(?:\[[^\[\]]*\])?\s*=(?!=)"
                              % (qual, re.escape(name)))
-            for path, src in list(self.files.items()) + [(None, self.pasted)]:
+            for path, src in pool:
                 for m in pat.finditer(src):
                     out.append((rhs_after(src, m.end() - 1), path, m.start(), None))
         else:
@@ -1069,33 +1231,51 @@ class Tree:
             # and the red reports UNSOURCED instead of naming the parameter it swallows.
             pat = re.compile(r"([A-Za-z_]\w*)\s*(?:\.|->)\s*%s\b\s*(?:\[[^\[\]]*\])?\s*=(?!=)"
                              % re.escape(slot.field))
-            for path, src in list(self.files.items()) + [(None, self.pasted)]:
+            for path, src in pool:
                 for m in pat.finditer(src):
                     out.append((rhs_after(src, m.end() - 1), path, m.start(), m.group(1)))
-        self._src_memo[slot.key] = out
+        self._src_memo[slot.ident] = out
         return out
 
     # -- stage 3: registrations and wraps ------------------------------------
 
     def _index_registrations(self):
-        """[(kind, normalised target, path, line)] for every GC registration in the tree."""
+        """[(kind, normalised target, path, line, offset)] for every GC registration.
+
+        The OFFSET is what separates the two primitives. `rb_global_variable(&v)` and
+        `rb_gc_register_address(&v)` root the ADDRESS: the GC re-reads the slot at every
+        mark, so a store made an hour later is covered and the call's position is
+        irrelevant. `rb_gc_register_mark_object(v)` roots the VALUE the expression evaluated
+        to at that instant -- gc.c pushes it onto vm->mark_object_ary and never looks at the
+        C variable again. Reassign the slot afterwards and the new object is rooted by
+        nothing while the sweep, matching on the name alone, reported the slot discharged.
+        """
         out = []
         for path, src in self.files.items():
             for name, args, s, _e in find_calls(src):
                 if not args:
                     continue
                 if REGISTER_SLOT.match(name) and args[0].strip().startswith("&"):
-                    out.append(("registered-slot", norm(args[0]), path, line_at(src, s)))
+                    out.append(("registered-slot", norm(args[0]), path,
+                                line_at(src, s), s))
                 elif REGISTER_VALUE.match(name):
-                    out.append(("registered-value", norm(args[0]), path, line_at(src, s)))
+                    out.append(("registered-value", norm(args[0]), path,
+                                line_at(src, s), s))
         return out
 
     def _index_published(self):
-        """{slot key -> (call, path, line)} for slots handed to rb_define_const/rb_const_set.
+        """{slot key -> [(call, path, line, offset)]} for slots handed to rb_define_const.
 
         The VALUE argument is the last one in both signatures, and it has to be the slot
         itself: `rb_define_const(mod, "X", INT2NUM(BUF_SIZE))` publishes a temporary and
         roots nothing of ours.
+
+        Publication is a VALUE rooting, exactly like rb_gc_register_mark_object: what the
+        constant table holds is the object the argument evaluated to, not the C slot. A
+        fixture that publishes one String and then stores a second into the same static has
+        one rooted object and one unrooted one, and reported HITS 0. So the offset is kept
+        and every site is kept -- a slot published twice needs both positions before any of
+        them can be called the one that covers a store.
         """
         out = {}
         for path, src in self.files.items():
@@ -1103,15 +1283,23 @@ class Tree:
                 if name not in ("rb_define_const", "rb_const_set", "rb_define_global_const"):
                     continue
                 if args:
-                    out.setdefault(norm(args[-1]), (name, path, line_at(src, s)))
+                    out.setdefault(norm(args[-1]), []).append(
+                        (name, path, line_at(src, s), s))
         return out
 
     def _index_wraps(self):
-        """{object name -> (dtype, dmark, path, line)} for wrapped file-scope objects.
+        """{(scope, object name) -> (dtype, dmark, path, line, dest)} for wrapped objects.
 
         rbtrace's `TypedData_Wrap_Struct(rb_cObject, &rbtrace_type, NULL)` is the control on
         the other side: it names a dtype with a real dmark but hands it NULL, so `rbtracer`
         never appears here and its fields stay in scope.
+
+        `dest` is where the WRAPPER went, and it is the fourth thing this rule has to know.
+        A dmark only runs while the wrapper it belongs to is itself reachable from a GC
+        root; a wrapper that is thrown away marks nothing, so handing the object's fields
+        off to sweep_unmarked.py routes them to a walk that will find a correct-looking
+        dmark and clear them. See wrapper_dest for what the classification can and cannot
+        prove.
         """
         out = {}
         for path, src in self.files.items():
@@ -1121,15 +1309,68 @@ class Tree:
                     continue
                 dtype = None
                 for a in args:
-                    t = a.strip()
-                    if t.startswith("&") and norm(t) in self.dtypes:
-                        dtype = norm(t)
+                    tk = a.strip()
+                    if tk.startswith("&") and norm(tk) in self.dtypes:
+                        dtype = norm(tk)
                 for a in args:
-                    t = norm(a.strip())
-                    if a.strip().startswith("&") and t in self.objects:
-                        out[t] = (dtype, self.dmark_of(dtype) if dtype else None,
-                                  path, line_at(src, s))
+                    tk = norm(a.strip())
+                    if not a.strip().startswith("&") or tk not in self.objects:
+                        continue
+                    _op, _oo, oscope = self.objects[tk]
+                    # An object with internal linkage cannot be addressed from another TU,
+                    # so a wrap call in a different file is wrapping a different object.
+                    if oscope is not None and oscope != path:
+                        continue
+                    out[(oscope, tk)] = (dtype, self.dmark_of(dtype) if dtype else None,
+                                         path, line_at(src, s), wrapper_dest(src, s))
         return out
+
+
+def wrapper_dest(src, call_start):
+    """Where did a TypedData_Wrap_Struct result go? ("discarded"|"assign"|"other", target).
+
+    Read backwards from the call name over whitespace and classify the one character that
+    decides it:
+
+      `;` `{` `}` `:` or start of file  -> DISCARDED. The statement is the call and nothing
+                                           else; the wrapper is unreachable the moment the
+                                           statement ends.
+      `=` (not `==`, `!=`, `<=`, ...)   -> ASSIGN, and the normalised left-hand side comes
+                                           back with it, so the caller can ask whether THAT
+                                           slot is rooted.
+      anything else                     -> OTHER.
+
+    THE FLOOR, AND IT IS DELIBERATE. "other" is every shape this pass declines to judge:
+    `return TypedData_Wrap_Struct(...)`, a wrap nested inside another call, a wrap assigned
+    to a LOCAL, and `VALUE obj = TypedData_Wrap_Struct(...)` -- which the backwards scan
+    reads as an assignment to `obj` and then fails to resolve to a file-scope slot, so it
+    lands in "other" as well. Those are not reported.
+
+    That covers the ordinary allocator cfunc -- wrap, then hand the wrapper to Ruby, which
+    roots it wherever the Ruby program keeps it -- and it is the reason the strict reading
+    ("discharge only when the wrapper provably reaches a root") was rejected: it makes the
+    single commonest correct shape in every C extension a hit, and this predicate's whole
+    design principle is that over-clearing is the sin. The cost of the floor is that a
+    wrapper stored into a local which is then dropped, or into a slot this pass cannot
+    resolve, still discharges the object's fields. Corpus effect of the strict reading vs
+    this one: identical, zero rows either way -- both wrapped sites in the corpus assign to
+    a file-scope slot that rb_global_variable roots.
+    """
+    i = call_start - 1
+    while i >= 0 and src[i] in " \t\r\n":
+        i -= 1
+    if i < 0 or src[i] in ";{}:":
+        return ("discarded", None)
+    if src[i] == "=" and (i == 0 or src[i - 1] not in "=!<>+-*/%&|^"):
+        j = i - 1
+        while j >= 0 and src[j] in " \t\r\n":
+            j -= 1
+        end = j + 1
+        while j >= 0 and (src[j].isalnum() or src[j] in "_.[]>-:"):
+            j -= 1
+        lhs = src[j + 1:end].strip()
+        return ("assign", norm(lhs)) if lhs else ("other", None)
+    return ("other", None)
 
 
 def split_top_off(text, sep):
@@ -1190,7 +1431,7 @@ def expand_macro(tree, fn, args):
     return None
 
 
-def returns_all(tree, pred, fn, rules, depth, seen):
+def returns_all(tree, pred, fn, rules, depth, seen, scope=None):
     """Does EVERY `return` in this in-tree function satisfy `pred`?
 
     rmagick is 44 of the corpus's slots on its own: every `Class_FooType` global is assigned
@@ -1217,20 +1458,24 @@ def returns_all(tree, pred, fn, rules, depth, seen):
         return False
     for ret in rets:
         e = unwrap(ret)
-        if pred(tree, e, rules, depth - 1, set(seen)):
+        if pred(tree, e, rules, depth - 1, set(seen), scope):
             continue
         if e.isidentifier():
             locals_ = [rhs_after(body, mm.end() - 1) for mm in
                        re.finditer(r"(?<![\w.>])%s\s*=(?!=)" % re.escape(e), body)]
-            if locals_ and all(pred(tree, l, rules, depth - 1, set(seen))
+            if locals_ and all(pred(tree, l, rules, depth - 1, set(seen), scope)
                                for l in locals_):
                 continue
         return False
     return True
 
 
-def is_immediate(tree, expr, rules, depth=3, seen=None):
-    """Provably an immediate VALUE -- one GC never collects. Unknown means False."""
+def is_immediate(tree, expr, rules, depth=3, seen=None, scope=None):
+    """Provably an immediate VALUE -- one GC never collects. Unknown means False.
+
+    `scope` is the translation unit the expression was read in, so a bare identifier
+    resolves to the internal-linkage slot of that file before any tree-wide one.
+    """
     seen = seen if seen is not None else set()
     e = unwrap(expr)
     if not e:
@@ -1242,11 +1487,12 @@ def is_immediate(tree, expr, rules, depth=3, seen=None):
     if e.isidentifier():
         if e in IMMEDIATE_CONST:
             return True
-        if depth <= 0 or e in seen or e not in tree.scalars:
+        sl = _slot_named(tree, e, scope)
+        if depth <= 0 or (scope, e) in seen or sl is None:
             return False
-        seen.add(e)
-        srcs = [r for r, _p, _o, _w in tree.sources(_slot_named(tree, e))]
-        return bool(srcs) and all(is_immediate(tree, s, rules, depth - 1, seen)
+        seen.add((scope, e))
+        srcs = [r for r, _p, _o, _w in tree.sources(sl)]
+        return bool(srcs) and all(is_immediate(tree, s, rules, depth - 1, seen, sl.scope)
                                   for s in srcs)
     fn, args = split_call(e)
     if fn is None:
@@ -1272,11 +1518,11 @@ def is_immediate(tree, expr, rules, depth=3, seen=None):
     if depth > 0:
         exp = expand_macro(tree, fn, args or [])
         if exp is not None and exp != e:
-            return is_immediate(tree, exp, rules, depth - 1, seen)
+            return is_immediate(tree, exp, rules, depth - 1, seen, scope)
     return False
 
 
-def is_const_table(tree, expr, rules, depth=3, seen=None):
+def is_const_table(tree, expr, rules, depth=3, seen=None, scope=None):
     """Provably reachable from the constant table (or a core object the VM roots)."""
     seen = seen if seen is not None else set()
     e = unwrap(expr)
@@ -1288,13 +1534,14 @@ def is_const_table(tree, expr, rules, depth=3, seen=None):
         # statics -- bootsnap's rb_cBootsnap_CompileCache_UNCOMPILABLE is an rb_const_get
         # result this same sweep reports as CONST-LOOKUP. Testing the pattern first
         # discharged an ALIAS of a slot the sweep was concurrently reporting as a hit.
-        if e in tree.scalars:
-            if depth <= 0 or e in seen:
+        sl = _slot_named(tree, e, scope)
+        if sl is not None:
+            if depth <= 0 or (scope, e) in seen:
                 return False
-            seen.add(e)
-            srcs = [r for r, _p, _o, _w in tree.sources(_slot_named(tree, e))]
-            return bool(srcs) and all(is_const_table(tree, s, rules, depth - 1, seen)
-                                      for s in srcs)
+            seen.add((scope, e))
+            srcs = [r for r, _p, _o, _w in tree.sources(sl)]
+            return bool(srcs) and all(
+                is_const_table(tree, s, rules, depth - 1, seen, sl.scope) for s in srcs)
         return bool(CORE_OBJ.match(e))
     fn, args = split_call(e)
     if fn is None:
@@ -1304,8 +1551,8 @@ def is_const_table(tree, expr, rules, depth=3, seen=None):
     if depth > 0:
         exp = expand_macro(tree, fn, args or [])
         if exp is not None and exp != e:
-            return is_const_table(tree, exp, rules, depth - 1, seen)
-    return returns_all(tree, is_const_table, fn, rules, depth, seen)
+            return is_const_table(tree, exp, rules, depth - 1, seen, scope)
+    return returns_all(tree, is_const_table, fn, rules, depth, seen, scope)
 
 
 def is_const_lookup(tree, expr):
@@ -1314,11 +1561,67 @@ def is_const_lookup(tree, expr):
     return bool(fn and CONST_LOOKUP.match(fn))
 
 
-def _slot_named(tree, name):
-    for s in tree.slots:
-        if s.key == name:
-            return s
-    return Slot(None, 0, name, name, "scalar", name)
+def _slot_named(tree, name, scope=None):
+    """The scalar slot a bare identifier names, seen from `scope`. None if unknown.
+
+    The file's own internal-linkage slot wins over a tree-wide one of the same name, which
+    is the resolution C itself performs.
+    """
+    return tree.scalars.get((scope, name)) or tree.scalars.get((None, name))
+
+
+# ------------------------------------------------------- value-rooting position
+
+
+def _store_after(tree, sources, path, off, scope=None):
+    """Describe a store this VALUE rooting cannot cover, or None if it covers them all.
+
+    `rb_gc_register_mark_object(v)` and `rb_define_const(m, "N", v)` both root the OBJECT
+    the argument evaluated to. Only the stores that already happened are covered. "Already
+    happened" is approximated as: same file, lower byte offset. The approximation is
+    one-directional on purpose -- it can call a store LATE that in fact runs earlier (a
+    helper defined above the Init that assigns from a Ruby-callable method later, read the
+    other way round), and that costs a false positive, which is the direction this predicate
+    is allowed to be wrong in. It cannot call a store EARLY that runs later.
+
+    A store that only exists inside a macro-paste expansion has no position at all, so it is
+    never covered: an unknown position is not an early one.
+    """
+    for rhs, spath, soff, _w in sources:
+        if spath is not None and spath == path and soff < off:
+            continue
+        # A store the OTHER rules already prove safe is not a store that outruns the
+        # rooting. `pat = Qnil` cannot leave an unrooted collectable object in the slot, and
+        # neither can `k = rb_define_class(...)`. date 3.5.1 is the case that forced this
+        # and it is a clean measurement of the difference: `regcomp()` compiles a Regexp,
+        # freezes it and hands it to rb_gc_register_mark_object, and the thirty
+        # `static VALUE pat = Qnil;` it feeds are each written exactly once behind a
+        # NIL_P guard. Counting the Qnil initialisers as later stores reported the gem's
+        # correct one-shot lazy-registration idiom as a defect.
+        if is_immediate(tree, rhs, ALL_RULES, scope=scope) \
+                or is_const_table(tree, rhs, ALL_RULES, scope=scope):
+            continue
+        if spath is None:
+            return "<macro-expansion>"
+        return "%s:%d" % (spath.relative_to(tree.root), line_at(tree.files[spath], soff))
+    return None
+
+
+def _slot_rooted(tree, slot, rules):
+    """Is this slot handed to the GC by ANY registration or publication? Generously.
+
+    Used only to decide whether a TypedData wrapper stored into a file-scope slot is
+    provably unrooted, so the generosity is the safe direction: position is ignored and any
+    registration kind counts. "Unrooted" here has to mean nothing anywhere claims it.
+    """
+    for kind, target, rpath, _rl, _ro in tree.registrations:
+        if kind in rules and target == slot.key \
+                and (slot.scope is None or rpath == slot.scope):
+            return True
+    for cand in tree.published.get(slot.key, ()):
+        if slot.scope is None or cand[1] == slot.scope:
+            return True
+    return False
 
 
 # ------------------------------------------------------- the sweep
@@ -1372,17 +1675,42 @@ def sweep(tree, name, rules=ALL_RULES):
         # -- registration. Checked FIRST, so stackprof's registered greens discharge on the
         #    registration rather than on the `wrapped` hand-off -- acceptance item 2 is a
         #    claim about rb_global_variable, and it has to be tested as one.
-        reg = None
-        for kind, target, rpath, rline in tree.registrations:
+        #
+        #    Two independent narrowings, and both of them close a way a registration for
+        #    one object discharged another:
+        #
+        #    SCOPE. An internal-linkage slot can only be registered from its own file. A
+        #    `rb_global_variable(&cache)` in a.c says nothing about b.c's own `static VALUE
+        #    cache`, and matching on the name alone made one call discharge both.
+        #
+        #    POSITION, for `registered-value` only. rb_gc_register_mark_object roots the
+        #    VALUE the argument evaluated to, not the slot; the C variable is never read
+        #    again. So the call covers the stores that PRECEDE it and nothing after. A
+        #    conservative textual reading of "precedes": same file, lower offset. It is not
+        #    a control-flow order and does not claim to be -- a helper defined above Init
+        #    and called from a Ruby method later reads as earlier here -- which is why the
+        #    stronger half of the rule is the FILE, and why the residual is documented
+        #    rather than hidden. rb_global_variable / rb_gc_register_address are exempt by
+        #    construction: they root the ADDRESS and the GC re-reads the slot every mark.
+        reg = late = None
+        for kind, target, rpath, rline, roff in tree.registrations:
             if kind not in rules:
+                continue
+            if slot.scope is not None and rpath != slot.scope:
                 continue
             tc, sc = target.split("."), slot.key.split(".")
             hit = target == slot.key
             if not hit and len(sc) > 1 and len(tc) == len(sc) and tc[1:] == sc[1:]:
                 hit = tc[0] in owners        # a pointer into the object, not the object
-            if hit:
-                reg = (kind, rpath, rline)
-                break
+            if not hit:
+                continue
+            after = (kind == "registered-value"
+                     and _store_after(tree, sources, rpath, roff, slot.scope))
+            if after:
+                late = late or (kind, rpath, rline, after)
+                continue
+            reg = (kind, rpath, rline)
+            break
         if reg:
             r.discharges.append((reg[0], rel, line, slot.key,
                                  "%s at %s:%d" % (
@@ -1400,9 +1728,10 @@ def sweep(tree, name, rules=ALL_RULES):
         # static; a predicate that flags it is a predicate nobody reads twice.
         kinds = set()
         for rhs, _p, _o, _w in sources:
-            if "immediate" in rules and is_immediate(tree, rhs, rules):
+            if "immediate" in rules and is_immediate(tree, rhs, rules, scope=slot.scope):
                 kinds.add("immediate")
-            elif "const-table" in rules and is_const_table(tree, rhs, rules):
+            elif "const-table" in rules and is_const_table(tree, rhs, rules,
+                                                           scope=slot.scope):
                 kinds.add("const-table")
             else:
                 kinds.add(None)
@@ -1421,16 +1750,46 @@ def sweep(tree, name, rules=ALL_RULES):
         # not available on the Rubies it supported -- and installs it on the next line with
         # rb_define_const. The rooting is real but it is at a USE site, not in any
         # assignment, so no source-based rule can see it.
-        pub = tree.published.get(slot.key) if "const-published" in rules else None
+        #
+        # It is a VALUE rooting, though, and it carries the same caveat as
+        # rb_gc_register_mark_object: the constant table holds the object the argument
+        # evaluated to. Publish one String, store a second into the same static, and the
+        # second is rooted by nothing -- so a publication only covers the stores that
+        # precede it, and the slot needs SOME publication that does.
+        pub = pub_late = None
+        for cand in (tree.published.get(slot.key, ()) if "const-published" in rules else ()):
+            if slot.scope is not None and cand[1] != slot.scope:
+                continue
+            after = _store_after(tree, sources, cand[1], cand[3], slot.scope)
+            if after:
+                pub_late = pub_late or (cand, after)
+            else:
+                pub = cand
+                break
         if pub:
             r.discharges.append(("const-published", rel, line, slot.key,
                                  "installed in the constant table by %s at %s:%d"
                                  % (pub[0], pub[1].relative_to(tree.root), pub[2])))
             continue
 
-        wrap = tree.wraps.get(slot.root)
+        # The `wrapped` hand-off is only a hand-off while the WRAPPER is itself rooted. A
+        # dmark runs when the GC marks the object that owns it, so a wrapper that is thrown
+        # away marks nothing at all, and routing the struct's fields to sweep_unmarked.py
+        # sends them to a walk that will find a correct-looking dmark and clear them -- an
+        # over-clear laundered through a second script. wrapper_dest carries the floor:
+        # only a DISCARDED result, or one assigned into a file-scope slot that is itself
+        # unrooted, counts as proof.
+        wrap = tree.wraps.get((slot.scope, slot.root))
+        wrap_unrooted = None
+        if wrap and wrap[4][0] == "discarded":
+            wrap_unrooted = "the wrapper is discarded -- the result of the call is not stored"
+        elif wrap and wrap[4][0] == "assign":
+            dest = _slot_named(tree, wrap[4][1], slot.scope)
+            if dest is not None and not _slot_rooted(tree, dest, rules):
+                wrap_unrooted = ("the wrapper is stored in `%s`, itself an unrooted "
+                                 "file-scope slot" % wrap[4][1])
         if slot.kind != "scalar" and "wrapped" in rules and wrap and wrap[1] \
-                and wrap[1] not in ("NULL", "0"):
+                and wrap[1] not in ("NULL", "0") and not wrap_unrooted:
             r.discharges.append(("wrapped", rel, line, slot.key,
                                  "object `%s` wrapped with %s (.dmark = %s) at %s:%d "
                                  "-- routed to sweep_unmarked.py"
@@ -1444,8 +1803,8 @@ def sweep(tree, name, rules=ALL_RULES):
         #    "assigned a caller-supplied VALUE (Qnil)", which names the one source that is
         #    provably fine and hides `create_rb_buffer_pool()`, the one that is not.
         unsafe = [rhs for rhs, _p, _o, _w in sources
-                  if not (is_immediate(tree, rhs, ALL_RULES)
-                          or is_const_table(tree, rhs, ALL_RULES))]
+                  if not (is_immediate(tree, rhs, ALL_RULES, scope=slot.scope)
+                          or is_const_table(tree, rhs, ALL_RULES, scope=slot.scope))]
         lookups = sorted({split_call(unwrap(rhs))[0] for rhs in unsafe
                           if is_const_lookup(tree, rhs)})
         bare = sorted({unwrap(rhs) for rhs in unsafe
@@ -1485,6 +1844,21 @@ def sweep(tree, name, rules=ALL_RULES):
         if wrap:
             detail.append("object wrapped at %s:%d with dtype %s (.dmark = %s)"
                           % (wrap[2].relative_to(tree.root), wrap[3], wrap[0], wrap[1]))
+        if wrap_unrooted:
+            detail.append("wrapper NOT rooted: %s, so its dmark never runs" % wrap_unrooted)
+        # Name the rooting that was found and rejected. A hit whose reason line says only
+        # "assigned from rb_str_new2" on a slot that IS registered somewhere reads as a
+        # false positive; saying which call was found, and which store outran it, is the
+        # difference between a row a maintainer acts on and one they dismiss.
+        if late:
+            detail.append("rb_gc_register_mark_object at %s:%d roots the VALUE live at that "
+                          "call, not the slot -- the store at %s is not covered by it"
+                          % (late[1].relative_to(tree.root), late[2], late[3]))
+        if pub_late:
+            detail.append("%s at %s:%d publishes the VALUE live at that call, not the slot "
+                          "-- the store at %s is not covered by it"
+                          % (pub_late[0][0], pub_late[0][1].relative_to(tree.root),
+                             pub_late[0][2], pub_late[1]))
         for rhs, spath, soff, _w in sources[:6]:
             detail.append("store: %s:%d  %s = %s" % (
                 spath.relative_to(tree.root) if spath else "<macro-expansion>",
@@ -1723,15 +2097,300 @@ void Init_probe(void) {
 """
 
 
+# ---- GENERATED REDS FOR THE ROUND-9 REVIEW THREADS -------------------------------------
+#
+# Every one of these was measured on the PRE-FIX script and every one of them came back
+# GREEN, six of the eight with `slots 0` or a merged row -- a clean sheet produced by the
+# parser or the key, which is the exact failure this suite exists to catch. The corpus is
+# NEUTRAL on all of them (zero new hit rows across 99 trees), so without these fixtures
+# there is no evidence in the repository that any of the fixes does anything.
+
+RED_CROSS_TU_STATIC_A = """
+#include <ruby.h>
+
+/* a.c registers ITS OWN `cache`. Nothing here says anything about b.c's. */
+static VALUE cache;
+
+void Init_a(void) {
+    cache = rb_str_new2("a");
+    rb_global_variable(&cache);
+}
+"""
+
+RED_CROSS_TU_STATIC_B = """
+#include <ruby.h>
+
+/* A DIFFERENT OBJECT with the same name -- internal linkage, so b.c's `cache` and a.c's
+   are two slots that cannot see each other. Nothing registers this one. Pre-fix: the two
+   declarations deduped to one row by NAME, a.c's rb_global_variable discharged the merged
+   row, and this store vanished behind `slots 1/2 ... HITS 0`. */
+static VALUE cache;
+
+void Init_b(void) {
+    cache = rb_str_new2("b");
+}
+"""
+
+RED_VALUE_REG_REASSIGN = """
+#include <ruby.h>
+
+/* rb_gc_register_mark_object(v) roots the OBJECT the argument evaluated to -- gc.c pushes
+   it onto vm->mark_object_ary and never reads the C variable again. The second store puts
+   an object in the slot that nothing roots, and the first one stays rooted forever. */
+static VALUE cache;
+
+void Init_a(void) {
+    cache = rb_str_new2("a");
+    rb_gc_register_mark_object(cache);
+}
+
+void refresh(void) {
+    cache = rb_str_new2("b");
+}
+"""
+
+GREEN_VALUE_REG_ONE_SHOT = """
+#include <ruby.h>
+
+/* The counter-shape, and it is the commonest one: assign once, register, never touch it
+   again. kgio accept.c:500-501 is the corpus instance. This must stay discharged, or the
+   fix above has simply deleted the `registered-value` rule. */
+static VALUE localhost;
+
+void Init_a(void) {
+    localhost = rb_str_new2("127.0.0.1");
+    rb_gc_register_mark_object(localhost);
+}
+"""
+
+GREEN_VALUE_REG_IMMEDIATE_RESET = """
+#include <ruby.h>
+
+/* A later store of a PROVABLY IMMEDIATE value is not a later store: it cannot leave an
+   unrooted collectable object in the slot. date 3.5.1 forced this -- thirty
+   `static VALUE pat = Qnil;` lazily filled by a regcomp() that freezes and registers each
+   Regexp, behind a NIL_P guard. Counting the Qnil initialisers as reassignments reported a
+   correct one-shot lazy-registration idiom as a defect. */
+static VALUE cache = Qnil;
+
+void Init_a(void) {
+    cache = rb_str_new2("a");
+    rb_gc_register_mark_object(cache);
+}
+
+void reset(void) {
+    cache = Qnil;
+}
+"""
+
+RED_PUBLISHED_REASSIGN = """
+#include <ruby.h>
+
+/* rb_define_const publishes the object present AT THE CALL. The constant keeps the first
+   String alive; the second is in the C slot with nothing holding it. Pre-fix the
+   const-published rule cleared the slot on the name alone. */
+static VALUE cache;
+
+void Init_a(void) {
+    cache = rb_str_new2("a");
+    rb_define_const(rb_cObject, "CACHE", cache);
+}
+
+void refresh(void) {
+    cache = rb_str_new2("b");
+}
+"""
+
+RED_WRAPPER_DISCARDED = """
+#include <ruby.h>
+
+/* A dmark only runs while the WRAPPER that owns it is reachable from a root. This wrapper
+   is thrown away on the line it is created, so state_mark never runs and `state.held` is
+   marked by nothing. Pre-fix, any wrapping call with a non-NULL mark callback discharged
+   every field of the object -- handing them to sweep_unmarked.py, which finds a
+   correct-looking dmark and clears them. An over-clear laundered through a second script. */
+typedef struct { VALUE held; } state_t;
+static state_t state;
+
+static void state_mark(void *p) { state_t *s = (state_t *)p; rb_gc_mark(s->held); }
+
+static const rb_data_type_t state_type = {
+    "State", { state_mark, NULL, NULL, NULL }, 0, 0, 0
+};
+
+void Init_a(void) {
+    state.held = rb_str_new2("x");
+    TypedData_Wrap_Struct(rb_cObject, &state_type, &state);
+}
+"""
+
+GREEN_WRAPPER_ROOTED = """
+#include <ruby.h>
+
+/* stackprof's shape, and the only wrapped site the corpus has: the wrapper goes into a
+   file-scope slot that rb_global_variable roots, so the dmark really does run and the
+   fields really are predicate A's subject. Must stay discharged as `wrapped`. */
+typedef struct { VALUE held; } state_t;
+static state_t state;
+static VALUE gc_hook;
+
+static void state_mark(void *p) { state_t *s = (state_t *)p; rb_gc_mark(s->held); }
+
+static const rb_data_type_t state_type = {
+    "State", { state_mark, NULL, NULL, NULL }, 0, 0, 0
+};
+
+void Init_a(void) {
+    state.held = rb_str_new2("x");
+    gc_hook = TypedData_Wrap_Struct(rb_cObject, &state_type, &state);
+    rb_global_variable(&gc_hook);
+}
+"""
+
+GREEN_WRAPPER_RETURNED = """
+#include <ruby.h>
+
+/* THE FLOOR, PINNED AS A TEST rather than left as prose. An allocator cfunc wraps and
+   RETURNS the wrapper; where it ends up is decided by the Ruby program, which this sweep
+   does not read. Requiring a provably rooted target instead would make the single
+   commonest correct shape in every C extension a hit, so "other" is not reported -- and
+   that decision has to break loudly if somebody tightens the rule, rather than quietly
+   adding rows to every gem in the corpus. */
+typedef struct { VALUE held; } state_t;
+static state_t state;
+
+static void state_mark(void *p) { state_t *s = (state_t *)p; rb_gc_mark(s->held); }
+
+static const rb_data_type_t state_type = {
+    "State", { state_mark, NULL, NULL, NULL }, 0, 0, 0
+};
+
+static VALUE alloc(VALUE klass) {
+    state.held = rb_str_new2("x");
+    return TypedData_Wrap_Struct(klass, &state_type, &state);
+}
+
+void Init_a(void) { rb_define_alloc_func(rb_cObject, alloc); }
+"""
+
+RED_NAMESPACE_LINKAGE = """
+#include <ruby.h>
+
+/* A namespace is file scope and a linkage block is not a scope at all: all three statics
+   below have one slot each, alive for the whole process, invisible to the GC. `rooted` is
+   the load-bearing third -- a green enumerated INSIDE a namespace and then discharged by
+   name, so the descent is proven to be reading the bodies rather than skipping them. */
+namespace prof {
+
+static VALUE ns_cache;
+
+namespace inner {
+static VALUE deep_cache;
+}
+
+extern "C" {
+static VALUE rooted;
+}
+
+void setup(void) {
+    rooted = rb_str_new2("r");
+    rb_global_variable(&rooted);
+}
+
+}
+
+extern "C" void Init_probe(void) {
+    prof::ns_cache = rb_str_new2("n");
+    prof::inner::deep_cache = rb_ary_new();
+    prof::setup();
+}
+"""
+
+RED_THREAD_LOCAL = """
+#include <ruby.h>
+
+/* Thread-local storage is static storage that Ruby's root set does not reach, and
+   rb_global_variable roots ONE address while a TLS slot has one per thread -- so this is
+   the worse variant, not a milder one. Neither spelling was in TYPE_KW nor ALL-CAPS, so
+   the leading-token gate dropped the whole declaration: 0 slots, which reads as a file
+   with no statics in it. */
+thread_local VALUE tl_cache;
+static thread_local VALUE tl_static_cache;
+
+extern "C" void Init_probe(void) {
+    tl_cache = rb_str_new2("a");
+    tl_static_cache = rb_ary_new();
+}
+"""
+
+RED_UNINDENTED_LOCAL_STATIC = """
+#include <ruby.h>
+
+/* A function-local static at COLUMN ZERO. Same storage duration, same defect, and the old
+   scan required leading whitespace -- style standing in for storage class. 0 slots. */
+void Init_probe(void) {
+static VALUE cache;
+cache = rb_str_new2("a");
+}
+"""
+
+RED_QUALIFIED_LOCAL_STATIC = """
+#include <ruby.h>
+
+/* `static volatile VALUE` is the spelling a developer reaches for precisely when a slot is
+   written in one call and read in another -- this predicate's own subject -- and the
+   pattern required VALUE to follow `static` immediately, so it was the one shape that
+   could not be seen. 0 slots. */
+void Init_probe(void) {
+    static volatile VALUE cache;
+    static VALUE const *ptr;
+    cache = rb_str_new2("a");
+    (void)ptr;
+}
+"""
+
+GREEN_HEADER_STATIC_H = """
+#ifndef probe_h
+#define probe_h
+/* `static VALUE` in a HEADER is one object per INCLUDING translation unit, and the header
+   is not a translation unit at all. Scoping it to the header hides every store it has --
+   10 UNSOURCED rows across unicorn x2 and yajl-ruby, none of them the defect. Header
+   statics stay tree-wide keyed; the residual (two includers, one registration, one row) is
+   named in the TU_EXT comment. */
+static VALUE g_shared;
+#endif
+"""
+
+GREEN_HEADER_STATIC_C = """
+#include <ruby.h>
+#include "probe.h"
+
+void Init_probe(void) {
+    g_shared = rb_str_new2("x");
+    rb_global_variable(&g_shared);
+}
+"""
+
+
 def _sweep_source(src, rules=ALL_RULES, suffix=".cc"):
     """Sweep a one-file tree generated from a source string.
 
     Defaults to C++ because most generated fixtures here are; pass suffix=".c" for the
     ones whose shape is C, so the fixture exercises the same file set a C gem would.
     """
+    return _sweep_sources({"probe" + suffix: src}, rules)
+
+
+def _sweep_sources(files, rules=ALL_RULES):
+    """Sweep a generated tree of {relative filename: source}.
+
+    Several of the shapes below are only expressible across MORE THAN ONE FILE -- internal
+    linkage is per translation unit, so a one-file fixture cannot state the question at all.
+    """
     tmp = pathlib.Path(tempfile.mkdtemp()) / "ext"
     tmp.mkdir(parents=True)
-    (tmp / ("probe" + suffix)).write_text(src)
+    for rel, src in files.items():
+        (tmp / rel).write_text(src)
     return _sweep(tmp, rules)
 
 
@@ -1810,11 +2469,19 @@ def self_test(pool):
           % (kdisc["localhost"][4] if "localhost" in kdisc else "not discharged at all"),
           sorted(kdisc))
     # The brief said localhost is kgio's ONLY file-static VALUE. It is not: 12 declarations
-    # across 6 files, 9 distinct names, and one of the nine does NOT discharge. Pinned here
-    # so the next reader gets the measured count rather than the claim.
-    check(kg.slots == 9 and kg.decls == 12,
-          "kgio has %d file-scope VALUE declarations / %d distinct names, not 1"
-          % (kg.decls, kg.slots))
+    # across 6 files -- and 12 SLOTS, not 9. The old figure of "9 distinct names" was
+    # measuring the cross-TU merge itself: `sym_wait_readable` is declared `static` in both
+    # poll.c and read.c, and `sym_wait_writable` in poll.c, write.c and writev.c. Those are
+    # five separate objects with two names, and internal linkage means no file can see
+    # another's. All five discharge as immediates, so the count moves and the verdict does
+    # not -- which is why this pin is a pin and not a regression.
+    kdup = [k for k in {s.key for s in Tree(kgio).slots}
+            if sum(1 for s in Tree(kgio).slots if s.key == k) > 1]
+    check(kg.slots == 12 and kg.decls == 12 and sorted(kdup) ==
+          ["sym_wait_readable", "sym_wait_writable"],
+          "kgio has %d file-scope VALUE declarations and %d slots -- one per translation "
+          "unit, so the two names declared static in more than one file (%s) stay separate"
+          % (kg.decls, kg.slots, ", ".join(sorted(kdup)) or "none"))
     check("cClientSocket" in {h[3] for h in kg.hits},
           "kgio cClientSocket reports: `Kgio.accept_class=` stores a caller-supplied class "
           "into an unregistered static (accept.c:50)",
@@ -1990,6 +2657,146 @@ def self_test(pool):
           "rb_vm_register_global_object and therefore PINS -- it must stay discharged (%s)"
           % (gdu_dis["eOk"][4] if "eOk" in gdu_dis else "NOT DISCHARGED"),
           [h[3] for h in gdu.hits] + sorted(gdu_dis))
+
+    # ---------------------------------------------------------------- round-9 threads
+    #
+    # Fifteen checks for eight review threads. Read the counter assertion in each one
+    # first: every one of these shapes was GREEN before the fix, and six of the eight were
+    # green because the parser found NOTHING. A check that only asks "is this key in hits"
+    # passes just as well on an empty index, which is the failure mode the whole suite is
+    # built around, so each red asserts the slot count it expects to have enumerated.
+
+    # 5l. CROSS-TU RED (thread 1). Two translation units, one name, one registration. The
+    #     fixture needs two files because internal linkage cannot be stated in one.
+    xtu = _sweep_sources({"a.c": RED_CROSS_TU_STATIC_A, "b.c": RED_CROSS_TU_STATIC_B})
+    xhits = {(h[1], h[3]) for h in xtu.hits}
+    xdisc = {(d[1], d[3]): d for d in xtu.discharges}
+    check(xtu.slots == 2 and xtu.decls == 2 and ("b.c", "cache") in xhits,
+          "cross-TU RED: two files each declaring `static VALUE cache` are TWO slots (%d "
+          "found from %d declarations), and b.c's unregistered one reports"
+          % (xtu.slots, xtu.decls), sorted(xhits))
+    check(("a.c", "cache") in xdisc
+          and xdisc[("a.c", "cache")][0] == "registered-slot"
+          and ("a.c", "cache") not in xhits,
+          "...while a.c's IS discharged by its own rb_global_variable -- the registration "
+          "has to still work per file, or the split has just deleted the rule",
+          sorted(xdisc))
+
+    # 5m. VALUE-REGISTRATION RED (thread 2), and both counter-shapes. rb_gc_register_
+    #     mark_object roots the object live at the call, not the slot.
+    vrr = _sweep_source(RED_VALUE_REG_REASSIGN, suffix=".c")
+    vhits = {h[3]: h for h in vrr.hits}
+    check(vrr.slots == 1 and "cache" in vhits
+          and "roots the VALUE live at that call" in " ".join(vhits["cache"][5]),
+          "registered-value RED: a store after rb_gc_register_mark_object is not covered by "
+          "it (%d slot(s), %d hit(s)), and the reason line says which call was rejected"
+          % (vrr.slots, len(vrr.hits)),
+          [h[3] for h in vrr.hits] + ["discharged:" + d[3] for d in vrr.discharges])
+    vrg = {d[3]: d for d in _sweep_source(GREEN_VALUE_REG_ONE_SHOT, suffix=".c").discharges}
+    check(vrg.get("localhost", ("",))[0] == "registered-value",
+          "registered-value GREEN: assign once, register, never reassign -- kgio's shape "
+          "must stay discharged (%s)"
+          % (vrg["localhost"][4] if "localhost" in vrg else "NOT DISCHARGED"), sorted(vrg))
+    vri = _sweep_source(GREEN_VALUE_REG_IMMEDIATE_RESET, suffix=".c")
+    vrid = {d[3]: d for d in vri.discharges}
+    check(not vri.hits and vrid.get("cache", ("",))[0] == "registered-value",
+          "registered-value GREEN: a later store of an IMMEDIATE cannot leave an unrooted "
+          "object, so it does not defeat the registration -- date 3.5.1's thirty "
+          "`static VALUE pat = Qnil;` behind a NIL_P guard (%s)"
+          % (vrid["cache"][4] if "cache" in vrid else "NOT DISCHARGED"),
+          [h[3] for h in vri.hits])
+
+    # 5n. PUBLICATION RED (thread 3). Same mechanism as 5m at a different call; msgpack at
+    #     5c is the green that must survive it.
+    pbr = _sweep_source(RED_PUBLISHED_REASSIGN, suffix=".c")
+    phits = {h[3]: h for h in pbr.hits}
+    check(pbr.slots == 1 and "cache" in phits
+          and "publishes the VALUE live at that call" in " ".join(phits["cache"][5]),
+          "const-published RED: rb_define_const publishes the object present at the call, "
+          "so a later store into the same static is rooted by nothing (%d slot(s), %d hit)"
+          % (pbr.slots, len(pbr.hits)),
+          [h[3] for h in pbr.hits] + ["discharged:" + d[3] for d in pbr.discharges])
+
+    # 5o. WRAPPER-ROOTING RED (thread 4), its green, and its FLOOR.
+    wdr = _sweep_source(RED_WRAPPER_DISCARDED, suffix=".c")
+    whits = {h[3]: h for h in wdr.hits}
+    check(wdr.slots == 1 and wdr.fields == 1 and "state.held" in whits
+          and "wrapper NOT rooted" in " ".join(whits["state.held"][5]),
+          "wrapper RED: a TypedData wrapper whose result is DISCARDED marks nothing, so the "
+          "object's fields may not be handed to sweep_unmarked.py (%d slot(s), %d field(s), "
+          "%d hit(s))" % (wdr.slots, wdr.fields, len(wdr.hits)),
+          [h[3] for h in wdr.hits] + ["discharged:" + d[3] for d in wdr.discharges])
+    wgr = _sweep_source(GREEN_WRAPPER_ROOTED, suffix=".c")
+    wgd = {d[3]: d for d in wgr.discharges}
+    check(not [h for h in wgr.hits if h[3] == "state.held"]
+          and wgd.get("state.held", ("",))[0] == "wrapped",
+          "wrapper GREEN: stackprof's shape -- wrapper into a slot rb_global_variable roots "
+          "-- stays a hand-off to predicate A (%s)"
+          % (wgd["state.held"][4] if "state.held" in wgd else "NOT DISCHARGED"),
+          [h[3] for h in wgr.hits] + sorted(wgd))
+    wrt = _sweep_source(GREEN_WRAPPER_RETURNED, suffix=".c")
+    wrd = {d[3]: d for d in wrt.discharges}
+    check(wrt.fields == 1 and wrd.get("state.held", ("",))[0] == "wrapped",
+          "wrapper FLOOR: a wrapper RETURNED from an allocator cfunc is not judged and stays "
+          "discharged -- the strict reading costs false positives on the commonest correct "
+          "shape in every C extension, and that trade is pinned, not remembered (%s)"
+          % (wrd["state.held"][4] if "state.held" in wrd else "NOT DISCHARGED"),
+          [h[3] for h in wrt.hits] + sorted(wrd))
+
+    # 5p. NAMESPACE / LINKAGE-BLOCK descent (thread 5). Reported as already covered by the
+    #     brace-disposition work; verified rather than believed, and pinned so it cannot
+    #     regress silently. The third static is a GREEN inside a namespace, so the check
+    #     proves the descent READ the body rather than merely not crashing on it.
+    nsr = _sweep_source(RED_NAMESPACE_LINKAGE)
+    nhits = {h[3] for h in nsr.hits}
+    ndisc = {d[3]: d for d in nsr.discharges}
+    check(nsr.slots == 3 and nsr.class_bodies == 0 and nhits == {"ns_cache", "deep_cache"},
+          "namespace/linkage RED: `namespace X {`, a NESTED namespace and `extern \"C\" {` "
+          "are walked THROUGH, not consumed as function bodies (%d slots, hits %s)"
+          % (nsr.slots, sorted(nhits) or "none"), sorted(nhits))
+    check(ndisc.get("rooted", ("",))[0] == "registered-slot",
+          "...and a namespace-scope static that IS registered discharges by name, which is "
+          "what says the descent read the body rather than skipped it (%s)"
+          % (ndisc["rooted"][4] if "rooted" in ndisc else "NOT DISCHARGED"), sorted(ndisc))
+
+    # 5q. THREAD-LOCAL (thread 6).
+    tlr = _sweep_source(RED_THREAD_LOCAL)
+    tlh = {h[3] for h in tlr.hits}
+    check(tlr.slots == 2 and tlh == {"tl_cache", "tl_static_cache"},
+          "thread_local RED: both spellings are static-duration slots outside every root "
+          "set Ruby scans (%d slots, hits %s) -- pre-fix the leading-token gate dropped the "
+          "declaration and the file measured 0 slots"
+          % (tlr.slots, sorted(tlh) or "none"), sorted(tlh))
+
+    # 5r. UNINDENTED function-local static (thread 7).
+    ulr = _sweep_source(RED_UNINDENTED_LOCAL_STATIC, suffix=".c")
+    check(ulr.slots == 1 and {h[3] for h in ulr.hits} == {"cache"},
+          "unindented function-local RED: storage duration comes from the FUNCTION SPAN, "
+          "not from leading whitespace (%d slot(s), hits %s)"
+          % (ulr.slots, sorted(h[3] for h in ulr.hits) or "none"),
+          [h[3] for h in ulr.hits])
+
+    # 5s. QUALIFIED function-local static (thread 8).
+    qlr = _sweep_source(RED_QUALIFIED_LOCAL_STATIC, suffix=".c")
+    check(qlr.slots == 1 and {h[3] for h in qlr.hits} == {"cache"},
+          "qualified function-local RED: `static volatile VALUE` is one slot, and the "
+          "`static VALUE const *ptr` beside it is still correctly rejected as a pointer "
+          "(%d slot(s), hits %s)"
+          % (qlr.slots, sorted(h[3] for h in qlr.hits) or "none"),
+          [h[3] for h in qlr.hits])
+
+    # 5t. HEADER carve-out. The scope split applies to translation units; a `static VALUE`
+    #     in a HEADER keeps its tree-wide key, or its stores -- which live in the .c that
+    #     includes it -- become invisible and the row reports UNSOURCED.
+    hdr = _sweep_sources({"probe.h": GREEN_HEADER_STATIC_H,
+                          "probe.c": GREEN_HEADER_STATIC_C})
+    hdd = {d[3]: d for d in hdr.discharges}
+    check(hdr.slots == 1 and not hdr.hits
+          and hdd.get("g_shared", ("",))[0] == "registered-slot",
+          "header carve-out GREEN: a header-declared static resolves its stores in the "
+          "including .c and discharges there (%d slot(s), %d hit(s)) -- scoping it to the "
+          "header raised 10 UNSOURCED rows across unicorn x2 and yajl-ruby, all noise"
+          % (hdr.slots, len(hdr.hits)), [h[3] for h in hdr.hits] + sorted(hdd))
 
     # 6. MUTATION TABLE. Disable each discharge rule in turn; a rule that can be removed
     #    without breaking a control is decorative and should be deleted. msgpack is in the
