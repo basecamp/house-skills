@@ -2765,6 +2765,41 @@ static VALUE b_wrap(VALUE k, Box *b) { return TypedData_Wrap_Struct(k, &b_type, 
 # marks a global and touches its parameter not at all, and `cb` cleared as
 # "marked pin (via helper)" -- an over-clear reached through the one tier still crediting
 # by association. `other` is the green half: a direct mark in the same body must survive.
+# THE SAME FIXTURE WITH A TEMPLATE-ID IN THE MEMBER-INITIALISER LIST (#30 review, P2).
+# `Derived() : Base<T>()` names a TYPE, and a type may be a template-id, which the shared
+# walk's qualified-name pattern did not spell -- it stopped at the `<`, found neither `(`
+# nor `{`, and REJECTED the constructor. A rejected constructor is not blanked, so its body
+# is scanned as class scope and `ctor_local` reports as a phantom member.
+#
+# THE TEMPLATE-ID MUST BE THE LAST OR THE ONLY INITIALISER, and the first cut of this
+# fixture got that wrong and therefore asserted NOTHING -- it passed with the walk deleted.
+# When another initialiser FOLLOWS the template-id, `blank_method_bodies` rejects the
+# constructor, resumes its scan mid-list, and mistakes that trailing `held(v)` for a method
+# head: `(v)` parses as a parameter list and the next token is the body `{`, so the body is
+# blanked BY ACCIDENT and the defect hides. Measured, with the walk mutated out:
+#
+#     : Base<VALUE>(), held(v)   ctor_local leaks = False   <- accidentally rescued
+#     : held(v), Base<VALUE>()   ctor_local leaks = True
+#     : Base<VALUE>()            ctor_local leaks = True    <- this fixture
+#
+# So the idiomatic spelling is the one that hides it, which is worth knowing on its own.
+# No tree in the 99 spells any of them, so this is pinned here or nowhere.
+RED_CXX_TMPL_INIT = """
+#include <ruby.h>
+template <typename T> class Base { public: Base() {} };
+class TBox : public Base<VALUE> {
+    public:
+        VALUE held = Qnil;      /* a member, unmarked: MUST report */
+        VALUE marked = Qnil;    /* a member, marked: must clear */
+        TBox(VALUE v) : Base<VALUE>() { VALUE ctor_local = v; rb_gc_mark(ctor_local); }
+        void mark() { rb_gc_mark(marked); }
+};
+static void t_mark(void *p) { TBox *b = static_cast<TBox *>(p); b->mark(); }
+static void t_free(void *p) { delete (TBox *)p; }
+static const rb_data_type_t t_type = { "tbox", { t_mark, t_free, }, };
+static VALUE t_wrap(VALUE k, TBox *b) { return TypedData_Wrap_Struct(k, &t_type, b); }
+"""
+
 RED_HELPER_PARAM = """
 #include <ruby.h>
 static VALUE g_root;
@@ -3205,6 +3240,21 @@ def self_test(base, siblings=()):
     check(not ({"local", "ctor_local"} & (fields | set(cleared))),
           "green (c++ init) a local inside a method body is not a field",
           sorted(fields | set(cleared)))
+
+    # ...and the same three claims when the member-initialiser list names a TEMPLATE-ID.
+    # `ctor_local` is the one that moves: a rejected constructor is never blanked, so its
+    # body is scanned as class scope and the local reports as a member. The two real
+    # members are asserted beside it so that a regression which indexes NOTHING -- and
+    # therefore also reports no `ctor_local` -- fails here rather than reading as green.
+    tcats, tfields = flagged_from_source(RED_CXX_TMPL_INIT, ".cc")
+    tcleared = cleared_from_source(RED_CXX_TMPL_INIT, ".cc")
+    check("held" in tfields and "marked" in tcleared
+          and not ({"ctor_local"} & (tfields | set(tcleared))),
+          "green (c++ template ctor-init) `TBox(VALUE v) : Base<VALUE>()` is a "
+          "constructor: its body is blanked, so `ctor_local` is not a field, while `held` "
+          "still reports and `marked` still clears",
+          "%s | fields %s | cleared %s"
+          % (sorted(tcats), sorted(tfields), sorted(tcleared)))
 
     # The helper tier credits only the arguments the callee actually marks.
     cats, fields = flagged_from_source(RED_HELPER_PARAM)

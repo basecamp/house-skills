@@ -1663,6 +1663,18 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
     #     `kill` arm is what keeps this from being a way to switch the kill off -- it shares
     #     every line with `walk` except the right-hand side.
     #
+    #     AND THE FOURTH, ALSO FROM THE #30 REVIEW: a write guarded by a conditional
+    #     OPERATOR rather than a conditional STATEMENT. There is no `if` here at all, so the
+    #     block test, `straight_line` and the braceless-arm test all agreed it dominates:
+    #
+    #       and-write   `out && (p = "safe"); return p;`      -- must STILL report
+    #       or-write    `out || (p = "safe"); return p;`      -- ditto
+    #       tern-write  `out ? (p = "safe") : 0; return p;`   -- ditto
+    #
+    #     On the path where the guard is false `p` still carries the interior, and both
+    #     spellings silently dropped rmagick's row when measured. `kill` remains the arm
+    #     that proves the kill is narrowed rather than switched off.
+    #
     #     THE FUNNEL IS ASSERTED IN EVERY ARM. A regression that empties the index prints
     #     `0 fn(s), 0 conversions` and would otherwise read as four passing greens.
     kill_src = """#include <ruby.h>
@@ -1688,6 +1700,9 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
         "late-kill": ('    q = p;\n    p = "safe";\n', "q", ["RETURNS-INTERIOR"]),
         "walk":      ('    p = p + 1;\n', "p", ["RETURNS-INTERIOR"]),
         "walk-call": ('    p = strchr(p, 47);\n', "p", ["RETURNS-INTERIOR"]),
+        "and-write": ('    out && (p = "safe");\n', "p", ["RETURNS-INTERIOR"]),
+        "or-write":  ('    out || (p = "safe");\n', "p", ["RETURNS-INTERIOR"]),
+        "tern-write":('    out ? (p = "safe") : 0;\n', "p", ["RETURNS-INTERIOR"]),
     }
     kr = {}
     for tag, (mid, ret, _want) in kill_arms.items():

@@ -480,6 +480,32 @@ _POST_DECL_WORD = re.compile(r"[A-Za-z_]\w*")
 _QUAL_NAME = re.compile(r"[A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*")
 
 
+def _skip_template_args(src, k):
+    """Past a balanced `<...>` template-argument list starting at `<`, or -1.
+
+    `Derived() : Base<T>()` -- a member-initialiser names a TYPE, and a type may be a
+    template-id, which `_QUAL_NAME` does not spell (found by Codex on the #30 review).
+    Nested `>>` needs no special case because each `>` decrements the depth on its own.
+
+    Bailing on `;`, `{` or `}` is what keeps a plain comparison from eating the rest of the
+    file: `a < b` never closes, and this returns -1, which `_skip_member_init` treats as a
+    reject exactly as it treats every other failure.
+    """
+    depth, n = 0, len(src)
+    while k < n:
+        c = src[k]
+        if c == "<":
+            depth += 1
+        elif c == ">":
+            depth -= 1
+            if depth == 0:
+                return k + 1
+        elif c in ";{}":
+            return -1
+        k += 1
+    return -1
+
+
 def _skip_member_init(src, k):
     """Past a constructor's member-initialiser list starting at the `:` at `k`, or -1.
 
@@ -506,6 +532,12 @@ def _skip_member_init(src, k):
         k = m.end()
         while k < n and src[k] in " \t\r\n":
             k += 1
+        if k < n and src[k] == "<":
+            k = _skip_template_args(src, k)
+            if k < 0:
+                return -1
+            while k < n and src[k] in " \t\r\n":
+                k += 1
         if k < n and src[k] == "(":
             close = match_paren(src, k)
         elif k < n and src[k] == "{":
@@ -824,6 +856,9 @@ def innermost_block(body, off, within=None):
 
 _BARE_ARM = re.compile(r"\b(?:else|do)\s*$")
 _ARM_HEAD = re.compile(r"\b(if|for|while|switch)\s*$")
+# A conditional OPERATOR guarding a write that has no conditional STATEMENT around it:
+# `len && (p = x);`, `len || (p = x);`, `len ? (p = x) : 0;`. See conditional_stmt.
+_COND_OP = re.compile(r"&&|\|\||\?")
 
 
 def conditional_stmt(body, off):
@@ -836,12 +871,33 @@ def conditional_stmt(body, off):
     the whole function and it reads as unconditional. openssl's `obj_to_asn1obj` is the
     shape -- two RETURNS-INTERIOR rows in four trees discharged on a write that runs only
     when the first call failed. Anything not recognised here stays UNCONDITIONAL, which is
-    the direction that kills; the recogniser is therefore kept to the two spellings that
-    cannot be anything else, `else`/`do` and a `)` closing an `if`/`for`/`while`/`switch`.
+    the direction that kills; the recogniser is therefore kept to the spellings that cannot
+    be anything else: `else`/`do`, a `)` closing an `if`/`for`/`while`/`switch`, and a
+    conditional OPERATOR earlier in the same statement.
+
+    THE OPERATOR CASE IS A STATEMENT WITH NO CONDITIONAL STATEMENT IN IT (found by Codex on
+    the #30 review, the fourth hole in this same test). A write can be guarded by `&&`,
+    `||` or `?:` without any `if` at all:
+
+        len && (p = "safe");            /* runs only when len is non-zero */
+        len ? (p = "safe") : 0;
+
+    Neither has a block, so the block test passes it; neither contains a transfer token, so
+    `straight_line` passes it; and its head ends in `(` rather than `)`, so the arm test
+    above passed it too. All three agreed it dominates, and on the `len == 0` path `p` still
+    carries the interior -- measured, both spellings silently drop rmagick's
+    RETURNS-INTERIOR row.
+
+    Reading it as "any `&&`/`||`/`?` earlier in the statement" over-reports: a comma
+    expression like `foo(a && b), p = x;` is not guarded and is called conditional anyway.
+    That is the safe direction here and deliberately so -- an unrecognised guard KILLS a
+    live row, an over-recognised one merely keeps a row a human then reads.
     """
     pre = body[:off]
     head = pre[max(pre.rfind(";"), pre.rfind("{"), pre.rfind("}")) + 1:].rstrip()
     if _BARE_ARM.search(head):
+        return True
+    if _COND_OP.search(head):
         return True
     if not head.endswith(")"):
         return False
