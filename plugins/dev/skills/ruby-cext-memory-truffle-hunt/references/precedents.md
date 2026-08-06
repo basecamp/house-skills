@@ -742,3 +742,33 @@ the whole time — `<out/>` where `<out>Employee List</out>` was expected, **exi
 Same quiet face as `rb_rescue` swallowing a `NoMethodError` on the IO sites and yielding an empty
 parse. **Assert the expected output, never the exit code**: a "didn't crash" regression test ships
 green over a broken build.
+
+### A detector calibrated against the defective build clears the fix and convicts the patch
+
+The worst false positive of round 9, because it was loud, confident and **inverted**. A lifetime
+probe for the mysql2 `prepare` transcoding bug reported **3,500 anomalies out of 3,500 prepares on
+the *patched* build** — which reads as the fix introducing a memory fault.
+
+The tell was the **100% rate**. A real memory fault is sporadic; *every single row* failing is the
+signature of a wrong constant, not a wrong pointer. The probe asserted
+`v.bytesize == padding.bytesize + 3`, and `padding + 3` is the **buggy** build's output: vanilla
+ships raw UTF-8, so a latin1 server reads `C3 A9` as two characters. The correctly patched build
+ships `E9` — one character, `padding + 2`.
+
+```
+variant=vanilla  returned bytes=[101, 195, 169]  bytesize=3   -> PASS
+variant=patched  returned bytes=[101, 233]       bytesize=2   -> FLAGGED as anomaly
+```
+
+So the "failure" was a 3,500/3,500 **re-confirmation of the defect**, showing up in an assertion
+that had baked the buggy behaviour in as correct.
+
+This is a nastier failure mode than a detector that cannot fail. A green-only harness is merely
+uninformative; this one actively **clears the defect and convicts the fix**, and it does so with a
+number that looks like overwhelming evidence. Two rules follow:
+
+- **Make the expected value variant-aware, or derive it from the specification rather than from a
+  run.** Any constant you obtained by observing the current build encodes the current build's bugs.
+- **Read a 100% rate as a bug in the harness until proven otherwise.** Round 4 recorded the mirror
+  of this — a green fixture that passed on `slots=0`. Both are the same disease: the assertion was
+  calibrated on the wrong side.
