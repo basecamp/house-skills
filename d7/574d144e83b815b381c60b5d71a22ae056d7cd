@@ -1,0 +1,21 @@
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/repro-class-b-psych.rb
+  s_e4dc5311e27670::t_0c2ebf5b252e6f 1-194
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/SKILL.md
+  s_e4dc5311e27670::t_0e52341d5112fe 47-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "d7574d144e83b815b381c60b5d71a22ae056d7cd",
+  "prompts": {},
+  "sessions": {
+    "s_e4dc5311e27670": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b4125831-cfa6-4336-96d7-6e128ffcf078",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
