@@ -64,8 +64,29 @@ and "no control broke" is a statement about the controls before it is one about 
   immediate         every source is Qnil/Qtrue/INT2FIX/ID2SYM(static intern)/another
                     immediate-only static.  stackprof's 28 `S(name)` symbols
   const-table       every source comes from rb_define_class/rb_define_module or is a core
-                    `rb_cFoo`/`rb_mFoo`/`rb_eFoo`. The DEFINING call installs the object
-                    under a permanent constant.  vernier vernier.cc:1246
+                    `rb_cFoo`/`rb_mFoo`/`rb_eFoo`. NOT because of the constant table: that
+                    marks MOVABLE (gc.c mark_const_entry_i -> gc_mark_internal, with a
+                    matching update_const_tbl_i on the compaction side), so a class IS
+                    relocated out from under a constant. The DEFINING call separately PINS.
+                    rb_define_class, rb_define_class_under, rb_define_class_id_under,
+                    rb_define_module{,_under,_id_under} and rb_struct_define_under all reach
+                    rb_vm_register_global_object (class.c:1495/1502/1552/1604/1608/1633/1639
+                    on 4.0.6; spelled rb_vm_add_root_module on 2.7-3.1) -- which is LITERALLY
+                    the function rb_gc_register_mark_object delegates to (gc.c:3437), and
+                    vm->mark_object_ary is marked by rb_gc_mark_vm_stack_values ->
+                    gc_mark_and_pin_internal. So const-table is `registered-value` reached by
+                    another spelling: a pin, permanent (RCLASS_IS_ROOT is set once and never
+                    cleared), and it OUTLIVES remove_const.
+                    That is why the rooted-vs-pinned distinction this skill is built on does
+                    not bite here -- and why okra, which caches a RUBY-defined class read via
+                    rb_const_get, relocates and SIGSEGVs while iconv's six
+                    rb_define_class_under statics do not. Measured 4.0.6/3.4.10/3.1.6
+                    arm64-darwin, 3/3, against an internal control (rb_class_new +
+                    rb_const_set, same Init frame, adjacent slots, same constant table) that
+                    relocated in every run.
+                    IF CONST_CALL IS EVER EXTENDED, the test is "does this call reach
+                    rb_vm_register_global_object?" -- NOT "does it install a constant?".
+                    vernier vernier.cc:1246
   const-published   the slot is the VALUE argument of rb_define_const / rb_const_set. The
                     rooting is at a USE site, so no source rule can see it.
                     msgpack extension_value_class.c:33
@@ -512,7 +533,14 @@ STATIC_INTERN = re.compile(r"^(?:rb_intern|rb_intern2|rb_intern3|rb_intern_str"
 CONST_CALL = re.compile(
     r"^(?:rb_define_class|rb_define_class_under|rb_define_class_id_under"
     r"|rb_define_module|rb_define_module_under|rb_define_module_id_under"
-    r"|rb_define_error|rb_struct_define_under)$")
+    r"|rb_struct_define_under)$")
+# rb_define_error is deliberately NOT here: NO SUCH CRUBY API EXISTS -- `grep -r
+# rb_define_error` over the whole 14,766-file 4.0.6 tree returns nothing. So the name could
+# only ever bind to a GEM-LOCAL helper, discharged without its body being read; a generated
+# red confirms it cleared `eBoom = rb_define_error(...)` whose helper returns rb_class_new,
+# a shape measured MOVABLE. Dropping it costs 0 corpus discharges.
+# rb_define_class_id_under_no_pin deliberately does NOT match either -- the anchors exclude
+# it, and it is the one define-shaped CRuby call that does not pin.
 # rb_struct_define_under is here and rb_struct_define is NOT, and the difference is the
 # whole msgpack case: `rb_struct_define(NULL, ...)` builds an ANONYMOUS Struct class that no
 # constant holds until somebody calls rb_define_const on it.
@@ -1255,14 +1283,19 @@ def is_const_table(tree, expr, rules, depth=3, seen=None):
     if not e:
         return False
     if e.isidentifier():
-        if CORE_OBJ.match(e):
-            return True
-        if depth <= 0 or e in seen or e not in tree.scalars:
-            return False
-        seen.add(e)
-        srcs = [r for r, _p, _o, _w in tree.sources(_slot_named(tree, e))]
-        return bool(srcs) and all(is_const_table(tree, s, rules, depth - 1, seen)
-                                  for s in srcs)
+        # A TREE-LOCAL slot wins over CORE_OBJ, always. `rb_[cme][A-Z]\w*` is CRuby's
+        # convention for core objects and ALSO the convention gems copy for their own
+        # statics -- bootsnap's rb_cBootsnap_CompileCache_UNCOMPILABLE is an rb_const_get
+        # result this same sweep reports as CONST-LOOKUP. Testing the pattern first
+        # discharged an ALIAS of a slot the sweep was concurrently reporting as a hit.
+        if e in tree.scalars:
+            if depth <= 0 or e in seen:
+                return False
+            seen.add(e)
+            srcs = [r for r, _p, _o, _w in tree.sources(_slot_named(tree, e))]
+            return bool(srcs) and all(is_const_table(tree, s, rules, depth - 1, seen)
+                                      for s in srcs)
+        return bool(CORE_OBJ.match(e))
     fn, args = split_call(e)
     if fn is None:
         return False
@@ -1641,6 +1674,55 @@ void Init_probe(void) {
 """
 
 
+RED_CORE_OBJ_SHADOW = """
+#include <ruby.h>
+
+/* `rb_[cme][A-Z]\\w*` is CRuby's convention for CORE objects and also the one gems copy for
+   their own statics. Here the sweep reports rb_cLocalThing as CONST-LOOKUP and must NOT
+   then clear `cached`, which is the same VALUE under another name. Clearing an alias of a
+   slot you are concurrently reporting is an over-clear wearing a discharge. */
+static VALUE rb_cLocalThing;
+static VALUE cached;
+
+void Init_probe(void) {
+    rb_cLocalThing = rb_const_get(rb_cObject, rb_intern("LocalThing"));
+    cached = rb_cLocalThing;
+}
+"""
+
+RED_DEFINE_ERROR = """
+#include <ruby.h>
+
+/* There is no rb_define_error in CRuby, so this name can only ever be a GEM-LOCAL helper.
+   Its body returns rb_class_new, which is MEASURED MOVABLE -- discharging on the name alone
+   cleared a class without reading its constructor. */
+static VALUE eBoom;
+
+static VALUE rb_define_error(const char *name, VALUE super) {
+    VALUE k = rb_class_new(super);
+    rb_ivar_set(k, rb_intern("@name"), rb_str_new_cstr(name));
+    return k;
+}
+
+void Init_probe(void) { eBoom = rb_define_error("Boom", rb_eStandardError); }
+"""
+
+GREEN_DEFINE_UNDER = """
+#include <ruby.h>
+
+/* The counter-shape, so a future tightening cannot quietly delete the rule: a real
+   rb_define_class_under reaches rb_vm_register_global_object and therefore PINS, and must
+   stay discharged. */
+static VALUE mX;
+static VALUE eOk;
+
+void Init_probe(void) {
+    mX = rb_define_module("X");
+    eOk = rb_define_class_under(mX, "Err", rb_eStandardError);
+}
+"""
+
+
 def _sweep_source(src, rules=ALL_RULES, suffix=".cc"):
     """Sweep a one-file tree generated from a source string.
 
@@ -1880,6 +1962,34 @@ def self_test(pool):
              if "common_http_fields[].value" in idis
              else "NOT DISCHARGED (absent, not cleared)"),
           [h[3] for h in ing.hits] + sorted(idis))
+
+    # 5j. const-table's two LATENT over-clears. Neither fires on the corpus -- the CORE_OBJ
+    #     arm was instrumented with a recording proxy and never fired on any of the 41 trees
+    #     -- so both of these are the generated red doing the job the corpus cannot.
+    cos = _sweep_source(RED_CORE_OBJ_SHADOW, suffix=".c")
+    cos_dis = {d[3] for d in cos.discharges}
+    check("cached" not in cos_dis and len(cos.hits) == 2,
+          "CORE_OBJ shadow RED: a gem-local `rb_cLocalThing` is a tree slot, not a core "
+          "object, so its alias `cached` must NOT discharge -- the sweep may never clear an "
+          "alias of a slot it is concurrently reporting (%d hit(s), discharged %s)"
+          % (len(cos.hits), sorted(cos_dis) or "nothing"),
+          [h[3] for h in cos.hits])
+
+    dfe = _sweep_source(RED_DEFINE_ERROR, suffix=".c")
+    check([h[3] for h in dfe.hits] == ["eBoom"],
+          "rb_define_error RED: no such CRuby API exists, so the name binds to a GEM-LOCAL "
+          "helper whose body returns rb_class_new -- measured MOVABLE. It must resolve "
+          "through the body and report, not discharge on the name",
+          [h[3] for h in dfe.hits] + ["discharged:" + d[3] for d in dfe.discharges])
+
+    # 5k. ...and the counter-shape, so tightening the rule cannot quietly delete it.
+    gdu = _sweep_source(GREEN_DEFINE_UNDER, suffix=".c")
+    gdu_dis = {d[3]: d for d in gdu.discharges}
+    check(not gdu.hits and gdu_dis.get("eOk", ("",))[0] == "const-table",
+          "const-table GREEN: a real rb_define_class_under reaches "
+          "rb_vm_register_global_object and therefore PINS -- it must stay discharged (%s)"
+          % (gdu_dis["eOk"][4] if "eOk" in gdu_dis else "NOT DISCHARGED"),
+          [h[3] for h in gdu.hits] + sorted(gdu_dis))
 
     # 6. MUTATION TABLE. Disable each discharge rule in turn; a rule that can be removed
     #    without breaking a control is decorative and should be deleted. msgpack is in the

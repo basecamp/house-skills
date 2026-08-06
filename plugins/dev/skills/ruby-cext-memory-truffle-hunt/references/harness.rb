@@ -217,6 +217,16 @@ module Hunt
   #
   # And when a row reports clean, assert the SUBJECT's own address moved -- witness counts prove
   # the compactor ran, never that your subject was movable.
+  #
+  # THE SAME TRAP HAS A SECOND, TYPE-SHAPED FORM, and fragment! does NOT fix this one.
+  # Under plain GC.compact, class-shaped subjects do not relocate AT ALL: 8 rounds,
+  # 1600/1600 String witnesses relocated, and not one T_CLASS moved -- INCLUDING a control
+  # (rb_class_new + rb_const_set) that is provably unpinned and that relocates 3/3 under
+  # verify_compaction_references in the same process. So compact_concurrent! has ZERO
+  # sensitivity to a T_CLASS/T_MODULE subject even at full witness sensitivity, and a
+  # "the class never moved" result taken under it is uninformative rather than clean.
+  # Measured 4.0.6 / 3.4.10 / 3.1.6 arm64-darwin. Use verify_compaction_references
+  # (expand_heap: true, toward: :empty) whenever the subject is a class or module.
   def fragment!(rounds = 60, size = 100)
     keep = []
     rounds.times { 3000.times { |i| s = +("F" * size); keep << s if i % 3 == 0 } }
