@@ -477,14 +477,61 @@ POST_DECL_STOP = frozenset(("typedef", "struct", "union", "enum", "class", "name
 POST_DECL_PUNCT = frozenset("*&<>:~->")
 
 _POST_DECL_WORD = re.compile(r"[A-Za-z_]\w*")
+_QUAL_NAME = re.compile(r"[A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*")
 
 
-def skip_post_declarator(src, k):
+def _skip_member_init(src, k):
+    """Past a constructor's member-initialiser list starting at the `:` at `k`, or -1.
+
+    `Foo::Foo(int x) : a(x), b(Frame{0, 0}) {`. Listed in this module's docstring as STILL
+    UNHANDLED until predicate A needed it: A indexes C++ class-body methods, and vernier's
+    BaseCollector -- the tree that forced the whole class-scope walk -- declares its
+    constructor this way. It is opt-in (`ctor_init`) rather than free, because a
+    constructor is a definition B, C and D have never indexed and turning it on for them
+    moves their function counts for no predicate's benefit.
+
+    Each item is a (possibly qualified) name followed by a MATCHED group, and the list ends
+    at the first item not followed by a comma. Failing is a reject: the alternative the
+    hand-rolled version used -- jump to the next `{` in the file -- reads `c ? f(a) : g(b)`
+    as an initialiser list and hands the walk some later function's body.
+    """
+    n = len(src)
+    k += 1
+    while True:
+        while k < n and src[k] in " \t\r\n":
+            k += 1
+        m = _QUAL_NAME.match(src, k)
+        if not m:
+            return -1
+        k = m.end()
+        while k < n and src[k] in " \t\r\n":
+            k += 1
+        if k < n and src[k] == "(":
+            close = match_paren(src, k)
+        elif k < n and src[k] == "{":
+            close = match_brace(src, k)
+        else:
+            return -1
+        if close < 0:
+            return -1
+        k = close + 1
+        while k < n and src[k] in " \t\r\n":
+            k += 1
+        if k < n and src[k] == ",":
+            k += 1
+            continue
+        return k
+
+
+def skip_post_declarator(src, k, ctor_init=False):
     """Advance past the attributes, specifiers and trailing return type between `)` and `{`.
 
     Returns the first offset the walk will not consume; a caller accepts the definition
     only if that offset holds the `{`. Stopping early is therefore always a REJECT, which
     is the recall-losing direction and the one this function is allowed to be wrong in.
+
+    `ctor_init` additionally crosses a constructor's member-initialiser list. Only the
+    caller that indexes C++ class bodies asks for it; see _skip_member_init.
     """
     n = len(src)
     while k < n:
@@ -492,6 +539,9 @@ def skip_post_declarator(src, k):
             k += 1
         if k >= n:
             return k
+        if ctor_init and src[k] == ":" and not src.startswith("::", k):
+            j = _skip_member_init(src, k)
+            return j if j >= 0 else k
         m = _POST_DECL_WORD.match(src, k)
         if m:
             word, j = m.group(), m.end()

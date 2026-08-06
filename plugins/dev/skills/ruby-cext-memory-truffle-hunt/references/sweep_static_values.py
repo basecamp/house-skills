@@ -3317,6 +3317,31 @@ def self_test(pool):
     check(sup > 0, "--no-discharge exposes %d suppressed slot(s) across the %d controls; "
                    "each is named by rule in -v output" % (sup, len(controls)))
 
+    def _index_names(src):
+        return set(Tree(_write_sources({"probe.cpp": src})).funcs)
+
+
+    # ------------------------------------------------- #29 item 2: the caller-coverage
+    #
+    # Four of the five follow-ups were a rule generalised once and then not applied at every
+    # site that needs it, so the question "which callers need this rule, and do they all
+    # call it" is asserted rather than reasoned about. Two assertions, catching different
+    # omissions: the BEHAVIOURAL one drives this predicate's own function index through
+    # tu_scope's accept table AND its rejection table (opening the crossing up is what once
+    # made a sweep invent four functions out of X-macro lists), and the SOURCE one is a lint
+    # for the shape every one of the six historical appearances had -- a hand-rolled
+    # whitespace skip two lines above a `== "{"`.
+    check(not tu_scope.declarator_conformance(_index_names),
+          "#29 item 2: predicate C's function index conforms to tu_scope's declarator table "
+          "-- every accepted spelling indexed, every rejected one refused, K&R indexing "
+          "nothing (the stated recall limit shared by all four predicates)",
+          tu_scope.declarator_conformance(_index_names))
+    check(tu_scope.unshared_declarator_crossings(
+              pathlib.Path(__file__).read_text()) == [],
+          "#29 item 2: no hand-rolled `)`-to-`{` crossing left in this file -- the walk is "
+          "tu_scope.skip_post_declarator at every site that crosses one",
+          tu_scope.unshared_declarator_crossings(pathlib.Path(__file__).read_text()))
+
     print("\n".join(log))
     print("\nmutation table (rule -> controls that break when it is disabled):")
     for rule, broken in table:

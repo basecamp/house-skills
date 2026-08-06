@@ -484,8 +484,13 @@ LOC_PRIM = re.compile(
     r"^(?:rb_gc_location|rb_gc_mark_and_move|rb_gc_update\w*|RB_GC_UPDATE\w*)$")
 
 # Control keywords take parenthesised operands and would otherwise read as calls.
+# `__attribute__` is on this list for the same reason the walk below crosses it: with the
+# crossing hand-rolled, `void mark(void *p) __attribute__((noinline)) { ... }` indexed
+# NOTHING; with it shared, the same line indexes the body TWICE unless the attribute is
+# refused a name of its own. A missing function and an invented one out of one construct.
 NOT_CALLS = {"if", "for", "while", "switch", "return", "sizeof", "defined", "do", "else",
-             "case", "typeof", "alignof", "static_assert"}
+             "case", "typeof", "alignof", "static_assert", "catch", "__attribute__",
+             "__declspec", "__asm__", "asm", "noexcept", "alignas", "_Alignas"}
 
 RANK = {None: 0, "pin": 1, "loc": 1, "movable": 2}
 
@@ -1002,14 +1007,13 @@ class Tree:
                 i = m.end()
                 continue
             args, j = call_args(body, m.end() - 1)
-            k = j
-            while k < len(body) and body[k] in " \t\r\n":
-                k += 1
             # A constructor's member-initialiser list sits between `)` and `{`, and it is
-            # the shape BaseCollector's own constructor takes.
-            if k < len(body) and body[k] == ":":
-                brace = body.find("{", k)
-                k = brace if brace >= 0 else k
+            # the shape BaseCollector's own constructor takes -- so does `__attribute__`,
+            # `noexcept`, `const` and a trailing return type, which this walk crossed for
+            # exactly one of the five. tu_scope carries all of them, with the initialiser
+            # list opt-in; the hand-rolled version jumped to the next `{` in the file,
+            # which reads `c ? f(a) : g(b)` as an initialiser list.
+            k = tu_scope.skip_post_declarator(body, j, ctor_init=True)
             if k < len(body) and body[k] == "{":
                 close = match_brace(body, k)
                 if close > 0:
@@ -1173,7 +1177,7 @@ class Tree:
         # A definition, not a prototype: identifier + parens + `{` before any `;`.
         for m in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", src):
             name = m.group(1)
-            if name in ("if", "for", "while", "switch", "return", "sizeof", "defined"):
+            if name in NOT_CALLS:
                 continue
             depth, j = 0, m.end() - 1
             while j < len(src):
@@ -1184,9 +1188,15 @@ class Tree:
                     if depth == 0:
                         break
                 j += 1
-            k = j + 1
-            while k < len(src) and src[k] in " \t\r\n":
-                k += 1
+            # THE CROSSING FROM `)` TO `{` IS tu_scope's, NOT A WHITESPACE SKIP.
+            # Fifth appearance of the same gap, and the first in THIS predicate: a dmark
+            # written `static void mark(void *p) __attribute__((noinline))` was not
+            # indexed at all, so its marking calls were never read and every field of the
+            # struct it marks reported UNMARKED. Worse than a dropped row -- the walk
+            # indexed the body under the name `__attribute__`, so the tree carried an
+            # invented function as well as a missing one. `ctor_init` is on because this
+            # index also takes OUT-OF-LINE constructors (`Foo::Foo(int x) : a(x) {`).
+            k = tu_scope.skip_post_declarator(src, j + 1, ctor_init=True)
             if k < len(src) and src[k] == "{":
                 close = match_brace(src, k)
                 if close > 0:
@@ -1548,7 +1558,6 @@ FIELD = re.compile(
 
 
 METHOD_HEAD = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
-METHOD_TAIL = re.compile(r"(?:(?:const|volatile|noexcept|override|final)\s*)*")
 
 
 def blank_method_bodies(body):
@@ -1572,15 +1581,12 @@ def blank_method_bodies(body):
         if args is None:
             i = m.end()
             continue
-        k = j
-        while k < len(body) and body[k] in " \t\r\n":
-            k += 1
-        k += METHOD_TAIL.match(body, k).end() - k
-        while k < len(body) and body[k] in " \t\r\n":
-            k += 1
-        if k < len(body) and body[k] == ":":
-            brace = body.find("{", k)
-            k = brace if brace >= 0 else k
+        # METHOD_TAIL was a CLOSED WORD LIST -- `const|volatile|noexcept|override|final` --
+        # which is the shape tu_scope's docstring records as the first cut of the shared
+        # walk and the reason it was reopened: a list that has to be extended once per
+        # spelling reports a clean sheet once per spelling. A method body that is not
+        # blanked here leaks its LOCALS into value_fields as phantom struct members.
+        k = tu_scope.skip_post_declarator(body, j, ctor_init=True)
         if k < len(body) and body[k] == "{":
             close = match_brace(body, k)
             if close > 0:
@@ -3330,6 +3336,113 @@ def self_test(base, siblings=()):
             drift.append((d.name, before ^ after))
     check(not drift, "A: grading adds a column, never a row (%d tree(s))"
           % len(list(base.iterdir())), drift)
+
+    # -- round-9 follow-up: the `)`-to-`{` crossing, fifth appearance (#29 item 2) ---
+    #
+    # The issue filed this against predicate B. B was already wired; the gap was HERE, in
+    # all THREE of this file's declarator crossings, and it is the same measured symptom
+    # every host has had -- not a dropped row but an EMPTIED INDEX, reading as a verdict.
+    #
+    #   _index_funcs         `static void mark(void *p) __attribute__((noinline))` was not
+    #                        indexed, so its rb_gc_mark calls were never read and the field
+    #                        it marks reported UNMARKED. The body was indexed under the
+    #                        name `__attribute__` instead: one missing function and one
+    #                        invented one out of a single construct.
+    #   _index_methods       whitespace and a member-initialiser list only -- so a C++
+    #                        `int size() const {` was invisible, which is the commonest
+    #                        method qualifier there is.
+    #   blank_method_bodies  a CLOSED word list (`const|volatile|noexcept|override|final`),
+    #                        the exact shape tu_scope's docstring records as the first cut
+    #                        of the shared walk and the reason it was reopened.
+    #
+    # THE MARK IS THE FLAG. Every arm marks `obj` correctly, so a conforming index CLEARS
+    # it; the pre-fix behaviour is a suspect raised against a dmark that does mark it.
+    xing_c = """#include <ruby.h>
+
+struct holder {
+    VALUE obj;
+};
+
+static void mark_holder(void *p)%s
+{
+    struct holder *h = (struct holder *)p;
+    rb_gc_mark(h->obj);
+}
+
+static void free_holder(void *p) { xfree(p); }
+
+static const rb_data_type_t holder_type = {
+    "holder",
+    { mark_holder, free_holder, 0 },
+    0, 0, 0
+};
+
+static VALUE alloc(VALUE klass)
+{
+    struct holder *h;
+    return TypedData_Make_Struct(klass, struct holder, &holder_type, h);
+}
+
+void Init_t(void) { rb_define_alloc_func(rb_cObject, alloc); }
+"""
+    xing = {tag: (flagged_from_source(xing_c % suffix, sfx),
+                  cleared_from_source(xing_c % suffix, sfx))
+            for tag, suffix, sfx in (("plain", "", ".c"),
+                                     ("attr", " __attribute__((noinline))", ".c"),
+                                     ("noexcept", " noexcept", ".cpp"),
+                                     ("const", " const", ".cpp"),
+                                     ("trailing-attr", " __attribute__((noinline)) noexcept",
+                                      ".cpp"))}
+    check(all(cats == set() and cleared.get("obj") == "marked pin (direct)"
+              for (cats, _f), cleared in xing.values()),
+          "#29 item 2 RED: a dmark carrying `__attribute__((...))`, `noexcept` or a C++ "
+          "`const` qualifier is indexed and its rb_gc_mark is read -- unfixed the walk "
+          "skipped whitespace only, dropped the dmark whole and raised UNMARKED on a "
+          "field that IS marked",
+          {t: (sorted(c), cl) for t, ((c, _f), cl) in xing.items()})
+
+    # ...and the caller-coverage question itself, which is what four of the five follow-ups
+    # had in common. Two assertions, because they catch different omissions:
+    #
+    #   BEHAVIOURAL -- every function index in this file is driven through tu_scope's own
+    #   accept table and rejection table. Opening the crossing up is what once made a sweep
+    #   INVENT four functions out of X-macro lists and `__declspec(...)`, so the rejection
+    #   half is not optional decoration.
+    #
+    #   SOURCE -- the gap has never presented as a wrong answer, it presents as a
+    #   hand-rolled whitespace skip two lines above a `== "{"`. The lint finds those; the
+    #   allow-list is what makes a remaining one a decision with a reason beside it.
+    def index_names(src):
+        with tempfile.TemporaryDirectory() as tmp:
+            ext = pathlib.Path(tmp) / "ext"
+            ext.mkdir()
+            (ext / "t.cpp").write_text(src)
+            return set(Tree(ext).funcs)
+
+    check(not tu_scope.declarator_conformance(index_names),
+          "#29 item 2: predicate A's function index conforms to tu_scope's declarator "
+          "table -- every accepted spelling indexed, every rejected one refused, K&R "
+          "indexing nothing (the stated recall limit shared by all four predicates)",
+          tu_scope.declarator_conformance(index_names))
+    # The survivors are the `if`-arm walks in _chain_rejects, which step over a STATEMENT
+    # and not a declarator: no parameter list behind them and no definition in front, so
+    # the shared walk is the wrong tool and the lint is matching on shape alone. The
+    # allow-list is by ENCLOSING FUNCTION rather than by line number -- a line number
+    # allow-list fails on the next edit above it, and the cheapest way to make that green
+    # again is to update the number, which is how a tripwire stops being one.
+    own = pathlib.Path(__file__).read_text().splitlines()
+    def _enclosing_def(lineno):
+        for i in range(lineno - 1, -1, -1):
+            m = re.match(r"\s*def (\w+)", own[i])
+            if m:
+                return m.group(1)
+        return "<module>"
+    unshared = {_enclosing_def(n) for n in tu_scope.unshared_declarator_crossings(
+        "\n".join(own))}
+    check(unshared == {"_chain_rejects"},
+          "#29 item 2: no hand-rolled `)`-to-`{` crossing left in this file bar the "
+          "if-arm walks in _chain_rejects, which are statement walks and not declarator "
+          "walks", sorted(unshared))
 
     # -- predicate A against the real gem, when the fixtures are present ------------
     #
