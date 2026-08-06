@@ -1,0 +1,42 @@
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/sweep_escaped_conversion.py
+  s_ad431633064ac7::t_017b1caa85a478 63-73,80-85
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/sweep_interior_escape.py
+  s_ad431633064ac7::t_df1c3b77112fab 735-742
+  s_ad431633064ac7::t_fa82021a86299c 764-770,775,777,790,792-795,798-801
+  s_ad431633064ac7::t_8c1dbb6b8e9c47 771-774,776,778-789,791,796-797
+  s_ad431633064ac7::t_159c200f4368b9 691-696
+  s_ad431633064ac7::t_5e292ffed88e50 1373-1381,1383-1386,1388-1389,1391-1393,1395-1396,1399
+  s_ad431633064ac7::t_db63772cfdbfe2 668-683,690,697-701,703-704,706,708,713,718,720,728,730-731,749-763,802-808
+  s_ad431633064ac7::t_17b89c0b40b867 608-609,611-623,630-633,635-636,638-647
+  s_ad431633064ac7::t_ee11af7bb4c84b 1183-1217
+  s_ad431633064ac7::t_1c32ea1a9f1dfe 1-599,606,629,657-658,666-667,685-689,702,705,707,709-712,714-717,719,721-727,729,732-734,743-748,809-860,871-873,877-898,907,912-929,937-945,951-1033,1050,1060-1063,1065-1182,1218-1301,1304-1308,1310-1311,1340-1372,1382,1387,1390,1394,1397-1398,1400-1466
+  s_ad431633064ac7::t_da93f80d2037c4 1035-1049,1051-1059,1064
+  s_ad431633064ac7::t_67ec776089228f 1302-1303,1309,1312-1339
+  s_ad431633064ac7::t_7810acd83a5202 600-605,607,610,624-628,634,637,648-656,659-665
+  s_ad431633064ac7::t_dcb7a5732f7d19 861-870,874-876
+  s_ad431633064ac7::t_1afd7dc602b74e 930-936,946-950
+  s_ad431633064ac7::t_8cde32aa22c138 899-906,908-911
+  s_ad431633064ac7::t_bd1c1c5bf3857d 684,1034,1467-1489
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/SKILL.md
+  s_ad431633064ac7::t_d04246f4217256 168-250
+  s_ad431633064ac7::t_57a7f86c7c507b 547-560
+  s_ad431633064ac7::t_d9c5ea916c8ac9 47,50-51,333,336,343-357,561
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/harness.rb
+  s_ad431633064ac7::t_3e66fdf6e02a66 309-376,386
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "a84ea8be815250121d162a1948c846716f058c4a",
+  "prompts": {},
+  "sessions": {
+    "s_ad431633064ac7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "71b3aaf1-1cab-4ad6-a950-60e4fcc88753",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
