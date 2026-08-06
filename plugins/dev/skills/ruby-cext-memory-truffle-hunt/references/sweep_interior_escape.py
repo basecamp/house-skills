@@ -395,7 +395,18 @@ NONCOPYING = {
 }
 
 # Calls that copy the bytes immediately, so the pointer is dead by the next statement.
-COPIES = re.compile(r"^(memcpy|memmove|strn?cpy|strn?cat|strn?dup|snprintf|vsnprintf"
+#
+# `strlcpy`/`strlcat` and `xstrdup`/`ruby_strdup` were added in round 8. The first pair is
+# rmagick's spelling and the second is trilogy's, and both were missing, so a copy that a
+# human reads at a glance was invisible to the sweep. NOTE what is deliberately NOT here:
+# `CloneString` (rmagick/MagickCore) and `magick_clone_string`, which copy by every account
+# of their documentation. The skill's rule is "never conclude copies from the API name",
+# and an in-tree wrapper whose body is one call to an external function is exactly the case
+# where the name is all you have. Leaving them out costs rmagick four rows that a human
+# triage clears in a minute; putting them in would make this rule a list of names that is
+# only as good as the day it was last extended.
+COPIES = re.compile(r"^(memcpy|memmove|strn?cpy|strl?cpy|strl?cat|strn?cat|strn?dup"
+                    r"|xstrdup|ruby_strdup|snprintf|vsnprintf"
                     r"|rb_str_new|rb_str_new_cstr|rb_utf8_str_new|rb_utf8_str_new_cstr"
                     r"|rb_enc_str_new|rb_usascii_str_new|rb_str_buf_cat|rb_str_cat"
                     r"|rb_str_cat_cstr|rb_str_append|rb_intern|rb_intern2|rb_intern3"
@@ -846,24 +857,193 @@ def classify_window(name, args):
     return None
 
 
-def window_between(fn, lo, hi):
+def window_between(fn, lo, hi, after=None):
     """[(kind, name, off)] for every window call strictly between two body offsets.
 
     ORDERED, unlike predicate B, which is explicitly path-insensitive. The blind spot is
     inherited and stated in the docstring: there is no CFG, so a window on a branch the
     deref cannot reach still counts, and a defect on the else-branch of a conversion is
     still wrongly cleared.
+
+    `after` -- offset just past the derivation's closing paren. A DERIVATION IS NOT A
+    WINDOW FOR ITSELF, and without this it was: `lo` is the offset of the derive macro,
+    `StringValueCStr` classifies IMPLICIT-COERCE, so every `p = StringValueCStr(x)` whose
+    alias was used later reported a window consisting of nothing but its own derivation.
+    That is 38 rows over the 59-tree corpus and **22 of rmagick's 27** -- the bulk of the
+    noise round 8 was sent to fix, and it is an off-by-one in this scan rather than the
+    missing interprocedural tier it was diagnosed as. Calls nested in the derive's own
+    ARGUMENTS are skipped by the same bound, because they are evaluated before the pointer
+    exists; a sibling call later in the same statement still counts, because evaluation
+    order within a statement is unspecified.
     """
     body = fn.body
     a, b = lo - fn.bstart, hi - fn.bstart
     if b <= a:
         return []
+    floor = 0 if after is None else max(0, after - fn.bstart - a)
     out = []
     for name, args, s, _e in find_calls(body[a:b]):
+        if s < floor:
+            continue
         kind = classify_window(name, args)
         if kind:
             out.append((kind, name, fn.bstart + a + s))
     return out
+
+
+def derive_extent(fn, deriv_off, macro):
+    """Offset just past the derivation's closing paren, for `window_between(after=)`."""
+    rel = deriv_off - fn.bstart
+    _args, past = call_args(fn.body, rel + len(macro))
+    return fn.bstart + past
+
+
+# ------------------------------------- the interprocedural copy tier (round 8)
+
+CARRIER_DEPTH = 4
+
+
+def _carrier_re(base, field):
+    if field:
+        return re.compile(r"\b%s\b\s*(?:->|\.)\s*%s\b" % (re.escape(base), re.escape(field)))
+    return re.compile(r"\b%s\b" % re.escape(base))
+
+
+def _map_carrier(args, base, field, callee):
+    """Which parameter of `callee` carries (base, field), and as what.
+
+    Two dispositions, and the difference decides whether the field survives the hop:
+      `f(opts->hostname)`  -- the FIELD's value is passed, so the callee holds a bare
+                              pointer: (param, None).
+      `f(&connopt)` / `f(opts)` -- the AGGREGATE is passed, so the field name survives:
+                              (param, field).
+    """
+    field_re = _carrier_re(base, field) if field else None
+    base_re = _carrier_re(base, None)
+    for i, a in enumerate(args):
+        if i >= len(callee.params):
+            break
+        pname = callee.params[i][1]
+        if not pname:
+            continue
+        if field_re is not None and field_re.search(a):
+            return (pname, None)
+        if base_re.search(a):
+            return (pname, field)
+    return None
+
+
+def copied_in_callee(fn, start_off, base, field, tree, depth=0, seen=None):
+    """The chain that copies the carrier before anything can move it, or None.
+
+    THE MIRROR OF `ESCAPES-INTO-CALLEE`. That tier descends into an in-tree callee to find
+    a WINDOW; this one descends to find a COPY. Both exist because the immediate consumer
+    is the wrong unit: bootsnap hands the pointer to `bs_fetch` and the window is inside
+    it, and trilogy hands a stack struct to `try_connect` and the copy is two frames down.
+
+    SOUNDNESS, which is the whole rule. A copy discharges only if it DOMINATES: scanning
+    forward from the derivation, the first thing that happens to the carrier must be the
+    copy, and **no window call may occur before it, in this frame or in any frame on the
+    path**. A copy that runs after an allocation is not a discharge -- it copies whatever
+    the stale pointer now points at. This is what makes the rule refuse to clear trilogy,
+    and refusing was the correct answer: `trilogy_sock_new` opens with
+    `xmalloc(sizeof(struct trilogy_sock))`, which under `-DTRILOGY_XALLOCATOR` is
+    `ruby_xmalloc` -- confirmed on the artifact with `nm -u`, `_ruby_xmalloc` present in
+    2.12.x and absent in the fork. Thirteen live interior pointers sit in the caller's
+    stack struct across that allocation and across each of the twelve `xstrdup`s that
+    follow, every one of which is another `ruby_xmalloc`.
+
+    Bounded at CARRIER_DEPTH frames and cycle-guarded. Returns a human-readable chain so
+    the discharge names the callee that cleared it, like every other rule here.
+    """
+    if depth >= CARRIER_DEPTH:
+        return None
+    seen = set() if seen is None else seen
+    key = (fn.path, fn.hdr, base, field)
+    if key in seen:
+        return None
+    seen = seen | {key}
+
+    carrier = _carrier_re(base, field)
+    rel = start_off - fn.bstart
+
+    def dominates(end):
+        """No use of the carrier survives the call that ends at `end`.
+
+        THE HALF OF "DOMINATES" THAT COSTS SOMETHING. Round 8 shipped this rule once
+        without it and it over-cleared immediately: rmagick's `rm_str_to_pct` derives
+        `pct_str`, hands it to `strtol` -- which is genuinely in COPIES -- and then reads it
+        again in three separate `rb_raise(..., pct_str)` calls. That is the *mittens* shape,
+        the one this predicate exists to catch, discharged by its own new rule. A copy that
+        is not the LAST thing to touch the pointer discharges nothing.
+        """
+        return carrier.search(fn.body, end) is None
+
+    for name, args, s, e in find_calls(fn.body):
+        if s < rel:
+            continue
+        joined = " ".join(args)
+        touches = bool(carrier.search(joined))
+        if COPIES.match(name) and touches and dominates(e):
+            return "%s() at %s:%d" % (name, fn.path.name,
+                                      line_of(fn.src, fn.bstart + s))
+        if touches and tree is not None and name in tree.by_name and dominates(e):
+            for callee in tree.by_name[name]:
+                if callee is fn:
+                    continue
+                mapped = _map_carrier(args, base, field, callee)
+                if mapped is None:
+                    continue
+                inner = copied_in_callee(callee, callee.bstart, mapped[0], mapped[1],
+                                         tree, depth + 1, seen)
+                if inner:
+                    return "%s() at %s:%d -> %s" % (name, fn.path.name,
+                                                    line_of(fn.src, fn.bstart + s), inner)
+            # Handed to an in-tree callee that does not copy it. Keep scanning: the callee
+            # may only be reading it. The window check below still bounds us.
+        if classify_window(name, args):
+            # Something that can move or free the String runs before any copy. Whatever
+            # copies later copies a stale pointer.
+            return None
+    return None
+
+
+CONTAINER_LVALUE_RE = re.compile(r"^\*?\s*([A-Za-z_]\w*)\s*(?:->|\.|\[)\s*([A-Za-z_]\w*)?")
+
+
+def carrier_copy_chain(fn, deriv_end, alias, esc, tree):
+    """Name what holds the pointer after the derive statement, then look for the copy.
+
+    Two carriers, and nothing else is allowed to reach the descent:
+
+      no escape, but a local alias -- `char *p = RSTRING_PTR(s); f(p);`
+      ESCAPES-INTO-CONTAINER into an aggregate THIS FRAME OWNS -- trilogy's `connopt`.
+
+    A pointer PARAMETER is excluded on purpose (`fn.ptr_params()`): `STORES-INTERIOR` writes
+    through storage the CALLER owns, so the caller may read it after this frame returns and
+    a copy found here proves nothing about that read. Excluding it is the difference between
+    a discharge and an over-clear, and over-clearing is the one failure mode this whole
+    predicate is biased against.
+    """
+    ptrp = fn.ptr_params()
+    if esc:
+        base = None
+        for kind, _eoff, text, _extra in esc:
+            if kind != "ESCAPES-INTO-CONTAINER":
+                return None
+            m = CONTAINER_LVALUE_RE.match(text)
+            if not m or m.group(1) in ptrp:
+                return None
+            if base is None:
+                base = m.group(1)
+            elif m.group(1) != base:
+                return None          # the pointer went into two different containers
+        field = CONTAINER_LVALUE_RE.match(esc[0][2]).group(2)
+    elif alias:
+        base, field = alias, None
+    else:
+        return None
+    return copied_in_callee(fn, deriv_end, base, field, tree)
 
 
 def last_use(fn, deriv_off, alias):
@@ -1024,7 +1204,8 @@ class Result:
 # are runtime values, not source constants, so the rule cleared 0 rows over the whole
 # 55-tree corpus. A discharge rule that never fires is a rule nobody has tested, and
 # keeping it would be silence that reads as coverage. It stays as a COLUMN.
-RULES = ("guarded", "no-window", "last-use-after", "copies-immediately")
+RULES = ("guarded", "no-window", "last-use-after", "copies-immediately",
+         "copies-in-callee")
 
 
 def sweep(tree, name, disabled=(), discharge=True):
@@ -1047,6 +1228,7 @@ def sweep(tree, name, disabled=(), discharge=True):
             cons = consumer(fn, off, macro)
             esc = escapes(fn, off, expr, alias, cons, tree)
             lu = last_use(fn, off, alias)
+            dend = derive_extent(fn, off, macro)
 
             # The pointer copied straight into memory the caller owns, in the same
             # statement as the derive. There is no window because there is no gap.
@@ -1057,13 +1239,35 @@ def sweep(tree, name, disabled=(), discharge=True):
                                      "statement" % (macro, expr, fn.name, cons[0])))
                 continue
 
+            # The same question one or more call-graph hops down. See copied_in_callee():
+            # the copy has to DOMINATE, so a copy that runs after an allocation does not
+            # discharge, which is why this refuses to clear trilogy.
+            if "copies-in-callee" not in off_rule:
+                chain = carrier_copy_chain(fn, dend, alias, esc, tree)
+                if chain:
+                    r.discharges.append(("copies-in-callee", rel, line_of(fn.src, off),
+                                         "%s(%s) in %s -- copied by %s, with no window "
+                                         "before it on the path"
+                                         % (macro, expr, fn.name, chain)))
+                    continue
+
             # An escape has no upper bound: the pointer outlives the frame, so the window
             # is everything that runs afterwards, in this frame and every caller's.
+            #
+            # ROUND 8: the escape branch used to REPLACE the classified window with the
+            # literal `ESCAPE`, and the result was that **zero rows in the whole 59-tree
+            # corpus carried GVL-RELEASE** -- including mysql2's and trilogy's, which
+            # genuinely have one. The triage criterion "rank by GVL-RELEASE" therefore
+            # selected nothing, and that was an artifact of this line, not a fact about the
+            # corpus. A row now carries both: what runs before the escape, the escape, and
+            # what runs after it in this frame -- which is where the nogvl call lives.
             if esc:
-                win = window_between(fn, off, max(e[1] for e in esc)) or \
-                    [("ESCAPE", esc[0][0], esc[0][1])]
+                esc_off = max(e[1] for e in esc)
+                win = (window_between(fn, off, esc_off, after=dend)
+                       + [("ESCAPE", esc[0][0], esc[0][1])]
+                       + window_between(fn, esc_off, fn.bend, after=dend))
             elif lu is not None:
-                win = window_between(fn, off, lu)
+                win = window_between(fn, off, lu, after=dend)
             else:
                 # No name for the pointer and no escape: its only use is the consumer, in
                 # the same statement. Nothing can run in between.
@@ -1225,7 +1429,15 @@ NEGATIVES = ["json-", "erb-", "bcrypt-", "ed25519-", "racc-"]
 #   stringio,      one row each, both the derive feeding a callee that keeps the pointer.
 #   msgpack,
 #   websocket-driver
-TRIAGED = {"mysql2-0.5.6": 11, "zlib-": 16, "iconv-": 5, "zstd-": 4, "sqlite3-": 3,
+#
+# ROUND 8 re-pin. mysql2 11 -> 10: `set_charset_name` (client.c:1459) is discharged by the
+# new `copies-in-callee` tier -- `mysql2_mysql_enc_name_to_rb()` reaches `strcmp()` in
+# mysql_enc_name_to_ruby.h with no window on the path. The **five** connect-arg rows, which
+# are the ones this pin exists to protect, are unchanged and separately asserted below.
+# zlib stays 16: the seven `z->buf` rows are discharged in triage by `zstream_mark`'s
+# PINNING `rb_gc_mark` (zlib.c:1181-1186), which is not a rule this predicate can apply --
+# see the note on the copies-in-callee docstring.
+TRIAGED = {"mysql2-0.5.6": 10, "zlib-": 16, "iconv-": 5, "zstd-": 4, "sqlite3-": 3,
            "websocket-driver-": 2, "stringio-": 1, "msgpack-": 1}
 
 
@@ -1373,12 +1585,46 @@ def self_test(pool):
 
     # 8. trilogy: the best red/green pair in the corpus -- the same function, one with
     #    RB_GC_GUARD and one without.
+    #
+    #    WHAT THIS ASSERTS, AND WHAT IT DOES NOT -- restated in round 8, because the
+    #    difference was being read the wrong way round. It asserts that the `guarded`
+    #    discharge fires: 13 rows with no RB_GC_GUARD, 0 with one. That is a red/green pair
+    #    for GUARD PRESENCE and for nothing else.
+    #
+    #    It was being cited as evidence that the 13 rows are false positives -- that
+    #    `trilogy_sock_new` "strdups every option before the GVL is released", so the
+    #    pointers are dead by then. **That reading is withdrawn.** `trilogy_sock_new` opens
+    #    with `xmalloc(sizeof(struct trilogy_sock))` and every `xstrdup` is itself an
+    #    `xmalloc`; under `-DTRILOGY_XALLOCATOR` -- which 2.12.6's extconf.rb sets and the
+    #    fork's does not -- `xmalloc` comes from `trilogy_xallocator.h`, whose whole
+    #    contents are `#include <ruby.h>`. Settled on the ARTIFACT, per this file's own
+    #    rule about never settling it on the header:
+    #
+    #        upstream main / 2.12.x   nm -u  =>  _ruby_xmalloc _ruby_xcalloc _ruby_xrealloc
+    #        the fork (f664f22)       nm -u  =>  _malloc
+    #
+    #    So on 2.12.x the copy is preceded by a compacting-GC opportunity with all thirteen
+    #    interior pointers live in the caller's stack struct, and the window is WIDER than
+    #    reported, not absent. `copies-in-callee` is deliberately built to refuse this case
+    #    (the copy must dominate), and it does refuse it -- asserted below, so that a future
+    #    relaxation of that rule fails here instead of silently clearing 13 real rows.
     tb, tg = _find(pool, "trilogy-bc"), _find(pool, "trilogy-green")
     if tb and tg:
         hb = [h for h in _hits(tb) if "cext.c" in h[1]]
         hg = [h for h in _hits(tg) if "cext.c" in h[1]]
-        check(len(hb) > len(hg),
-              "trilogy red/green pair: bc flags %d, green flags %d" % (len(hb), len(hg)))
+        check(len(hb) == 13 and len(hg) == 0,
+              "trilogy red/green pair: the guarded rule is the discriminator -- "
+              "bc flags %d, green flags %d" % (len(hb), len(hg)),
+              "expected 13/0, got %d/%d" % (len(hb), len(hg)))
+    t212 = _find(pool, "trilogy-2.12.6")
+    if t212:
+        h212 = [h for h in _hits(t212)
+                if "cext.c" in h[1] and "rb_trilogy_connect" in h[3]]
+        check(len(h212) == 13,
+              "trilogy 2.12.6: copies-in-callee does NOT clear rb_trilogy_connect -- the "
+              "strdups are preceded by ruby_xmalloc, so the copy does not dominate "
+              "(%d rows stand)" % len(h212),
+              "expected 13, got %d" % len(h212))
 
     # 9. PER-RULE MUTATION TABLE. A discharge rule with no generated red is a rule nobody
     #    has tested; round 5 shipped four over-clears in predicate A that a green-only
