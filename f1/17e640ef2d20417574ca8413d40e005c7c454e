@@ -1,0 +1,19 @@
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/sweep_static_values.py
+  s_7f3f0e6f0e91af::t_6de59a01a162a1 1074-1085,1091-1092,1095,1139-1141,3333-3389
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "f117e640ef2d20417574ca8413d40e005c7c454e",
+  "prompts": {},
+  "sessions": {
+    "s_7f3f0e6f0e91af": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c8e61efb-34f6-40cd-a60f-e0a4ef99e3b4",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
