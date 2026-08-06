@@ -1649,6 +1649,20 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
     #                                                           not source_reads' default
     #       late-kill   `q = p; p = "safe"; return q;`       -- `q` was already a carrier
     #
+    #     AND THE THIRD HOLE, FOUND BY CODEX ON THE #29 PR ITSELF: a write whose right-hand
+    #     side still READS the name stores the pointer back, so it must not kill. The other
+    #     two holes (`conditional_stmt`, `straight_line`) ask whether the write RUNS; this
+    #     one asks what it STORES, and a pointer walk is the commonest thing C does to an
+    #     interior pointer:
+    #
+    #       walk        `p = p + 1; return p;`                -- must STILL report
+    #       walk-call   `p = strchr(p, 47); return p;`        -- ditto, spelled as a call
+    #
+    #     Measured against `54fc3f2`: rmagick's `rm_str2cstr` with one walk inserted is RED
+    #     before the alias kill and CLEAN after it, which is a real defect going silent. The
+    #     `kill` arm is what keeps this from being a way to switch the kill off -- it shares
+    #     every line with `walk` except the right-hand side.
+    #
     #     THE FUNNEL IS ASSERTED IN EVERY ARM. A regression that empties the index prints
     #     `0 fn(s), 0 conversions` and would otherwise read as four passing greens.
     kill_src = """#include <ruby.h>
@@ -1672,6 +1686,8 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
         "kill-copy": ('    p = "safe";\n    q = p;\n', "q", []),
         "cond-kill": ('    if (out) { p = "safe"; }\n', "p", ["RETURNS-INTERIOR"]),
         "late-kill": ('    q = p;\n    p = "safe";\n', "q", ["RETURNS-INTERIOR"]),
+        "walk":      ('    p = p + 1;\n', "p", ["RETURNS-INTERIOR"]),
+        "walk-call": ('    p = strchr(p, 47);\n', "p", ["RETURNS-INTERIOR"]),
     }
     kr = {}
     for tag, (mid, ret, _want) in kill_arms.items():
@@ -1681,7 +1697,8 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
     check(all(kr[t] == (3, 1, 1, want) for t, (_m, _r, want) in kill_arms.items()),
           "14 RED (#29 item 1): a reassigned alias stops carrying the interior -- "
           "`p = \"safe\"; return p;` is not RETURNS-INTERIOR, while the same function "
-          "without the reassignment still is, and a conditional reassignment still is",
+          "without the reassignment still is, a conditional reassignment still is, and a "
+          "write that re-derives from the name (`p = p + 1`) still is",
           kr)
 
     def _index_names(src):

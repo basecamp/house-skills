@@ -2244,7 +2244,27 @@ NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-"]
 # on the path the derivation ran on; on the path where it does run there is no window at
 # all. The row was a window measured on a pointer the derivation never produced. The
 # trees keep their other rows and no gem's verdict moves.
-TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 21, "iconv-": 15, "zstd-": 6,
+# PR #30 REVIEW, ONE ROW: iconv- 15 -> 14, and it is a FALSE POSITIVE LEAVING, not a
+# defect going quiet. `tu_scope.self_derived` (the alias kill's third hole, found by Codex
+# on the #29 PR) stops a write whose right-hand side reads the name from killing later
+# reads of it. In `strip_glibc_option`:
+#
+#     const char *ptr = RSTRING_PTR(val), *pend = RSTRING_END(val);
+#     ...
+#     VALUE opt = rb_str_subseq(val, slash - ptr, pend - slash);   <- allocates
+#     val = rb_str_subseq(val, 0, slash - ptr);                    <- writes val, READS val
+#     *code = val;
+#
+# the write to `val` used to kill the two later reads of it, so this predicate believed the
+# String was dead across the allocation and raised HELD-ACROSS-WINDOW on `ptr`. `val` is in
+# fact read at and after the last deref, so the row now discharges through `last-use-after`,
+# a rule that was already here and was being denied its input.
+#
+# THE SAME ONE-LINE RULE MOVES TWO PREDICATES IN OPPOSITE DIRECTIONS -- it RESTORES a lost
+# RETURNS-INTERIOR in B (where a missed kill discharges) and REMOVES a spurious window here
+# (where it reports). That is the polarity `source_reads` documents, seen from both sides in
+# one change.
+TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 21, "iconv-": 14, "zstd-": 6,
            "sqlite3-2.9.5": 3, "websocket-driver-": 2, "stringio-": 1,
            "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 3, "puma-": 6,
            "unicorn-6.1.0": 6, "date-": 18, "openssl-3.3.0": 5, "openssl-3.3.1": 5,

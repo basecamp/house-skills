@@ -891,6 +891,76 @@ def straight_line(body, a, b):
     return True
 
 
+def self_derived(body, off):
+    """Does the write at `off` re-derive the name from ITSELF? `p = p + 1`.
+
+    The third hole in the alias kill, and the one that is not about control flow at all --
+    the other two ask WHETHER the write runs, this asks what the write STORES. A pointer
+    walk is the commonest thing C does to an interior pointer:
+
+        p = RSTRING_PTR(str);
+        p = p + 1;                /* or p++, p = strchr(p, '/'), p += n */
+        return p;                 /* still the String's interior */
+
+    `writes()` sees a plain `p =` and disqualifier 2 drops every later occurrence, so the
+    alias dies at the walk and predicate B's RETURNS-INTERIOR on rmagick's `rm_str2cstr`
+    goes from RED to a clean sheet. Measured against `54fc3f2`: the same tree reports the
+    row before this rule and not after it, while `p = "safe"` -- item 1's whole purpose --
+    stays correctly killed in both.
+
+    THE TEST IS THE RIGHT-HAND SIDE, not the operator, because the shapes that matter spell
+    the walk five different ways and only one of them is a compound assignment (`+=`, which
+    `writes()` already excludes as a read). Reading the name anywhere between the `=` and
+    the `;` means the stored value was computed FROM the pointer, so the name still carries
+    an interior pointer of the same object and the alias survives.
+
+    IT OVER-REPORTS, DELIBERATELY, and that is the side this module fails on: `p = f(p)`
+    where `f` returns something unrelated keeps an alias that no longer carries. Under
+    DOMINATING_WRITE a missed kill REPORTS a row a human then reads; a wrongful kill
+    DISCHARGES one silently, which is how this defect shipped. Under ANY_WRITE the claim is
+    the plain one -- the occurrence after a self-derived write really does still read an
+    interior pointer of the source object -- so the rule is not mode-specific.
+
+    THE RIGHT-HAND SIDE IS AN EXPRESSION, NOT A LINE, and bounding it by the next `;` is
+    wrong in the one shape this corpus is full of. trilogy's connect option block spells
+    every write as an assignment INSIDE a condition:
+
+        if ((val = rb_hash_aref(opts, ID2SYM(id_username))) != Qnil) {
+            connopt.username = StringValueCStr(val);        <- the first `;` is HERE
+
+    so a `;`-bounded right-hand side swallows the block's first statement and finds `val`
+    in it, calling every one of those writes self-derived. It cost nothing in rows -- the
+    twelve trilogy rows stayed discharged either way -- but each one then named the WRONG
+    `RB_GC_GUARD`, because a stale alias reached the guard scan first. A discharge that
+    cites the wrong reason is the failure `-v` exists to catch, so the bound is the
+    assignment expression: stop at the `;`, at a `,` outside parentheses, or at the `)`
+    that closes a parenthesis this right-hand side never opened.
+
+    String and character literals are already blanked by each sweep's `strip_noise` before
+    a body reaches here, so `p = "p"` cannot match its own name inside the literal.
+    """
+    eq = body.find("=", off)
+    if eq < 0:
+        return False
+    name = re.match(r"\s*([A-Za-z_]\w*)", body[off:])
+    if not name:
+        return False
+    depth, end = 0, len(body)
+    for i in range(eq + 1, len(body)):
+        c = body[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                end = i
+                break
+            depth -= 1
+        elif depth == 0 and c in ";,":
+            end = i
+            break
+    return re.search(r"\b%s\b" % re.escape(name.group(1)), body[eq + 1:end]) is not None
+
+
 def source_reads(body, name, since, kill=ANY_WRITE):
     """Offsets of the occurrences of `name` that READ the object it held at `since`.
 
@@ -922,7 +992,9 @@ def source_reads(body, name, since, kill=ANY_WRITE):
 
       1. the occurrence IS the write (`name =`, never `+=`, never `==`)
       2. a write to `name` COMPLETES between `since` and the occurrence, in either
-         direction -- whatever the occurrence reads, it is not what was live at `since`
+         direction -- whatever the occurrence reads, it is not what was live at `since`,
+         UNLESS the write re-derives the name from itself (`p = p + 1`), which stores the
+         pointer back and is `self_derived` above
       3. an inner block declares `name`, contains the occurrence and does NOT contain
          `since` -- two variables, one spelling
 
@@ -984,6 +1056,8 @@ def source_reads(body, name, since, kill=ANY_WRITE):
         for w, end in done:
             if not (lo < w and end <= hi):
                 continue
+            if self_derived(body, w):
+                continue      # a pointer walk stores the pointer back into the name
             if kill == DOMINATING_WRITE:
                 b = innermost_block(body, w, bl)
                 if b is not None and not (b[0] <= since < b[1] and b[0] <= at < b[1]):
