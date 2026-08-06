@@ -561,3 +561,85 @@ safe teaches the idiom.
   allocation in between — and is still safe, because the buffer is fixed at 131,591 bytes
   and can never be embedded. "Run both size regimes" does not apply when the extension, not
   you, chooses the size.
+
+---
+
+## Round 9 — routing, and four zeros that were not clearances
+
+Two findings routed **privately** this round (sqlite3's aggregate `argv`, zlib's
+`stream.opaque`). Per truffle-hunt §7, re-applied at check-in time, their mechanisms are
+described here and their **reproducers are deliberately absent**. The scent survives sanitising.
+
+### The routing scent, which is worth more than either finding
+
+- **An API that appears in the reproducer may be on the wrong side of the trigger.** zlib's
+  `z->stream.opaque` is read back only on the `Z_NEED_DICT` branch, and the obvious reading is
+  "the developer chose to use a preset dictionary". Wrong: `set_dictionary` is what the C code
+  calls *in response to* `Z_NEED_DICT`, and `Z_NEED_DICT` is returned because **the input's zlib
+  header has the FDICT bit set** — a property of the attacker's bytes. The round-3 reproducer used
+  `set_dictionary` only on the *Deflate* side, to manufacture the test data, which is exactly how
+  the misreading survived three rounds.
+  **Discriminator:** build the input in one process, consume it in another that provably cannot
+  name the suspected API, and grep the consumer to prove it. If it still fires, the API was
+  scenery.
+- **"Developer-chosen" is a claim about every caller in the corpus.** Having decided zlib's
+  trigger was input-driven, the second question is who feeds it. `net-http` retains
+  `Zlib::Inflate.new(32 + Zlib::MAX_WBITS)` on `Net::HTTPResponse::Inflater` and inflates response
+  chunks in a loop — the inflater is reachable only through an ivar, so it is movable. A retained
+  decoder plus a per-chunk feed is the shape to grep for; the one-shot class method
+  (`Zlib::Inflate.inflate`) is pinned for the call and measured clean at 2000 iterations under
+  `GC.stress` + `auto_compact`.
+
+### Burned false positives
+
+- **A short String is not necessarily an embedded String.** `Encoding#name` returns a 5-byte
+  String whose bytes live in `.rodata`, so `RSTRING_PTR` moved **0/3** while the object slot moved
+  3/3 against 200/200 witnesses. This breaks the standing heuristic "under the boundary ⇒ embedded
+  ⇒ the bytes relocate", and it cleared nokogiri `xml_sax_parser_context.c:52`. Check
+  `Hunt.embedded?` on the actual object; never infer mobility from `bytesize`.
+- **A different extension's function-locals read as this file's statics.** digest's
+  `Init_bubblebabble` (`bubblebabble.c:129`) declares `VALUE rb_mDigest, rb_mDigest_Instance,
+  rb_cDigest_Class;` as **locals**, and a tree-wide source scan read that function's assignments as
+  stores to `digest.c`'s file statics — three manufactured hits, removed by scoping slots per
+  translation unit.
+- **First-wins callback resolution picks the wrong body.** `ext/nokogiri` has two static functions
+  named `mark` (`xml_document.c:56`, `xslt_stylesheet.c:6`); the document's won on glob order, so
+  `nokogiriXsltStylesheetTuple.func_instances` reported as unmarked when its own file marks it
+  three lines down. Proven by mutation: rename that one symbol and 1 suspect → 0.
+  **But the type is still defective for a different reason** — `xslt_stylesheet.c:63` hands libxslt
+  `ss->_private = (void *)self` with no `dcompact`. A row can be a false positive on the *field*
+  and a true positive on the *type*; clearing it for the wrong reason hides the right one.
+
+### Four zeros that were not clearances
+
+- **A predicate family can be structurally blind to a whole library.** `gumbo-parser/` is about
+  half of nokogiri's C, and all four predicates report zero on it — because
+  `rg -l '\bVALUE\b|rb_[a-z_]+\('` over `gumbo-parser/src/` returns **0 files**. There is no Ruby
+  API there at all, while B and D still resolved 35 files / 333 functions, so the parser worked.
+  Zero rows with a healthy funnel and no Ruby API means **no verdict**, not a clean sheet. The
+  class lives in the *binding* (`ext/nokogiri/gumbo.c`), which is where the rows actually were.
+- **A `--self-test` that exits 0 when its fixtures are absent.** Given the corpus *parent* instead
+  of `$CORPUS/*/`, predicates B and D printed `fixture missing` and passed. A green suite that
+  never loaded a fixture is the same failure as a green fixture that parsed nothing.
+- **An instrument copied out of a moving worktree.** A mid-edit snapshot of `sweep_unmarked.py`,
+  taken while three agents were editing, **failed its own self-test 6/26**. Snapshot with
+  `git show HEAD:<path>` and record each `shasum`, or the sweep measures an artefact of the clock.
+- **A compaction run that recorded zero compactions.** A 20,000-iteration `auto_compact` run on
+  nokogiri logged **0 compactions**; its sensitivity is zero and it clears nothing. It was
+  excluded, and the row was cleared on a 101,607-compaction run instead. Report compactions next
+  to iterations, always.
+
+### The pinning-mark discharge now has three witnesses, and is still deferred
+
+zlib's seven `z->buf` rows have been hand-cleared every round on one line: a true predicate-D shape
+cleared by a **pinning `rb_gc_mark`**. Round 9 found two more of the same disposition — json
+`parser.c:2410` and msgpack `buffer.c:317`/`:340`. Still not built, deliberately: confusing
+`rb_gc_mark` with `rb_gc_mark_movable` would over-clear the corpus in one step, so it needs a
+generated red for **both** marks plus a third for "named in neither".
+
+### Coverage is not row count
+
+The C++ `namespace` / `extern "C"` brace dispositions, ported from predicate C into B and D, moved
+**no rows at all** and took sassc from **95 to 983 indexed functions** — about 90% of that tree had
+been invisible to every later stage, reading as a clean gem. When a fix is row-neutral, report the
+funnel delta or the fix looks like a no-op.
