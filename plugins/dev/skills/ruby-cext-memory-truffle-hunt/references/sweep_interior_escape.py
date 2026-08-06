@@ -1437,8 +1437,9 @@ NEGATIVES = ["json-", "erb-", "bcrypt-", "ed25519-", "racc-"]
 # zlib stays 16: the seven `z->buf` rows are discharged in triage by `zstream_mark`'s
 # PINNING `rb_gc_mark` (zlib.c:1181-1186), which is not a rule this predicate can apply --
 # see the note on the copies-in-callee docstring.
-TRIAGED = {"mysql2-0.5.6": 10, "zlib-": 16, "iconv-": 5, "zstd-": 4, "sqlite3-": 3,
-           "websocket-driver-": 2, "stringio-": 1, "msgpack-": 1}
+TRIAGED = {"mysql2-0.5.6": 10, "zlib-basecamp-patch-": 16, "iconv-": 5, "zstd-": 4,
+           "sqlite3-2.9.5": 3, "websocket-driver-": 2, "stringio-": 1,
+           "msgpack-1.8.4": 1, "msgpack-1.8.3": 1}
 
 
 def self_test(pool):
@@ -1539,12 +1540,24 @@ def self_test(pool):
     # 5b. the triaged residue. Pinned, so noise cannot grow unnoticed and a genuine new
     #     row cannot hide inside an existing pile. Growth is a FAIL even though the rows
     #     themselves are accepted -- see TRIAGED for what each one is.
+    #
+    #     AND the prefix must identify ONE tree. `_find` returns the first match in pool
+    #     order, so the moment round 8 staged `zlib-3.2.1` and `zlib-3.2.3` beside the
+    #     calibrated `zlib-basecamp-patch-1.1.1`, the key `zlib-` started resolving to a
+    #     tree nobody had triaged -- and the pin read as a regression in the gem it was
+    #     calibrated on. An ambiguous key is not a smaller version of a working key; it is
+    #     a silent substitution, so it is a FAIL in its own right.
     grew = []
     for prefix, expected in sorted(TRIAGED.items()):
-        d = _find(pool, prefix)
-        if d is None:
+        matches = [pathlib.Path(d) for d in pool
+                   if pathlib.Path(d).name.startswith(prefix)]
+        if not matches:
             continue
-        n = len(_hits(d))
+        if len(matches) > 1:
+            grew.append("%s is ambiguous over %s -- pin the exact tree"
+                        % (prefix, sorted(m.name for m in matches)))
+            continue
+        n = len(_hits(matches[0]))
         if n != expected:
             grew.append("%s %d != %d" % (prefix, n, expected))
     check(not grew, "the triaged residue is unchanged: "
