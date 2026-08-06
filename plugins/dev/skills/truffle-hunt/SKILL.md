@@ -258,12 +258,79 @@ finding.
 | Our fork only | Patch the fork; if it diverged from a still-affected upstream, do both |
 | First-party code | Fix it in the repo; never publish the reproducer |
 
-**Pick the disclosure channel before filing publicly.** If untrusted input can reach the defect
-— corrupting memory, data, or an authorization decision — use the project's private path
-(`SECURITY.md`, GitHub private vulnerability reporting, `security@`) and don't attach a public
-reproducer. A public issue is for latent or local defects needing a maintainer's judgement;
-when you file publicly, say which reachability check made you judge it not exploitable. Get
-this wrong and the cost lands on every user of the library, not on you.
+**Pick the disclosure channel before filing publicly**, and pick it from the table below rather
+than from how the crash felt. Get this wrong and the cost lands on every user of the library,
+not on you.
+
+### The disclosure test
+
+**The discriminator is whether untrusted input can reach the defect — not how bad the crash is.**
+A segfault reachable only through an API the developer chose to call is a public issue. A wrong
+value returned to a caller because a request-sized string crossed an allocator boundary is a
+private report. Severity ranks the report; it does not route it.
+
+Read *untrusted input* as anything supplied at runtime by a request, a peer, a file, or a
+database row. Read *reach* as: that input is what makes the defect fire, with the application's
+own source held fixed.
+
+| What actually pulls the trigger | Untrusted? | Channel |
+|---|---|---|
+| Size, content, count or encoding of data flowing through a call the app already makes | yes | **private** — no public reproducer |
+| A request value passed through into the argument that selects the defective path | yes | **private** |
+| *Which* API the developer chose to call, or an option/argument that is a literal in app source | no | **public issue** |
+| A build or deploy option an operator sets | no | **public issue**, and name the operator dependency |
+| No public entry point reaches it at all | n/a | **public issue**, filed explicitly as latent |
+
+Not inputs to this test, however tempting: how loud the crash is, whether it is exploitable
+beyond memory corruption, whether one of our own apps is affected, how small the fix is, and how
+responsive the maintainer has been.
+
+Three rules keep the table honest:
+
+1. **"Developer-chosen" is a claim about the corpus, not about the signature.** It means no app
+   routes untrusted data into the choosing position. That is a grep, and the report states it.
+   One app passing a request parameter into a tag name, a dictionary, or a format selector moves
+   the row from public to private on its own.
+2. **Same shape, same channel.** Two defects that answer the table identically route
+   identically, in the same week, to the same kind of venue. If you are about to split a pair,
+   either the table says they differ — write down which row each landed on — or you are routing
+   by vibe.
+3. **Follow the table when it is uncomfortable.** A defect that segfaults a released gem and
+   still answers "no" to untrusted input goes public. The table is written down precisely so
+   that this decision is not re-litigated per finding.
+
+**Q2, once the table says private: which private path.** In order — GitHub private vulnerability
+reporting if the repo has it enabled, then `SECURITY.md`'s stated address, then `security@` on
+the project domain, then the maintainer directly. If the project has no private path at all, do
+not fall back to a public issue with a reproducer attached: file the minimal public report
+without the trigger, and tell the maintainer privately where the trigger is.
+
+Round-9 worked rows, for calibration:
+
+| Finding | Trigger | Row | Channel |
+|---|---|---|---|
+| sqlite3 heap `argv` in `aggregator.c` | the **size of row data** crossing the 640-byte embedded-slot boundary | row 1 | private GHSA |
+| zlib `z->stream.opaque` | the **FDICT bit in the compressed bytes** — see below | row 1 | private, `security@ruby-lang.org` |
+| psych `start_document_try` | tags the developer hands the emitter | row 3 | public issue |
+
+**The zlib row is here because it changed, and it is the best worked example of rule 1.** It was
+first written down as row 3 — "a preset dictionary the developer passes to `set_dictionary`" — and
+routed public. Reading the code was enough to doubt it: `set_dictionary` is what the C code calls
+*in response to* `Z_NEED_DICT`, and `Z_NEED_DICT` is returned because the **input stream's zlib
+header has the FDICT flag set**, which is a property of the bytes being inflated. Execution
+settled it. One process wrote FDICT-flagged bytes to a file; a second process, grep-proven never to
+name `Deflate` or `set_dictionary`, read that file and inflated — 3/3 SIGSEGV.
+
+Then rule 1 was applied to the corpus rather than to the signature, and it moved the row a second
+time: `net-http`, in **all five apps**, retains `Zlib::Inflate.new(32 + Zlib::MAX_WBITS)` and
+inflates response chunks in a loop, so any outbound request answered with
+`Content-Encoding: deflate` routes untrusted bytes into a long-lived inflater. Nobody had to choose
+anything. Reproduced against the real `Net::HTTPResponse::Inflater`, 3/3, control clean.
+
+Two lessons worth more than the finding. The first framing was not careless — it named a real API
+that really appears in the reproducer, on the *other* side of the test data. And a defect can be
+routed by an honest reading of what pulls the trigger and still be wrong, because *"developer
+chose it"* is a claim about every caller in the corpus and only a grep and a run can check it.
 
 Then check the code still matches **upstream HEAD** — `gh api repos/OWNER/REPO/contents/PATH
 --jq .content | base64 -d` — and search for prior art. Issue anatomy:
@@ -307,6 +374,6 @@ its scent library rediscovers everything next time.
 - [ ] Negatives carry a stated sensitivity
 - [ ] Loaded artifact verified (binary, version, linked library)
 - [ ] Every delegated finding independently re-reproduced
-- [ ] Findings routed; disclosure channel chosen deliberately
+- [ ] Findings routed; disclosure channel picked from §7's table, and the row cited in the report
 - [ ] Every corpus member labelled; reachable vs latent shown
 - [ ] Reproducers and new scents checked into the scent library, sanitised where §7 requires
