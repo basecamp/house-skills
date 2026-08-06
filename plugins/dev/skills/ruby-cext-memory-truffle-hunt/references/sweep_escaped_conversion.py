@@ -681,21 +681,28 @@ def escapes_by_return(fn, param, statics=()):
     # file-scope slot are the two SINKS this function reports, and a sink that is also
     # pointer-typed reads as a copy. Swallowing `*out = p` into the alias set would delete
     # the STORES-INTERIOR row it exists to produce.
-    aliases = set(tu_scope.alias_set(body, seeds, exclude=ptr_params | statics))
+    #
+    # AND A NAME THAT WAS AN ALIAS IS NOT ONE FOR EVER. `alias_set` names the carriers;
+    # matching the NAME anywhere after that reported `p = RSTRING_PTR(str); p = "safe";
+    # return p;` as RETURNS-INTERIOR on a string literal -- a false positive in the
+    # propagation this file gained in the same review. The kill is tu_scope's fifth rule
+    # applied to the alias set, so what comes back here is OFFSETS of occurrences that still
+    # evaluate to the interior, not a name soup that can never be unlearned.
+    alias_reads = tu_scope.alias_reads(body, seeds, exclude=ptr_params | statics)
 
-    def derives(expr):
-        """Does `expr` evaluate to the converted String's interior?"""
+    def derives(expr, base):
+        """Does `expr`, taken at offset `base` in the body, evaluate to the interior?"""
         if any(name in INTERIOR
                and param in re.findall(r"[A-Za-z_]\w*", " ".join(args))
                for name, args, _s, _e in find_calls(expr)):
             return True
-        return bool(aliases & set(re.findall(r"[A-Za-z_]\w*", expr)))
+        return any(base <= o < base + len(expr) for o in alias_reads)
 
     for m in re.finditer(r"\breturn\b", body):
         semi = body.find(";", m.end())
         if semi < 0:
             continue
-        if derives(body[m.end():semi]):
+        if derives(body[m.end():semi], m.end()):
             found.append(("RETURNS-INTERIOR", fn.bstart + m.start(),
                           body[m.start():semi + 1].strip(), "the return value"))
     # Stores into memory the frame does not own. Two sinks, one shape:
@@ -726,7 +733,7 @@ def escapes_by_return(fn, param, statics=()):
         if semi < 0:
             continue
         rhs = body[m.end():semi]
-        if derives(rhs):
+        if derives(rhs, m.end()):
             found.append(("STORES-INTERIOR", fn.bstart + m.start(),
                           (stmt + " =" + rhs).strip(), sink))
     return found
@@ -1622,6 +1629,60 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
           "of what was stored through it -- `return out[1]` is not the buffer",
           "funnel fn=%d conv=%d non-cfunc=%d hits=%s"
           % (r.funcs, len(r.conversions), len(r.non_cfunc), sorted(h[0] for h in r.hits)))
+
+    # ---------------------------------------------------------- round-9 follow-up thread
+    #
+    # 14. AN ALIAS IS NOT AN ALIAS FOR EVER (#29 item 1). The propagation added as item 13
+    #     tracked copies and never KILLS, so a local stayed a carrier after it had been
+    #     overwritten and this predicate reported RETURNS-INTERIOR on a string literal --
+    #     a FALSE POSITIVE in the code item 13 had just landed. Four arms, because the
+    #     fix has to kill without unlearning:
+    #
+    #       kill        the defect: `p = "safe"; return p;`  -- must NOT report
+    #       live        the same function without the kill   -- must still report
+    #       kill-copy   `p = "safe"; q = p; return q;`       -- the copy carries the
+    #                                                           literal, not the interior
+    #       cond-kill   `if (out) { p = "safe"; } return p;` -- a write that need not run
+    #                                                           must NOT discharge; this is
+    #                                                           the whole reason the kill
+    #                                                           mode is DOMINATING_WRITE and
+    #                                                           not source_reads' default
+    #       late-kill   `q = p; p = "safe"; return q;`       -- `q` was already a carrier
+    #
+    #     THE FUNNEL IS ASSERTED IN EVERY ARM. A regression that empties the index prints
+    #     `0 fn(s), 0 conversions` and would otherwise read as four passing greens.
+    kill_src = """#include <ruby.h>
+static const char *grab(VALUE str, const char **out)
+{
+    StringValue(str);
+    const char *p = RSTRING_PTR(str);
+    const char *q;
+%s    return %s;
+}
+static VALUE go(VALUE self, VALUE arg)
+{
+    const char *sink = 0;
+    return rb_str_new2(grab(arg, &sink));
+}
+void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
+"""
+    kill_arms = {
+        "live":      ("", "p", ["RETURNS-INTERIOR"]),
+        "kill":      ('    p = "safe";\n', "p", []),
+        "kill-copy": ('    p = "safe";\n    q = p;\n', "q", []),
+        "cond-kill": ('    if (out) { p = "safe"; }\n', "p", ["RETURNS-INTERIOR"]),
+        "late-kill": ('    q = p;\n    p = "safe";\n', "q", ["RETURNS-INTERIOR"]),
+    }
+    kr = {}
+    for tag, (mid, ret, _want) in kill_arms.items():
+        r = sweep(Tree(_synth("t_kill_%s" % tag, {"ext/t.c": kill_src % (mid, ret)})), tag)
+        kr[tag] = (r.funcs, len(r.conversions), len(r.non_cfunc),
+                   sorted(h[0] for h in r.hits))
+    check(all(kr[t] == (3, 1, 1, want) for t, (_m, _r, want) in kill_arms.items()),
+          "14 RED (#29 item 1): a reassigned alias stops carrying the interior -- "
+          "`p = \"safe\"; return p;` is not RETURNS-INTERIOR, while the same function "
+          "without the reassignment still is, and a conditional reassignment still is",
+          kr)
 
     print("\n".join(log))
     print("\nself-test: %s" % ("PASS" if ok else "FAIL"))

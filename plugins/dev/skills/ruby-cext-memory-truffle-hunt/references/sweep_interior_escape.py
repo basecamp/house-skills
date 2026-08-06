@@ -364,6 +364,33 @@ NOT_CALLS = {"if", "for", "while", "switch", "return", "sizeof", "defined", "do"
              "assert", "RB_LIKELY", "RB_UNLIKELY", "LIKELY", "UNLIKELY"}
 
 
+def arg_spans(src, name_end):
+    """[(start, end)] for each top-level argument of the call whose name ends at `name_end`.
+
+    `call_args` returns the argument TEXTS, which is enough to ask what an argument says and
+    not enough to ask WHERE it says it. An alias that has been reassigned still matches its
+    own spelling, so the question "which argument slot carries the pointer" has to be asked
+    by offset -- see alias_reads().
+    """
+    i = src.find("(", name_end)
+    if i < 0:
+        return []
+    depth, start, out = 0, i + 1, []
+    for j in range(i, len(src)):
+        c = src[j]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                out.append((start, j))
+                return out
+        elif c == "," and depth == 1:
+            out.append((start, j))
+            start = j + 1
+    return []
+
+
 def find_calls(body):
     """[(name, args, name_start, past_close)] for every call in `body`.
 
@@ -526,151 +553,20 @@ def base_name(expr):
     return m.group(1) if m else ""
 
 
-def writes(body, name):
-    """Offsets of every plain assignment `name = ...` -- the WRITES, not the reads.
-
-    A COMPOUND assignment is a read: `x += y` loads `x` first, so `\\s*=` deliberately does
-    not match `+=`. `&x` is a read too, and a load-bearing one -- taking the address forces
-    a stack slot, which is the second pin this skill measured on `StringValueCStr` -- and it
-    cannot be the left-hand side of an assignment, so it is never matched here.
-
-    One of the three disqualifiers in source_reads(), which is the only caller that matters.
-    """
-    return [m.start() for m in
-            re.finditer(r"(?<![=!<>+\-*/%%&|^])\b%s\s*=(?!=)" % re.escape(name), body)]
-
-
-# A declaration statement leads with a type, and nothing else in C leads with a bare
-# identifier sequence. The prefix between the last statement boundary and the name may
-# therefore hold only identifiers, `*`, `&`, and the commas and brackets of a declarator
-# list -- one `(`, one `=` or one operator and it is an expression, not a declaration.
-DECL_PREFIX = re.compile(r"^[\s\w*&,\[\]]+$")
-# ...unless the leading word is one of these, which are the statement keywords that can be
-# followed by a bare name. `return str;` is the one that would otherwise read as a
-# declaration of `str`, and reading it as one would suppress every later use.
-NOT_DECL_LEAD = frozenset(("return", "case", "goto", "else", "do", "break", "continue",
-                           "default", "sizeof", "typedef"))
-
-
-def _blocks(body):
-    """[(open, close)] byte offsets for every brace-delimited block in `body`."""
-    stack, out = [], []
-    for m in re.finditer(r"[{}]", body):
-        if m.group() == "{":
-            stack.append(m.start())
-        elif stack:
-            out.append((stack.pop(), m.start()))
-    return out
-
-
-def _declarations(body, name):
-    """Offsets where `name` is DECLARED, as opposed to used.
-
-    Best-effort and deliberately under-inclusive: a shape this misses leaves the old
-    behaviour in place, and the old behaviour over-clears, so the bias is stated rather
-    than assumed. Known miss: a declaration split across a macro.
-    """
-    out = []
-    for m in re.finditer(r"\b%s\b" % re.escape(name), body):
-        pre = body[:m.start()]
-        stmt = pre[max(pre.rfind(";"), pre.rfind("{"), pre.rfind("}")) + 1:]
-        if not DECL_PREFIX.match(stmt):
-            continue
-        words = re.findall(r"[A-Za-z_]\w*", stmt)
-        if not words or words[0] in NOT_DECL_LEAD:
-            continue
-        out.append(m.start())
-    return out
-
-
-def source_reads(body, name, since):
-    """Offsets of the occurrences of `name` that READ the object it held at `since`.
-
-    ONE ROOT CAUSE, THREE SYMPTOMS, ONE PREDICATE. Every discharge defect this predicate's
-    liveness stage has shipped was the same mistake: a rule took a BARE TOKEN OCCURRENCE of
-    a name as evidence that the name still held the object the derivation came from,
-    without asking what that occurrence actually did. Three reviews found three spellings
-    of it, and the third is what made it worth writing the question down instead of adding
-    a third special case:
-
-      `guarded`         `guard = str; guard = other; ... RB_GC_GUARD(guard)`
-                        the occurrence is a genuine read of a genuine variable -- of the
-                        WRONG OBJECT, because a write rebound the name in between.
-      `last-use-after`  `p = RSTRING_PTR(str); rb_funcall(...); consume(p); str = other;`
-                        the occurrence is not a read at all. An assignment's left-hand side
-                        neither loads the old VALUE nor leaves it anywhere conservative
-                        scanning can find it, so the frame may drop it at `consume`.
-      `last-use-after`  `... consume(p); { VALUE str = other; use(str); }`
-                        the occurrence is a genuine read of the wrong VARIABLE -- an inner
-                        declaration shadows the source, and the outer `str` is dead.
-
-    All three DISCHARGE, so all three lose findings rather than add noise, and all three
-    answer the same question: does this occurrence read the object the derivation came
-    from? Three disqualifiers, in the order the shapes above name them:
-
-      1. the occurrence IS the write (`name =`, never `+=`, never `==`)
-      2. a write to `name` COMPLETES between `since` and the occurrence, in either
-         direction -- whatever the occurrence reads, it is not what was live at `since`
-      3. an inner block declares `name`, contains the occurrence and does NOT contain
-         `since` -- two variables, one spelling
-
-    "COMPLETES" is load-bearing in 2 and was learned on the corpus. A write takes effect at
-    the `;`, not at its left-hand side: in iconv's `val = rb_str_subseq(val, 0, slash-ptr);`
-    the `val` in the ARGUMENT list is textually after the write's LHS token and is a genuine
-    read of the object still live at the derivation. Measuring the write by its LHS offset
-    disqualified it and raised a row on a correct site -- over-reporting, so cheap, but
-    wrong, and it would have been read as a finding.
-
-    NOT IMPLEMENTED, AND IT COSTS ROWS: disqualifier 2 is path-INSENSITIVE, the same blind
-    spot the window scan states. openssl's `to_der_internal` writes `str` in BOTH arms of an
-    if/else and reads it after the join, so the else-arm's write disqualifies the then-arm's
-    read although the two cannot both run. That direction over-REPORTS, which is the side
-    this predicate is built to fail on; the mirror choice -- ignoring a write that is not
-    provably on every path -- would re-open `if (c) { str = other; } use(str);` as a clear.
-
-    `since` is the offset at which `name` provably held the object: the derivation, for the
-    source; the copying assignment, for a guard alias. Disqualifier 2 is stated in both
-    directions because callers ask about occurrences on both sides of it.
-
-    THE RULE THIS DOES NOT IMPLEMENT is the compiler's. Even a qualifying read is only
-    evidence that the SOURCE TEXT mentions the VALUE again; an optimised build may reuse
-    the slot before its last syntactic use, which is RB_GC_GUARD's own documented
-    rationale and the reason liveness() calls itself recall-biased. This narrows an
-    over-clear; it does not make `last-use-after` sound.
-    """
-    wr = writes(body, name)
-    # Where each write takes EFFECT: the `;` that ends the assignment statement, so the
-    # right-hand side of the write itself still reads the old object.
-    done = [(w, body.find(";", w) if body.find(";", w) >= 0 else len(body)) for w in wr]
-    # The region each shadowing declaration owns: its INNERMOST enclosing block, kept only
-    # when that block does not also contain `since`. Innermost and not merely "some
-    # enclosing block", or an inner redeclaration would suppress reads of the outer
-    # variable elsewhere in the same `if` -- over-reporting rather than over-clearing, but
-    # wrong, and the two directions are not interchangeable just because one is cheaper.
-    blocks = _blocks(body)
-    shadow = []
-    for d in _declarations(body, name):
-        encl = [(o, c) for o, c in blocks if o <= d < c]
-        if not encl:
-            continue                      # declared at the frame's own top level
-        o, c = min(encl, key=lambda oc: oc[1] - oc[0])
-        if not o <= since < c:
-            shadow.append((d, o, c))
-    out = []
-    for m in re.finditer(r"\b%s\b" % re.escape(name), body):
-        at = m.start()
-        if at in wr:
-            continue
-        lo, hi = (at, since) if at < since else (since, at)
-        # Strictly after `since`, and complete by the occurrence. The strict bound is what
-        # keeps a guard alias's OWN defining write (`guard = str;`, whose offset IS the
-        # `since` it establishes) from disqualifying every later read of the alias.
-        if any(lo < w and end <= hi for w, end in done):
-            continue
-        if any(d < at and o <= at < c for d, o, c in shadow):
-            continue
-        out.append(at)
-    return out
+# WRITES, BLOCKS, DECLARATIONS AND source_reads ARE tu_scope's FIFTH RULE NOW.
+#
+# This file is where the predicate was unified, out of three separately-patched discharge
+# defects (:1224 a rebound guard alias, :1288 a write counted as a read, :1614 a read of a
+# shadowing redeclaration). The FOURTH member of the family turned up in tu_scope's own
+# alias set -- `p = RSTRING_PTR(str); p = "safe"; return p;` -- so the predicate moved down
+# beside rule 4 rather than gaining a fourth caller here and a first special case there.
+# The names are re-exported unchanged, and every call site below is untouched; what the move
+# added is the `kill` argument, because the alias set sits on the other side of the
+# discharge. See tu_scope.source_reads.
+writes = tu_scope.writes
+source_reads = tu_scope.source_reads
+ANY_WRITE = tu_scope.ANY_WRITE
+DOMINATING_WRITE = tu_scope.DOMINATING_WRITE
 
 
 # PERSISTENT-STORAGE SINKS. Ported from sweep_escaped_conversion.py's file_scope_objects,
@@ -1115,6 +1011,22 @@ def alias_names(fn, deriv_off, alias):
     return tu_scope.alias_set(fn.body, {alias: deriv_off - fn.bstart})
 
 
+def alias_reads(fn, deriv_off, alias):
+    """Body-relative offsets of every occurrence that STILL carries the derived pointer.
+
+    A NAME IS NOT AN ALIAS FOR EVER, and the set above cannot say so: `p = RSTRING_PTR(str);
+    p = other; rb_funcall(...); use(p);` puts `p` in the alias set once and every later
+    mention of it then reads as a carrier -- a window bounded by a use of something else,
+    which grows a spurious one exactly as predicate B grew a spurious escape on the same
+    shape. The kill is tu_scope's fifth rule, the same predicate the guard alias and the
+    shadowing redeclaration already ask, with the kill mode this polarity needs: here a
+    disqualified occurrence DISCHARGES, so only a write that runs on every path counts.
+    """
+    if not alias:
+        return set()
+    return tu_scope.alias_reads(fn.body, {alias: deriv_off - fn.bstart})
+
+
 def _names_re(names):
     """A word-boundary alternation over an alias set, or None when the set is empty."""
     if not names:
@@ -1213,7 +1125,7 @@ def _top_level_minus(text):
     return out
 
 
-def escapes(fn, deriv_off, expr, names, cons, tree=None):
+def escapes(fn, deriv_off, expr, names, cons, tree=None, reads=()):
     """[(kind, off, text, extra)] -- ways the pointer outlives or leaves this frame.
 
     `names` is the whole alias set from alias_names(), not one name: `q = p; return q;`
@@ -1222,17 +1134,25 @@ def escapes(fn, deriv_off, expr, names, cons, tree=None):
     body, found = fn.body, []
     rel = deriv_off - fn.bstart
     ptrp = fn.ptr_params()
-    alias_re = _names_re(names)
+    # `reads` is alias_reads(): the OFFSETS at which an alias still carries the pointer,
+    # rather than the names, because a name that has been reassigned still matches its own
+    # spelling. An empty `reads` with a non-empty `names` is a real answer -- every carrier
+    # was overwritten -- and must not fall back to the name match.
+    reads = set(reads)
+
+    def carried(text, base):
+        return any(base <= o < base + len(text) for o in reads)
+
     statics = set(tree.visible_slots(fn.path) if tree is not None else ())
     statics.update(local_statics(body))
 
-    def holds(text):
+    def holds(text, base):
         """Does `text`, taken whole, evaluate to something carrying the buffer?"""
-        if alias_re and alias_re.search(text):
+        if carried(text, base):
             return True
         return any(nm in INTERIOR for nm, _a, _s, _e in find_calls(text))
 
-    def carries(text):
+    def carries(text, base):
         # POINTER MINUS INTEGER IS STILL A POINTER; POINTER MINUS POINTER IS NOT.
         # The first cut of this rejected every expression containing a `-`, which kept
         # stringio's `ptr->pos = e - RSTRING_PTR(ptr->string)` out -- a `ptrdiff_t`, the one
@@ -1250,15 +1170,15 @@ def escapes(fn, deriv_off, expr, names, cons, tree=None):
         # the same declaration test the copy scan uses.
         cuts = _top_level_minus(text)
         if not cuts:
-            return holds(text)
+            return holds(text, base)
         parts, last = [], 0
         for c in cuts:
-            parts.append(text[last:c])
+            parts.append((text[last:c], base + last))
             last = c + 1
-        parts.append(text[last:])
-        if any(holds(p) or _pointer_operand(body, p) for p in parts[1:]):
+        parts.append((text[last:], base + last))
+        if any(holds(p, b) or _pointer_operand(body, p) for p, b in parts[1:]):
             return False
-        return holds(parts[0])
+        return holds(*parts[0])
 
     # 1. returned -- either directly, or via the local it was aliased into.
     for m in re.finditer(r"\breturn\b", body):
@@ -1267,7 +1187,7 @@ def escapes(fn, deriv_off, expr, names, cons, tree=None):
         semi = body.find(";", m.end())
         if semi < 0:
             continue
-        if carries(body[m.end():semi]):
+        if carries(body[m.end():semi], m.end()):
             found.append(("ESCAPES-BY-RETURN", fn.bstart + m.start(),
                           body[m.start():semi + 1].strip(), ""))
             break
@@ -1295,7 +1215,7 @@ def escapes(fn, deriv_off, expr, names, cons, tree=None):
         if semi < 0:
             continue
         rhs = body[m.end():semi]
-        if not carries(rhs):
+        if not carries(rhs, m.end()):
             continue
         if not b.group(2) and sink in statics:
             # A BARE SCALAR AT STATIC-STORAGE SCOPE IS A SINK, AND IT HAD NO BRANCH.
@@ -1333,7 +1253,8 @@ def escapes(fn, deriv_off, expr, names, cons, tree=None):
         if name not in NONCOPYING:
             return None
         joined = " ".join(args)
-        if (alias_re and alias_re.search(joined)) or \
+        _a, past = call_args(body, s + len(name))
+        if (past is not None and any(s < o < past for o in reads)) or \
                 any(d + "(" in re.sub(r"\s+", "", joined) for d in INTERIOR):
             return ("ESCAPES-INTO-LIBRARY", fn.bstart + s,
                     re.sub(r"\s+", " ", "%s(%s)" % (name, joined))[:110],
@@ -1352,9 +1273,11 @@ def escapes(fn, deriv_off, expr, names, cons, tree=None):
         #    discharged `no-window`, which is a silent false negative.
         elif tree is not None and cons[0] in tree.by_name:
             # Which argument slot carries the pointer.
+            spans = arg_spans(body, cons[2] + len(cons[0]))
             idx = next((i for i, a in enumerate(cons[1])
                         if any(d + "(" in re.sub(r"\s+", "", a) for d in INTERIOR)
-                        or (alias_re and alias_re.search(a))), None)
+                        or (i < len(spans)
+                            and any(spans[i][0] <= o < spans[i][1] for o in reads))), None)
             # The same linkage rule as `copied_in_callee`, in the REPORTING direction:
             # descending into another TU's namesake here invents an ESCAPES-INTO-CALLEE
             # against a body that never runs. Same table, same fix (tu_scope.bind).
@@ -1633,7 +1556,7 @@ def carrier_copy_chain(fn, deriv_end, names, esc, tree):
     return copied_in_callee(fn, deriv_end, base, field, tree)
 
 
-def last_use(fn, deriv_off, names):
+def last_use(fn, deriv_off, reads):
     """Offset of the last use of the derived pointer in this frame, or None.
 
     Only NAMED carriers are tracked. A bare `foo(RSTRING_PTR(s))` has no name for the
@@ -1644,17 +1567,15 @@ def last_use(fn, deriv_off, names):
     The whole alias set counts, not just the first name. `q = p;` is a use of `p` AND the
     birth of another carrier, so stopping at it puts the last use before the window and
     discharges `no-window` on a pointer that is still live -- see alias_names().
+
+    AND IT COUNTS ONLY WHILE THE NAME STILL CARRIES THE POINTER. `reads` is alias_reads()
+    rather than a regex over the names, because `p = other;` makes every later mention of
+    `p` a use of something else -- a window bounded by an unrelated read is a SPURIOUS one,
+    the same defect predicate B had as a spurious escape. Both are tu_scope's fifth rule.
     """
-    rx = _names_re(names)
-    if rx is None:
-        return None
-    body = fn.body
     rel = deriv_off - fn.bstart
-    last = None
-    for m in rx.finditer(body):
-        if m.start() > rel:
-            last = fn.bstart + m.start()
-    return last
+    later = [o for o in reads if o > rel]
+    return fn.bstart + max(later) if later else None
 
 
 # ------------------------------------------------------- stage 4: liveness and size
@@ -1904,9 +1825,10 @@ def sweep(tree, name, disabled=(), discharge=True):
             r.derivations.append((fn, off, macro, expr))
             alias = pointer_alias(fn, off, macro)
             names = alias_names(fn, off, alias)
+            reads = alias_reads(fn, off, alias)
             cons = consumer(fn, off, macro)
-            esc = escapes(fn, off, expr, names, cons, tree)
-            lu = last_use(fn, off, names)
+            esc = escapes(fn, off, expr, names, cons, tree, reads)
+            lu = last_use(fn, off, reads)
             dend = derive_extent(fn, off, macro)
 
             # AN ALLOCATING COPIER IS A WINDOW, NOT A DISCHARGE.
@@ -2285,10 +2207,34 @@ NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-"]
 # RSTRING_END(str) - 1` into a file static); these four are what it costs, and the exclusion
 # it was protecting -- stringio's `ptr->pos = e - RSTRING_PTR(ptr->string)` -- still holds and
 # still has its green.
+#
+# ROUND 9 FOLLOW-UP, ONE ROW: date- 18 -> 17. The alias kill (tu_scope's fifth rule applied
+# to the alias set) drops date_parse.c:230, and the shape is exactly the "spurious window"
+# the follow-up predicted this predicate would grow:
+#
+#     ep = RSTRING_END(d);          <- the derivation the row was reported at
+#     ...
+#     ep = s + l;                   <- ep no longer holds RSTRING_END(d)
+#     buf = ALLOCV_N(char, vbuf, ep - bp + 1);   <- the "window" it was held across
+#
+# The read that bounded the window is a read of `s + l`, not of the derivation, so the row
+# was a window measured on a different value. THE POINTER IS STILL REPORTED: `s + l` is an
+# interior pointer of the same String, `ep` rejoins the alias set of the :229 derivation at
+# the copy, and :229 is a HELD-ACROSS-WINDOW hit before and after. One row of duplicate
+# coverage of one defect, not a cleared defect -- the gem's verdict does not move.
+#
+# Its sibling :204 (the `m` block, byte-identical shape) survives, and NOT for a good
+# reason: the shadowing disqualifier is `d < at`, so the *declaration* token of the
+# shadowing `const char *s, *bp, *ep;` at :225 counts as a read of the outer `ep` and
+# bounds the window there. Tightening it to `d <= at` is correct and is NOT this pass's
+# thread -- `_declarations` is deliberately under-inclusive, so the tightening can suppress
+# a genuine read, and it moves rows in D's liveness stage where the polarity is the other
+# way round. Recorded here so the next round finds it written down rather than re-deriving
+# it from the asymmetry.
 TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 21, "iconv-": 15, "zstd-": 6,
            "sqlite3-2.9.5": 3, "websocket-driver-": 2, "stringio-": 1,
            "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 3, "puma-": 6,
-           "unicorn-6.1.0": 6, "date-": 18, "openssl-3.3.0": 5, "openssl-3.3.1": 5,
+           "unicorn-6.1.0": 6, "date-": 17, "openssl-3.3.0": 5, "openssl-3.3.1": 5,
            "openssl-3.3.3": 5, "openssl-4.0.0": 5}
 
 
@@ -2692,6 +2638,63 @@ def self_test(pool):
           "funcs %d, derive %d, win %d, hits %s, discharges %s"
           % (actl.funcs, len(actl.derivations), len(actl.with_window),
              [(h[0], h[2]) for h in actl.hits], [d[0] for d in actl.discharges]))
+
+    # 8h2. GENERATED RED AND GREEN: AN ALIAS STOPS CARRYING WHEN IT IS REASSIGNED (#29:1).
+    #
+    #    The mirror of 8h/8i, one review later, and it is the failure that propagation
+    #    bought: a name that HELD the pointer is not a name that holds it. The window here
+    #    is bounded by a read of `q` AFTER `q = other`, so it is a window measured on
+    #    something else -- a SPURIOUS window, which is what this predicate grows where
+    #    predicate B grows a spurious escape.
+    #
+    #    THREE ARMS, AND THE SECOND IS WHY THE KILL IS `DOMINATING_WRITE`:
+    #      live      the alias is never reassigned          -- must still be a hit
+    #      killed    `q = other;` before the read           -- the read is of `other`
+    #      cond      `if (n) { q = other; }` before it      -- the write need not run, so
+    #                                                          the row must SURVIVE. A
+    #                                                          path-insensitive kill here
+    #                                                          DISCHARGES a live row, which
+    #                                                          is the inverted polarity the
+    #                                                          shared predicate takes an
+    #                                                          argument for.
+    #    The funnel is asserted in all three: a regression that stops indexing the function
+    #    prints `0 fn(s) | derive 0/0` and would read as two of the three passing.
+    kill_c = ("#include <ruby.h>\n\n"
+              "static VALUE\n"
+              "rebound(VALUE self, VALUE str, VALUE n)\n"
+              "{\n"
+              "    const char *p = RSTRING_PTR(str);\n"
+              "    const char *q = p;\n"
+              "    const char *other = \"safe\";\n"
+              "    int c;\n"
+              "%s"
+              "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+              "%s"
+              "    c = q[0];\n"
+              "    return INT2FIX(c);\n"
+              "}\n\n"
+              "void Init_probe(void)\n"
+              "{\n"
+              "    rb_define_method(rb_cObject, \"rb\", rebound, 2);\n"
+              "}\n")
+    kill_arms = {
+        "live":   ("", ""),
+        "killed": ("", "    q = other;\n"),
+        "cond":   ("", "    if (n) { q = other; }\n"),
+    }
+    kv = {t: _sweep(_synth("fx-aliaskill-%s" % t, {"ext/probe.c": kill_c % arms}))
+          for t, arms in kill_arms.items()}
+    check(all(kv[t].funcs == 2 and len(kv[t].derivations) == 1 for t in kill_arms)
+          and [len(kv[t].hits) for t in ("live", "killed", "cond")] == [1, 0, 1]
+          and [len(kv[t].with_window) for t in ("live", "killed", "cond")] == [1, 0, 1]
+          and any(d[0] == "no-window" for d in kv["killed"].discharges),
+          "alias-kill red (#29 item 1): a read of `q` after `q = other;` no longer bounds "
+          "the window -- the row it produced was a window measured on a different value, "
+          "and with the only carrier overwritten there is nothing live across the window. "
+          "A CONDITIONAL reassignment still hits, because a kill here loses a finding",
+          [(t, kv[t].funcs, len(kv[t].derivations), len(kv[t].with_window),
+            sorted(h[0] for h in kv[t].hits), sorted(d[0] for d in kv[t].discharges))
+           for t in kill_arms])
 
     # 8j/8k. GENERATED RED AND GREEN: A REBOUND GUARD VARIABLE GUARDS THE WRONG OBJECT.
     #

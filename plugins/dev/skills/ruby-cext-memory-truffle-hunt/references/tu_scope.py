@@ -2,8 +2,12 @@
 
     from tu_scope import Scope, TREE, declared_scope, bind
     from tu_scope import top_level_units, scope_zero_braces, storage_depth
+    from tu_scope import anonymous_namespace_spans, internal_linkage
     from tu_scope import match_brace, match_paren, skip_post_declarator
-    from tu_scope import statement_before, pointer_typed, local_copies, alias_set
+    from tu_scope import declarator_conformance, unshared_declarator_crossings
+    from tu_scope import statement_before, pointer_typed, local_copies
+    from tu_scope import blocks, innermost_block, writes, source_reads
+    from tu_scope import alias_map, alias_set, alias_reads
 
 WHY THIS FILE EXISTS
 --------------------
@@ -31,11 +35,27 @@ region contains it. Three tiers:
     BLOCK   Scope(path, (start, end))   a function-local `static VALUE cache;`. Nothing
                                         outside that block can even name it, so two
                                         functions in ONE file each declaring `cache` are
-                                        two objects.
+                                        two objects -- and so are two disjoint BLOCKS in
+                                        one function, which is why the span is the
+                                        declaration's innermost enclosing block and not
+                                        the function's body. `innermost_block` is that
+                                        one line, shared, because `source_reads`'
+                                        shadowing rule needs the same answer.
     FILE    Scope(path)                 internal linkage: `static` in a .c/.cc/.cpp/.cxx.
                                         Another translation unit cannot name it.
     TREE    Scope() == TREE             external linkage, or ANY declaration made in a
                                         header -- the including .c gets a copy.
+
+INTERNAL LINKAGE HAS A SECOND SPELLING AND IT CARRIES NO `static`.
+`namespace { VALUE cache; }` gives every name in the block internal linkage, from the
+NAMESPACE -- C++ [basic.link]. A scope decision that reads only the declaration text
+therefore hands two translation units ONE tree-scoped slot, and predicate C then let one
+file's `rb_global_variable(&cache)` discharge the other file's unregistered allocating
+one: an over-clear reached through a syntax the `static` grep cannot see. So the linkage
+question is `internal_linkage(text, off, anon)` rather than a regex at each call site, and
+the anonymous-namespace spans come from the same walk that already knows which braces are
+transparent. Both predicates that scope slots ask it -- C for its file-scope units, D for
+`file_scope_objects` -- because the rule is the same one twice, not two rules.
 
 THE HEADER CARVE-OUT IS LOAD-BEARING, NOT A HEDGE.
 `static` in a header is still internal linkage, per-includer, but the sweeps parse the
@@ -177,6 +197,72 @@ THREE CONSTRAINTS, EACH FORCED BY A ROW THAT WOULD OTHERWISE HAVE MOVED THE WRON
 pointer PARAMETER means: for B, `*out = p` is the escape it is looking for, so `out`
 must not be swallowed as "just another alias" first. D asks about `out` in a different
 order and passes nothing.
+
+THE FIFTH RULE, AND THE FOURTH IS ONE OF ITS CALLERS: WHEN DOES AN OCCURRENCE STILL READ
+-----------------------------------------------------------------------------------------
+`source_reads(body, name, since)` -- moved here from predicate D, where it was already the
+unification of three separately-patched defects. Every one of them was the same mistake:
+
+    A BARE TOKEN OCCURRENCE ACCEPTED AS EVIDENCE THAT A NAME STILL HOLDS THE OBJECT IT
+    ONCE HELD.
+
+    D:1224  `guard = str; guard = other; ... RB_GC_GUARD(guard)`   a rebound guard alias
+    D:1288  `p = ...; consume(p); str = other;`                    a WRITE counted as a read
+    D:1614  `consume(p); { VALUE str = other; use(str); }`         a read of a SHADOWING
+                                                                   redeclaration
+
+The fourth member arrived one review later and in this file, which is what moved the
+predicate down here instead of adding a fourth special case beside it:
+
+    tu_scope  `p = RSTRING_PTR(str); p = "safe"; return p;`        a rebound ALIAS
+
+`alias_set` tracked copies and never kills, so a local stayed in `seen` after it had been
+overwritten and predicate B reported RETURNS-INTERIOR on a string literal. It is not a new
+rule. It is rule 5 asked of the alias set, so `alias_map` calls `source_reads` twice: once
+to decide whether a copy's right-hand side still reads the pointer (`q = p` after
+`p = "safe"` makes no alias) and once, in `alias_reads`, to decide whether a LATER
+occurrence of an alias still carries it.
+
+THE KILL SET IS SHARED; THE PATH SENSITIVITY IS NOT, AND THAT IS THE WHOLE PARAMETER.
+Disqualifier 2 -- "a write completes between `since` and the occurrence" -- is
+path-INSENSITIVE, and D's liveness stage can afford that because there a disqualified read
+costs a DISCHARGE and the row is reported: the openssl `to_der_internal` shape (a write in
+both arms of an if/else, read after the join) over-REPORTS, which is the direction the
+predicate is built to fail in. Applied to the alias set the polarity INVERTS. A killed
+alias removes an escape and shortens a window, so a write that need not run would DISCHARGE
+a live row:
+
+    p = RSTRING_PTR(str);  if (c) { p = "safe"; }  return p;   /* still an escape */
+
+So the caller names the kill it can afford. ANY_WRITE is D's liveness stage, unchanged.
+DOMINATING_WRITE keeps only a write whose innermost enclosing block also contains both
+`since` and the occurrence -- a cheap dominance test over the same `blocks()` the shadowing
+disqualifier already computes -- and is what the alias set asks for. Both settings
+over-report; they differ in which caller's polarity that means.
+
+WHICH CALLERS NEED A RULE, AND DO THEY ALL CALL IT
+-------------------------------------------------
+Four of this module's five rules landed after the same rule had been patched into one host
+and not the others, so the module ships two ways of asking that question rather than a
+sixth prose warning:
+
+    declarator_conformance(index)      the BEHAVIOURAL check. A caller hands in its own
+                                       function index as `src -> {names}`; the accept table
+                                       and the rejection table are driven through it and the
+                                       mismatches come back. Every function index in this
+                                       directory is registered in its own self-test, so an
+                                       index that stops crossing `__attribute__((...))` --
+                                       or starts inventing a body out of an X-macro list --
+                                       fails there rather than on a corpus row nobody reads.
+
+    unshared_declarator_crossings(src) the SOURCE tripwire. The gap has never once announced
+                                       itself as a wrong answer; it announces itself as a
+                                       hand-rolled `while src[k] in " \\t\\r\\n"` two lines
+                                       above a `== "{"`. This finds those, and each sweep
+                                       asserts the set it still has against a named
+                                       allow-list, so a new one is a decision rather than an
+                                       oversight. It is a lint and it is stated as one:
+                                       it cannot see an index that never crosses at all.
 """
 
 import bisect
@@ -258,6 +344,50 @@ def declared_scope(path, is_static=False, span=None):
     return TREE
 
 
+def anonymous_namespace_spans(src):
+    """[(open_brace, close_brace)] for every `namespace {` body, nested ones included.
+
+    An ANONYMOUS namespace gives every name declared in it internal linkage, with no
+    `static` anywhere in the declaration. A NAMED one does not, so the two cannot share a
+    test even though `top_level_units` walks through both identically.
+    """
+    out = []
+    i, start, n = 0, 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == "{":
+            close = match_brace(src, i)
+            if close < 0:
+                return out
+            pre = src[start:i].rstrip()
+            if NAMESPACE_HEAD.search(pre) or LINKAGE_HEAD.search(pre):
+                if ANON_NAMESPACE_HEAD.search(pre):
+                    out.append((i, close))
+                out.extend((i + 1 + a, i + 1 + b)
+                           for a, b in anonymous_namespace_spans(src[i + 1:close]))
+            i = start = close + 1
+            continue
+        if c == ";":
+            i = start = i + 1
+            continue
+        i += 1
+    return out
+
+
+def internal_linkage(decl_text, off=None, anon=()):
+    """Does a declaration have internal linkage? C's rule, both spellings.
+
+    `decl_text` is the declaration's specifiers (the caller cuts the initialiser off, or an
+    initialiser mentioning `static` in a nested expression flips the answer). `off` and
+    `anon` add the C++ half: a declaration inside an anonymous namespace is internal
+    whatever its specifiers say. Passing neither asks the C-only question, which is what a
+    caller holding no offset can honestly ask.
+    """
+    if re.search(r"\bstatic\b", decl_text or ""):
+        return True
+    return off is not None and any(o < off < c for o, c in anon)
+
+
 def _pair(d):
     return (d.scope, d.path)
 
@@ -302,6 +432,9 @@ def bind(defs, at, off=None, key=_pair):
 # pattern has to allow a blanked literal.
 NAMESPACE_HEAD = re.compile(r"\bnamespace(?:\s+\w+(?:\s*::\s*\w+)*)?\s*$")
 LINKAGE_HEAD = re.compile(r"\bextern\s*\"[^\"]*\"\s*$")
+# ...and the one spelling of it that changes LINKAGE rather than only nesting: an
+# anonymous namespace, which is `namespace` with nothing between it and the `{`.
+ANON_NAMESPACE_HEAD = re.compile(r"\bnamespace\s*$")
 
 
 def match_brace(src, open_idx):
@@ -385,6 +518,88 @@ def skip_post_declarator(src, k):
             continue
         return k
     return k
+
+
+# ------------------------------------------------- do all the callers use the walk above
+#
+# The accept table is the four spellings that have each emptied an index once, plus the two
+# that arrive together; the rejection table is skip_post_declarator's own, verbatim from the
+# module docstring. Every case is one definition named `bad` with one decoy in front of it,
+# so a caller's index answers with a set of names and nothing else has to be agreed on.
+_ACCEPT = {
+    "plain":     "static const char *bad(VALUE str)\n{\n    return 0;\n}\n",
+    "attr":      "static const char *bad(VALUE str) __attribute__((noinline))\n"
+                 "{\n    return 0;\n}\n",
+    "attr-same-line": "static const char *bad(VALUE str) __attribute__((noinline)) "
+                      "{\n    return 0;\n}\n",
+    "noexcept":  "static const char *bad(VALUE str) noexcept\n{\n    return 0;\n}\n",
+    "bare-macro": "static const char *bad(VALUE str) EV_NOEXCEPT\n{\n    return 0;\n}\n",
+    "trailing":  "static auto bad(VALUE str) -> const char *\n{\n    return 0;\n}\n",
+    "attr-noexcept": "static const char *bad(VALUE str) __attribute__((noinline)) noexcept\n"
+                     "{\n    return 0;\n}\n",
+}
+_REJECT = {
+    "macro":     ("MY_EXPORT(sym)\nstatic const char *bad(VALUE str)\n"
+                  "{\n    return 0;\n}\n", ("bad",)),
+    "knr":       ("static const char *bad(str) VALUE str;\n{\n    return 0;\n}\n", ()),
+    "proto":     ("static const char *helper(VALUE);\nstatic const char *bad(VALUE str)\n"
+                  "{\n    return 0;\n}\n", ("bad",)),
+    "init":      ("struct S s = mk(1), t = {2};\nstatic const char *bad(VALUE str)\n"
+                  "{\n    return 0;\n}\n", ("bad",)),
+    "typedef-aggregate": ("__declspec(align(8)) typedef struct { int x; } thing_t;\n"
+                          "static const char *bad(VALUE str)\n{\n    return 0;\n}\n",
+                          ("bad",)),
+    "x-macro":   ("XX(A, 1)\ntypedef enum { E_A } phase_t;\n"
+                  "static const char *bad(VALUE str)\n{\n    return 0;\n}\n", ("bad",)),
+}
+
+
+def declarator_cases():
+    """{tag: (source, frozenset of names a conforming index returns)}.
+
+    K&R indexes NOTHING -- the stated recall limit, shared by all four predicates, and it is
+    asserted rather than tolerated so that a walk which starts accepting it says so.
+    """
+    out = {t: (s, frozenset(("bad",))) for t, s in _ACCEPT.items()}
+    out.update({t: (s, frozenset(w)) for t, (s, w) in _REJECT.items()})
+    return out
+
+
+def declarator_conformance(index, prologue="#include <ruby.h>\n\n"):
+    """{tag: (got, want)} for every case `index` disagrees with. Empty means conforming.
+
+    `index` is the caller's OWN function index, as `src -> iterable of indexed names`. This
+    is the check that answers "which callers need this rule and do they all call it" for
+    rule 3: the four sweeps between them carry six function indexes, and five of the six
+    were patched separately for the same gap before the walk was extracted.
+    """
+    bad = {}
+    for tag, (src, want) in sorted(declarator_cases().items()):
+        got = frozenset(index(prologue + src))
+        if got != want:
+            bad[tag] = (sorted(got), sorted(want))
+    return bad
+
+
+# The gap has never once presented as a wrong answer -- it presents as these two lines.
+_WS_SKIP = re.compile(r'in " \\t\\r\\n"')
+_BRACE_TEST = re.compile(r'==\s*"\{"')
+
+
+def unshared_declarator_crossings(source, window=500):
+    """Line numbers in a caller's own source that hand-roll the `)`-to-`{` crossing.
+
+    A lint, and stated as one: it recognises the shape all six historical appearances had --
+    a whitespace-only skip loop whose next decision is `== "{"` -- and it cannot see an index
+    that crosses some other way or does not cross at all. Callers assert the result against a
+    named allow-list, so a walk that stays hand-rolled is a decision with a reason next to it
+    rather than the thing nobody noticed.
+    """
+    out = []
+    for m in _WS_SKIP.finditer(source):
+        if _BRACE_TEST.search(source[m.end():m.end() + window]):
+            out.append(source.count("\n", 0, m.start()) + 1)
+    return out
 
 
 def top_level_units(src, base=0, transparent=None):
@@ -492,26 +707,249 @@ def local_copies(body, after=0):
     return out
 
 
-def alias_set(body, seeds, exclude=()):
-    """Every local in `body` that carries the same pointer as one of `seeds`.
+# --------------------------------------------- when does an occurrence still READ the name
+#
+# Rule 5. Moved here from predicate D, where it was already the unification of three
+# separately-patched defects; the fourth was in this file's own alias set, which is why it
+# lives beside rule 4 rather than above it. The module docstring carries the family.
+ANY_WRITE = "any-write"
+DOMINATING_WRITE = "dominating-write"
 
-    `seeds` is `{name: offset}` -- the offset at which each name became an alias. Returns
-    the names in offset order, seeds included; an empty `seeds` yields an empty list, which
-    every caller must treat as "no alias", never as "any name".
+# A declaration statement leads with a type, and nothing else in C leads with a bare
+# identifier sequence. The prefix between the last statement boundary and the name may
+# therefore hold only identifiers, `*`, `&`, and the commas and brackets of a declarator
+# list -- one `(`, one `=` or one operator and it is an expression, not a declaration.
+DECL_PREFIX = re.compile(r"^[\s\w*&,\[\]]+$")
+# ...unless the leading word is one of these, which are the statement keywords that can be
+# followed by a bare name. `return str;` is the one that would otherwise read as a
+# declaration of `str`, and reading it as one would suppress every later use.
+NOT_DECL_LEAD = frozenset(("return", "case", "goto", "else", "do", "break", "continue",
+                           "default", "sizeof", "typedef"))
+
+
+def writes(body, name):
+    """Offsets of every plain assignment `name = ...` -- the WRITES, not the reads.
+
+    A COMPOUND assignment is a read: `x += y` loads `x` first, so `\\s*=` deliberately does
+    not match `+=`. `&x` is a read too, and a load-bearing one -- taking the address forces
+    a stack slot, which is the second pin this skill measured on `StringValueCStr` -- and it
+    cannot be the left-hand side of an assignment, so it is never matched here.
+
+    One of the three disqualifiers in source_reads(), which is the only caller that matters.
+    """
+    return [m.start() for m in
+            re.finditer(r"(?<![=!<>+\-*/%%&|^])\b%s\s*=(?!=)" % re.escape(name), body)]
+
+
+def blocks(body):
+    """[(open, close)] byte offsets for every brace-delimited block in `body`."""
+    stack, out = [], []
+    for m in re.finditer(r"[{}]", body):
+        if m.group() == "{":
+            stack.append(m.start())
+        elif stack:
+            out.append((stack.pop(), m.start()))
+    return out
+
+
+def innermost_block(body, off, within=None):
+    """The narrowest `(open, close)` in `body` containing `off`, or None.
+
+    `within` pre-computes `blocks(body)` for a caller asking about many offsets. This is
+    both the region a shadowing declaration owns and -- item 3 of the follow-up -- the
+    STORAGE SCOPE of a block-local `static`: two disjoint blocks in one function each
+    declaring `static VALUE cache` are two objects, and the enclosing function's span
+    merges them into one.
+    """
+    encl = [(o, c) for o, c in (blocks(body) if within is None else within) if o <= off < c]
+    return min(encl, key=lambda oc: oc[1] - oc[0]) if encl else None
+
+
+def source_reads(body, name, since, kill=ANY_WRITE):
+    """Offsets of the occurrences of `name` that READ the object it held at `since`.
+
+    ONE ROOT CAUSE, FOUR SYMPTOMS, ONE PREDICATE. Every discharge defect predicate D's
+    liveness stage shipped, and the one this module's own alias set shipped, was the same
+    mistake: a rule took a BARE TOKEN OCCURRENCE of a name as evidence that the name still
+    held the object the derivation came from, without asking what that occurrence actually
+    did. Four reviews found four spellings of it:
+
+      `guarded`         `guard = str; guard = other; ... RB_GC_GUARD(guard)`
+                        the occurrence is a genuine read of a genuine variable -- of the
+                        WRONG OBJECT, because a write rebound the name in between.
+      `last-use-after`  `p = RSTRING_PTR(str); rb_funcall(...); consume(p); str = other;`
+                        the occurrence is not a read at all. An assignment's left-hand side
+                        neither loads the old VALUE nor leaves it anywhere conservative
+                        scanning can find it, so the frame may drop it at `consume`.
+      `last-use-after`  `... consume(p); { VALUE str = other; use(str); }`
+                        the occurrence is a genuine read of the wrong VARIABLE -- an inner
+                        declaration shadows the source, and the outer `str` is dead.
+      `alias_set`       `p = RSTRING_PTR(str); p = "safe"; return p;`
+                        the occurrence reads a name that WAS an alias of the interior and
+                        is not one any more. Predicate B reported RETURNS-INTERIOR on a
+                        string literal.
+
+    The first three DISCHARGE, so they lose findings rather than add noise. The fourth is
+    the mirror -- it REPORTS -- and that difference is the `kill` argument, not a second
+    predicate; see the module docstring. Three disqualifiers, in the order the shapes name
+    them:
+
+      1. the occurrence IS the write (`name =`, never `+=`, never `==`)
+      2. a write to `name` COMPLETES between `since` and the occurrence, in either
+         direction -- whatever the occurrence reads, it is not what was live at `since`
+      3. an inner block declares `name`, contains the occurrence and does NOT contain
+         `since` -- two variables, one spelling
+
+    "COMPLETES" is load-bearing in 2 and was learned on the corpus. A write takes effect at
+    the `;`, not at its left-hand side: in iconv's `val = rb_str_subseq(val, 0, slash-ptr);`
+    the `val` in the ARGUMENT list is textually after the write's LHS token and is a genuine
+    read of the object still live at the derivation. Measuring the write by its LHS offset
+    disqualified it and raised a row on a correct site -- over-reporting, so cheap, but
+    wrong, and it would have been read as a finding.
+
+    DISQUALIFIER 2 IS PATH-INSENSITIVE UNDER `ANY_WRITE`, the same blind spot the window
+    scan states. openssl's `to_der_internal` writes `str` in BOTH arms of an if/else and
+    reads it after the join, so the else-arm's write disqualifies the then-arm's read
+    although the two cannot both run. That direction over-REPORTS for D's liveness stage,
+    which is the side it is built to fail on. `DOMINATING_WRITE` is the same disqualifier
+    for a caller whose polarity is inverted -- the alias set, where a kill DISCHARGES: a
+    write counts only when its innermost enclosing block also contains `since` and the
+    occurrence, so `if (c) { p = "safe"; } return p;` keeps the alias. Both settings
+    over-report. They disagree about whose over-report it is.
+
+    `since` is the offset at which `name` provably held the object: the derivation, for the
+    source; the copying assignment, for a guard alias. Disqualifier 2 is stated in both
+    directions because callers ask about occurrences on both sides of it.
+
+    THE RULE THIS DOES NOT IMPLEMENT is the compiler's. Even a qualifying read is only
+    evidence that the SOURCE TEXT mentions the VALUE again; an optimised build may reuse
+    the slot before its last syntactic use, which is RB_GC_GUARD's own documented
+    rationale and the reason liveness() calls itself recall-biased. This narrows an
+    over-clear; it does not make `last-use-after` sound.
+    """
+    wr = writes(body, name)
+    # Where each write takes EFFECT: the `;` that ends the assignment statement, so the
+    # right-hand side of the write itself still reads the old object.
+    done = [(w, body.find(";", w) if body.find(";", w) >= 0 else len(body)) for w in wr]
+    bl = blocks(body)
+    # The region each shadowing declaration owns: its INNERMOST enclosing block, kept only
+    # when that block does not also contain `since`. Innermost and not merely "some
+    # enclosing block", or an inner redeclaration would suppress reads of the outer
+    # variable elsewhere in the same `if` -- over-reporting rather than over-clearing, but
+    # wrong, and the two directions are not interchangeable just because one is cheaper.
+    shadow = []
+    for d in _declarations(body, name):
+        b = innermost_block(body, d, bl)
+        if b is None:
+            continue                      # declared at the frame's own top level
+        o, c = b
+        if not o <= since < c:
+            shadow.append((d, o, c))
+    out = []
+    for m in re.finditer(r"\b%s\b" % re.escape(name), body):
+        at = m.start()
+        if at in wr:
+            continue
+        lo, hi = (at, since) if at < since else (since, at)
+        # Strictly after `since`, and complete by the occurrence. The strict bound is what
+        # keeps a guard alias's OWN defining write (`guard = str;`, whose offset IS the
+        # `since` it establishes) from disqualifying every later read of the alias.
+        killed = False
+        for w, end in done:
+            if not (lo < w and end <= hi):
+                continue
+            if kill == DOMINATING_WRITE:
+                b = innermost_block(body, w, bl)
+                if b is not None and not (b[0] <= since < b[1] and b[0] <= at < b[1]):
+                    continue      # a write that need not run cannot discharge a live row
+            killed = True
+            break
+        if killed:
+            continue
+        if any(d < at and o <= at < c for d, o, c in shadow):
+            continue
+        out.append(at)
+    return out
+
+
+def _declarations(body, name):
+    """Offsets where `name` is DECLARED, as opposed to used.
+
+    Best-effort and deliberately under-inclusive: a shape this misses leaves the old
+    behaviour in place, and the old behaviour over-clears, so the bias is stated rather
+    than assumed. Known miss: a declaration split across a macro.
+    """
+    out = []
+    for m in re.finditer(r"\b%s\b" % re.escape(name), body):
+        pre = body[:m.start()]
+        stmt = pre[max(pre.rfind(";"), pre.rfind("{"), pre.rfind("}")) + 1:]
+        if not DECL_PREFIX.match(stmt):
+            continue
+        words = re.findall(r"[A-Za-z_]\w*", stmt)
+        if not words or words[0] in NOT_DECL_LEAD:
+            continue
+        out.append(m.start())
+    return out
+
+
+def alias_map(body, seeds, exclude=()):
+    """{name: offset} -- every local carrying the pointer, and where it started to.
+
+    `seeds` is `{name: offset}`, the offset at which each name became an alias.
+
+    A COPY ONLY PROPAGATES FROM A NAME THAT STILL HOLDS THE POINTER. The transitive closure
+    used to ask only that the copy run after the name it copies became an alias, which is
+    rule 4's ordering constraint and not the whole question: after `p = "safe";` a later
+    `q = p;` copies the literal, not the interior. That is rule 5, asked of the right-hand
+    side, with the kill mode the alias set's polarity requires.
     """
     if not seeds:
-        return []
+        return {}
     copies = local_copies(body, min(seeds.values()))
     exclude = set(exclude)
     seen = dict(seeds)
     frontier = sorted(seeds.items(), key=lambda kv: kv[1])
     while frontier:
         cur, since = frontier.pop()
+        live = source_reads(body, cur, since, kill=DOMINATING_WRITE)
         for off, lhs, rhs in copies:
-            if rhs == cur and off > since and lhs not in seen and lhs not in exclude:
-                seen[lhs] = off
-                frontier.append((lhs, off))
-    return sorted(seen, key=lambda n: seen[n])
+            if rhs != cur or off <= since or lhs in seen or lhs in exclude:
+                continue
+            semi = body.find(";", off)
+            if semi < 0:
+                semi = len(body)
+            if not any(off < r < semi for r in live):
+                continue        # the right-hand side no longer reads the pointer
+            seen[lhs] = off
+            frontier.append((lhs, off))
+    return seen
+
+
+def alias_set(body, seeds, exclude=()):
+    """Every local in `body` that carries the same pointer as one of `seeds`.
+
+    The names in offset order, seeds included; an empty `seeds` yields an empty list, which
+    every caller must treat as "no alias", never as "any name". A caller that then looks for
+    OCCURRENCES of these names wants `alias_reads` instead -- a name in this set has held
+    the pointer, which is not the same claim as "every mention of it reads the pointer".
+    """
+    m = alias_map(body, seeds, exclude)
+    return sorted(m, key=lambda n: m[n])
+
+
+def alias_reads(body, seeds, exclude=()):
+    """Offsets of every occurrence in `body` that still evaluates to the seeded pointer.
+
+    This is the answer both callers actually want. `alias_set` names the carriers;
+    `p = "safe"` leaves `p` a carrier that is no longer carrying, and a caller matching the
+    NAME reports the string literal as an escaping interior pointer -- which is what
+    predicate B did. The kill is rule 5, not a special case beside it.
+    """
+    m = alias_map(body, seeds, exclude)
+    out = set()
+    for nm, since in m.items():
+        out.update(source_reads(body, nm, since, kill=DOMINATING_WRITE))
+    return out
 
 
 def storage_depth(src):
