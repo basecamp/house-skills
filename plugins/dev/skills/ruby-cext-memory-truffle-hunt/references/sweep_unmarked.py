@@ -186,9 +186,9 @@ checkouts and are deliberately not committed here; rebuild the directory like so
     git clone https://github.com/sparklemotion/sqlite3-ruby sqlite3-pr723
     cd sqlite3-pr723 && git fetch origin pull/723/head && git checkout FETCH_HEAD
 
-Then: python3 sweep_unmarked.py --self-test acceptance   (expects 38/38 PASS)
+Then: python3 sweep_unmarked.py --self-test acceptance   (expects 48/48 PASS)
 
-Two of the thirty-eight run against the REAL gem rather than a generated reduction, and look for
+Two of the forty-eight run against the REAL gem rather than a generated reduction, and look for
 fixtures beside the acceptance dir: `../corpus/stackprof-0.2.28` for the target grades, and
 `../fixtest/sp-pristine` + `../fixtest/sp-fixed` for the red/green pair (sp-fixed is the
 tree with `VALUE interval` changed to `long`, which is the upstream fix's shape). When they
@@ -533,6 +533,7 @@ class Tree:
         self.dtypes_at = {}      # (path, name) -> {"dmark": fn, ...}
         self.dtype_file = {}     # name -> the first file declaring it
         self.shadowed = {}       # kind -> {name: how many files define it}
+        self.cross_picks = {}    # kind -> {name: how often a lookup fell back tree-wide}
         self._helper_memo = {}   # ("dmark"|"dcompact", at) -> {fn -> kind}, cycle-guarded
         self.func_spans = {}     # function name -> (path, body_start, body_end) offsets
         self.func_defs = {}      # function name -> how many definitions carry that name
@@ -589,11 +590,31 @@ class Tree:
         seen = self.shadowed.setdefault(kind, {})
         seen[name] = seen.get(name, 0) + 1
 
+    def _cross_pick(self, kind, name, at):
+        """Record that a lookup FELL BACK to the tree-wide first-wins entry for a name
+        more than one file defines -- i.e. an arbitrary choice actually got made.
+
+        The shadowed tally beside it is a hazard count: it says the tree contains the
+        shape. This is the other signal, and round 6 already learned they are not the
+        same one -- `11 overloaded name(s)` printed on every vernier run for two rounds
+        while the pick that decided the verdict went unreported, which is why the
+        `first-wins pick(s)` counter exists at all. The cross-file resolver reintroduces
+        exactly one such path (a file that does NOT define the name, resolving to
+        whichever file `rglob` reached first), so it gets its own counter rather than
+        being folded into the hazard tally that hid the last one.
+        """
+        if at is not None and self.shadowed.get(kind, {}).get(name, 0) > 1:
+            got = self.cross_picks.setdefault(kind, {})
+            got[name] = got.get(name, 0) + 1
+
     def struct_body(self, name, at=None):
         """The struct body `name` denotes, as seen from file `at`."""
         if at is not None and (at, name) in self.structs_at:
             return self.structs_at[(at, name)]
-        return self.structs.get(name)
+        body = self.structs.get(name)
+        if body is not None:
+            self._cross_pick("struct", name, at)
+        return body
 
     def dtype_key(self, name, at=None):
         """(declaring file, name) for the rb_data_type_t `name` names, seen from `at`.
@@ -604,6 +625,8 @@ class Tree:
         """
         if at is not None and (at, name) in self.dtypes_at:
             return (at, name)
+        if self.dtype_file.get(name) is not None:
+            self._cross_pick("dtype", name, at)
         return (self.dtype_file.get(name), name)
 
     def dtype_entry(self, key):
@@ -772,7 +795,10 @@ class Tree:
         """
         if at is not None and (at, name) in self.funcs_at:
             return self.funcs_at[(at, name)]
-        return self.funcs.get(name, self.macros.get(name))
+        body = self.funcs.get(name, self.macros.get(name))
+        if body is not None:
+            self._cross_pick("callback", name, at)
+        return body
 
     # -- structs ------------------------------------------------------------
 
@@ -2138,6 +2164,14 @@ def report(name, tree, suspects, clears, verbose, grades=None):
     shadow = {k: sum(1 for n in v.values() if n > 1) for k, v in tree.shadowed.items()}
     amb += "".join(", %d shadowed %s name(s)" % (n, k)
                    for k, n in sorted(shadow.items()) if n)
+    # ...and the pick that a shadowed name actually caused, which is a different signal.
+    # A file that does not define the name still falls back to the tree-wide first-wins
+    # entry, so a non-zero count here says a verdict in this tree rests on file order and
+    # names WHICH symbol to go and look at. Zero across the corpus, including nokogiri.
+    for kind, picked in sorted(tree.cross_picks.items()):
+        amb += (", %d cross-file pick(s) over %d shadowed %s name(s): %s"
+                % (sum(picked.values()), len(picked), kind,
+                   ",".join(sorted(picked)[:4])))
     print("%s: %d suspect(s), %d field(s) cleared "
           "[%d wrap site(s), %d dtype(s), %d unresolved%s]%s"
           % (name, len(suspects), len([c for c in clears if c[2] != "-"]),
@@ -2567,6 +2601,20 @@ static const rb_data_type_t w_type = { "wbox", { w_mark, w_free, }, };
 static VALUE w_alloc(VALUE k) { wbox_t *w; return TypedData_Make_Struct(k, wbox_t, &w_type, w); }
 """
 
+# The reviewer named TWO shapes for that tier and RED_HELPER_PARAM is only the first. Here
+# the helper does mark a parameter -- just not this one. It is the fixture that separates a
+# parameter-INDEX mapping from the cheaper "does the callee touch any parameter at all"
+# fix, which passes the global case above and clears `b` here exactly as before.
+RED_HELPER_OTHER_PARAM = """
+#include <ruby.h>
+typedef struct { VALUE a; VALUE b; } pbox_t;
+static void pair(VALUE x, VALUE y) { rb_gc_mark(x); }
+static void p_free(void *p) { xfree(p); }
+static void p_mark(void *p) { pbox_t *w = (pbox_t *)p; pair(w->a, w->b); }
+static const rb_data_type_t p_type = { "pbox", { p_mark, p_free, }, };
+static VALUE p_alloc(VALUE k) { pbox_t *w; return TypedData_Make_Struct(k, pbox_t, &p_type, w); }
+"""
+
 # Two grader defects in one function, both of which downgraded a field that holds an
 # arbitrary caller object. `held` takes a PARAMETER whose only assignment comes AFTER the
 # store; the whole-function source scan saw `input = Qnil` and graded IMMEDIATE-ONLY.
@@ -2636,6 +2684,20 @@ def self_test(base, siblings=()):
                   "       Pass the CORPUS DIRECTORY, not a glob of trees:\n"
                   "           --self-test ~/.cache/truffle-hunt-corpus" % base)
             return 2
+    # A HALF-built acceptance dir is the same failure wearing a different hat, and it is
+    # the one the round-9 sweeps hit in two sibling predicates: fixture absent, "missing"
+    # printed, exit 0. Here `fields_flagged` on a directory that is not there sweeps an
+    # empty tree and returns an empty set, so "sqlite3 pr-723 clears all six" -- a check
+    # phrased as `not leaked` -- would PASS on nothing at all before the de-marked mutant
+    # a few lines later died on `cp -r`. Name the missing tree and refuse to run: a
+    # fixture that is not there is a failed run, never a negative result.
+    missing = [n for n in ("m2-red", "m2-green", "sqlite3-pr723")
+               if not (base / n / "ext").is_dir()]
+    if missing:
+        print("ABORT: acceptance fixtures missing under %s: %s\n"
+              "       Rebuild them per the module docstring; a missing fixture is a\n"
+              "       failed run, not a pass." % (base, ", ".join(missing)))
+        return 2
     ok = True
     tally = [0, 0, 0]        # pass, total, skipped
 
@@ -2841,6 +2903,27 @@ def self_test(base, siblings=()):
     check("other" in cleared, "green (helper-param) a direct mark beside it still clears",
           cleared)
 
+    cats, fields = flagged_from_source(RED_HELPER_OTHER_PARAM)
+    cleared = cleared_from_source(RED_HELPER_OTHER_PARAM)
+    check("b" in fields,
+          "red (helper-param) a helper that marks its OTHER parameter clears nothing",
+          sorted(fields))
+    check("a" in cleared,
+          "green (helper-param) the parameter it does mark still clears", cleared)
+
+    # A half-built acceptance dir must ABORT. Before the guard above this ran the first
+    # three checks against empty sweeps and then died inside `cp -r` -- an exception, no
+    # verdict line, and one green (`not leaked`) earned on a tree that was not there.
+    with tempfile.TemporaryDirectory() as tmp:
+        half = pathlib.Path(tmp) / "acceptance"
+        (half / "m2-red" / "ext").mkdir(parents=True)
+        (half / "m2-green" / "ext").mkdir(parents=True)
+        try:
+            rc = self_test(half)
+        except Exception as e:                                   # noqa: BLE001
+            rc = "raised %r" % (e,)
+        check(rc == 2, "a missing fixture ABORTS (2); it never reports a pass", rc)
+
     # -- the funnel each round-7 fixture walked, not just what came out of it -------
     #
     # Measured, both versions, so the numbers are a control and not a transcription:
@@ -2852,6 +2935,7 @@ def self_test(base, siblings=()):
     #   tu-dtype            2          1           2     <- second descriptor invisible
     #   c++ init            1          0           2     <- the whole defect
     #   helper-param        1          2           2
+    #   helper-other-param  1          2           2
     #   store-flow          3          2           2     <- a GRADE defect: same rows
     #
     # The last row is the point of grading against the funnel too: threads 4 and 5 move
@@ -2863,6 +2947,7 @@ def self_test(base, siblings=()):
         ("(tu-dtype)", RED_TU_DTYPE, (2, 2)),
         ("(c++ init)", {"t.cc": RED_CXX_INIT}, (1, 2)),
         ("(helper-param)", {"t.c": RED_HELPER_PARAM}, (1, 2)),
+        ("(helper-other-param)", {"t.c": RED_HELPER_OTHER_PARAM}, (1, 2)),
         ("(store-flow)", {"t.c": RED_STORE_FLOW}, (3, 2)),
     ):
         got = funnel_from_sources(files)
