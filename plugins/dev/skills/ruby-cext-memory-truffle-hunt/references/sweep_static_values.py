@@ -892,7 +892,20 @@ class Tree:
                         self._struct_slots(path, head_off, nm + arr, nm,
                                            unit[body_open + 1:close], path,
                                            off + body_open + 1, 0)
-            return
+                return
+            # An INITIALISER brace, not an aggregate body. `static struct common_field
+            # common_http_fields[] = { ... };` (unicorn common_field_optimization.h:17)
+            # puts its first `{` after the `=`, so the case (1) test above fails and the
+            # bare `return` that used to live here dropped the declaration WHOLE -- the
+            # array-of-file-static-struct shape this predicate exists to walk, reported as
+            # `field 0`. The discard happened BEFORE any type was inspected, so it was
+            # type-blind: it dropped 17 declarations across the corpus and would have
+            # dropped a VALUE-bearing one just as silently. Cut the initialiser off and
+            # let cases (2)/(3) read the declarator that is left; `head_off` is the unit's
+            # own offset and does not move, so the slot still reports its own file:line.
+            if not unit[:body_open].rstrip().endswith("="):
+                return
+            unit = unit[:body_open].rstrip()[:-1].rstrip() + ";"
         # (2) `static rbtracer_t obj;` -- a named struct type at file scope.
         d = re.match(r"^\s*(?:static\s+|const\s+|volatile\s+|_Atomic\s+)*"
                      r"(?:struct\s+|union\s+)?(\w+)\s+([^;]+);$", unit)
@@ -1574,11 +1587,69 @@ extern "C" void Init_probe(void) {
 """
 
 
-def _sweep_source(src, rules=ALL_RULES):
-    """Sweep a one-file tree generated from a C++ source string."""
+RED_ARRAY_OF_STRUCT = """
+#include <ruby.h>
+
+/* unicorn's shape, reduced to two elements: a file-scope ARRAY OF STRUCT whose first
+   brace opens an INITIALISER LIST, not the aggregate body. The element type carries a
+   VALUE, the init loop stores an allocation into it, and nothing registers it. */
+struct common_field {
+    const signed long len;
+    const char *name;
+    VALUE value;
+};
+
+static struct common_field common_http_fields[] = {
+    { 6, "ACCEPT", Qnil },
+    { 6, "COOKIE", Qnil },
+};
+
+void Init_probe(void) {
+    struct common_field *cf;
+    for (cf = common_http_fields;
+         cf < common_http_fields + 2; cf++) {
+        cf->value = rb_str_new(cf->name, cf->len);
+    }
+}
+"""
+
+GREEN_ARRAY_OF_STRUCT = """
+#include <ruby.h>
+
+/* The same shape, registered. This green is the load-bearing half: before the
+   initialiser-brace fix it passed for the WRONG REASON -- the declaration was discarded
+   whole, so the member was never looked at, and "not flagged" meant "not enumerated". */
+struct common_field {
+    const signed long len;
+    const char *name;
+    VALUE value;
+};
+
+static struct common_field common_http_fields[] = {
+    { 6, "ACCEPT", Qnil },
+    { 6, "COOKIE", Qnil },
+};
+
+void Init_probe(void) {
+    struct common_field *cf;
+    for (cf = common_http_fields;
+         cf < common_http_fields + 2; cf++) {
+        cf->value = rb_str_new(cf->name, cf->len);
+        rb_global_variable(&cf->value);
+    }
+}
+"""
+
+
+def _sweep_source(src, rules=ALL_RULES, suffix=".cc"):
+    """Sweep a one-file tree generated from a source string.
+
+    Defaults to C++ because most generated fixtures here are; pass suffix=".c" for the
+    ones whose shape is C, so the fixture exercises the same file set a C gem would.
+    """
     tmp = pathlib.Path(tempfile.mkdtemp()) / "ext"
     tmp.mkdir(parents=True)
-    (tmp / "probe.cc").write_text(src)
+    (tmp / ("probe" + suffix)).write_text(src)
     return _sweep(tmp, rules)
 
 
@@ -1780,6 +1851,35 @@ def self_test(pool):
           "...and the in-class declaration and the out-of-line definition "
           "`VALUE Rooted::cCollector = Qnil;` merge into ONE slot, not two (%d slot(s) from "
           "%d declaration(s))" % (cxg.slots, cxg.decls))
+
+    # 5h. INITIALISER-BRACE RED. `static struct T name[] = { ... };` puts its first `{`
+    #     after the `=`, so the aggregate-body test failed and the declaration was dropped
+    #     WHOLE -- before any type was inspected, which made the miss type-blind. It cost
+    #     17 declarations across the corpus. The predicate walks file-scope struct OBJECTS
+    #     by design; this is that walk not starting.
+    ini = _sweep_source(RED_ARRAY_OF_STRUCT, suffix=".c")
+    ihits = {h[3]: h for h in ini.hits}
+    check("common_http_fields[].value" in ihits,
+          "initialiser-brace RED: a VALUE member of `static struct T name[] = {...}` is "
+          "enumerated and reported -- the shape unicorn reported as `field 0`",
+          sorted(ihits))
+    check(ini.fields >= 1,
+          "...and it is counted as a FIELD slot (%d), not silently absent: `field 0` is "
+          "what the miss looked like from the outside" % ini.fields)
+
+    # 5i. INITIALISER-BRACE GREEN. Asserted as a NAMED discharge on an ENUMERATED slot.
+    #     Pre-fix this fixture "passed" on slots=0 -- a clean sheet produced by the parser
+    #     finding nothing, which is the acceptance-item-2 failure the header warns about.
+    ing = _sweep_source(GREEN_ARRAY_OF_STRUCT, suffix=".c")
+    idis = {d[3]: d for d in ing.discharges}
+    check(not ing.hits
+          and idis.get("common_http_fields[].value", ("",))[0] == "registered-slot",
+          "initialiser-brace GREEN: `rb_global_variable(&cf->value)` discharges the same "
+          "slot by NAME -- %s"
+          % (idis["common_http_fields[].value"][4]
+             if "common_http_fields[].value" in idis
+             else "NOT DISCHARGED (absent, not cleared)"),
+          [h[3] for h in ing.hits] + sorted(idis))
 
     # 6. MUTATION TABLE. Disable each discharge rule in turn; a rule that can be removed
     #    without breaking a control is decorative and should be deleted. msgpack is in the
