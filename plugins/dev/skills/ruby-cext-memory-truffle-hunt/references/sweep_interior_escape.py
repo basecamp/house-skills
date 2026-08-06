@@ -663,6 +663,7 @@ def file_scope_objects(src):
     and `struct S { ... };` declares no object at all.
     """
     names = {}
+    anon = tu_scope.anonymous_namespace_spans(src)
     for _off, unit in top_level_units(src):
         u = unit.strip()
         if not u.endswith(";"):
@@ -670,7 +671,13 @@ def file_scope_objects(src):
         u = u[:-1].strip()
         if not u or DECL_NOT_OBJECT.match(u):
             continue
-        is_static = bool(re.search(r"\bstatic\b", u))
+        # INTERNAL LINKAGE, BOTH SPELLINGS. `namespace { const char *saved; }` is internal
+        # from the NAMESPACE with no `static` on the declaration, so a scope decision that
+        # reads only the declaration text makes two translation units' slots one tree-wide
+        # name -- the same rule predicate C's item-4 over-clear was, asked here in the
+        # REPORTING direction (a merged slot makes a store in the other file look like a
+        # sink). One function, tu_scope.internal_linkage, for both.
+        is_static = tu_scope.internal_linkage(u, _off, anon)
         for d in split_args(u):
             d = d.split("=")[0]
             if "}" in d:
@@ -3383,6 +3390,22 @@ def self_test(pool):
           "slot walk green: an aggregate BODY declares members and a bare tag declares "
           "nothing -- only `g_slot`, `saved` and `hidden` are objects, and only the two "
           "spelled `static` in a .c have internal linkage", sorted(slots.items()))
+    # ...and the SECOND spelling of that linkage, which carries no `static` at all (#29
+    # item 4). `namespace { const char *saved; }` is internal from the namespace. This is
+    # predicate C's item-4 over-clear asked in the REPORTING direction: a slot wrongly
+    # called tree-wide makes a store in ANOTHER file look like a store into this one's sink.
+    # Corpus-neutral -- no tree in the 99 spells it -- so it is pinned here or nowhere, and
+    # the two negative spellings travel with it, since `namespace X {` and `extern "C" {`
+    # are transparent to storage scope but do NOT confer internal linkage.
+    ns_slots = file_scope_objects(
+        "namespace {\n    const char *anon_slot;\n}\n"
+        "namespace prof {\n    const char *named_slot;\n}\n"
+        "extern \"C\" {\n    const char *c_slot;\n}\n")
+    check(ns_slots == {"anon_slot": True, "named_slot": False, "c_slot": False},
+          "#29 item 4, this predicate's half: an ANONYMOUS namespace gives its slots "
+          "internal linkage with no `static` on the declaration, while a named namespace "
+          "and an `extern \"C\"` block do not -- one function, tu_scope.internal_linkage, "
+          "answering for both predicates", sorted(ns_slots.items()))
 
     # 8i/8j. GENERATED RED AND GREEN: A SUBTRACTIVE POINTER EXPRESSION IS STILL A POINTER.
     #

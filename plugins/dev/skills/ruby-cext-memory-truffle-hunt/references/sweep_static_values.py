@@ -785,6 +785,10 @@ class Tree:
         self.dtypes = {}         # rb_data_type_t name -> initialiser body
         self.funcs = {}          # in-tree function name -> body text
         self.func_spans = {}     # path -> [(body start, body end)] for top-level functions
+        # path -> anonymous-namespace body spans. Internal linkage with no `static` on the
+        # declaration; see _unit_slots.
+        self.anon = {p: tu_scope.anonymous_namespace_spans(t)
+                     for p, t in self.files.items()}
         for path, src in self.files.items():
             self._index_structs(path, src)
             self._index_aliases(src)
@@ -1133,14 +1137,23 @@ class Tree:
         head = unit.strip()
         if not head or head.startswith("typedef") or re.match(r"^\s*extern\b", head):
             return
-        # INTERNAL LINKAGE, decided on the storage-class specifier and nothing else. `static`
-        # anywhere ahead of the declarator makes this object private to the file, so it is
-        # scoped; `EXTERN VALUE x;` and a bare `VALUE rb_mVernier;` are one object tree-wide
-        # and stay unscoped.
+        # INTERNAL LINKAGE, and it has TWO SPELLINGS. `static` anywhere ahead of the
+        # declarator makes this object private to the file, so it is scoped; `EXTERN VALUE
+        # x;` and a bare `VALUE rb_mVernier;` are one object tree-wide and stay unscoped.
         # The declarator itself is cut off first, or an initialiser mentioning `static` in
         # a nested expression would flip the linkage.
+        #
+        # THE SECOND SPELLING CARRIES NO `static` AT ALL. `namespace { VALUE cache; }` takes
+        # internal linkage from the NAMESPACE, so a decision that reads only the declaration
+        # text gave two translation units ONE tree-scoped slot and let one file's
+        # `rb_global_variable(&cache)` discharge the other file's unregistered allocating
+        # one. That is the same over-clear the round-8 `static` split was extracted to end,
+        # reached through different syntax -- so it is asked of tu_scope.internal_linkage
+        # rather than answered again here, and predicate D asks the same function of the
+        # same spans for its own file-scope sinks.
         scope = tu_scope.declared_scope(
-            path, re.search(r"\bstatic\b", split_top_off(unit, "=")[0][1]))
+            path, tu_scope.internal_linkage(split_top_off(unit, "=")[0][1],
+                                            head_off, self.anon.get(path, ())))
         body_open = unit.find("{")
         # (1) `static struct { ... } _stackprof;` / `static struct tag { ... } x;`
         if body_open >= 0:
@@ -3386,6 +3399,41 @@ void Init_probe(void) { rb_define_method(rb_cObject, "e", entry, 1); }
           "slots %d/%d disch %s hits %s" % (ob.slots, ob.decls,
                                             [(d[0], d[3]) for d in ob.discharges],
                                             [(h[0], h[3]) for h in ob.hits]))
+
+    # 4. AN ANONYMOUS NAMESPACE IS INTERNAL LINKAGE WITH NO `static` ON THE DECLARATION.
+    #    Two TUs each spelling `namespace { VALUE cache; }` are two objects. Scoped on the
+    #    declaration text alone they merged into one tree-wide slot and a.cc's registration
+    #    discharged b.cc's allocating one: `slots 1/2`, HITS 0.
+    anon_head = "#include <ruby.h>\n\nnamespace {\n    VALUE cache;\n}\n"
+    named_head = "#include <ruby.h>\n\nnamespace prof {\n    VALUE cache;\n}\n"
+    reg_tail = "\nvoid reg_a(void) { rb_global_variable(&%scache); }\n"
+    use_tail = ("\nextern \"C\" VALUE mk_b(VALUE self) { %(q)scache = "
+                "rb_str_new_cstr(\"b\"); return %(q)scache; }\n"
+                "void Init_probe(void) { rb_define_method(rb_cObject, \"b\", mk_b, 0); }\n")
+    an = _sweep_sources({"a.cc": anon_head + reg_tail % "",
+                         "b.cc": anon_head + use_tail % {"q": ""}})
+    check((an.slots, an.decls, sorted(d[0] for d in an.discharges),
+           sorted(h[0] for h in an.hits)) == (2, 2, ["registered-slot"], ["ALLOCATES"]),
+          "#29 item 4 RED: `namespace { VALUE cache; }` in two translation units is two "
+          "slots -- one registered, one not. Unfixed the scope decision read only the "
+          "declaration text, merged them and discharged the unregistered one",
+          "slots %d/%d disch %s hits %s" % (an.slots, an.decls,
+                                            [(d[0], d[3]) for d in an.discharges],
+                                            [(h[0], h[3]) for h in an.hits]))
+    nm = _sweep_sources({"a.cc": named_head + reg_tail % "prof::",
+                         "b.cc": named_head + use_tail % {"q": "prof::"}})
+    st = _sweep_sources(
+        {"a.cc": "#include <ruby.h>\n\nstatic VALUE cache;\n" + reg_tail % "",
+         "b.cc": "#include <ruby.h>\n\nstatic VALUE cache;\n" + use_tail % {"q": ""}})
+    check((nm.slots, nm.decls) == (1, 2)
+          and (st.slots, st.decls, sorted(d[0] for d in st.discharges),
+               sorted(h[0] for h in st.hits)) == (2, 2, ["registered-slot"],
+                                                  ["ALLOCATES"]),
+          "#29 item 4 GREEN, both directions: a NAMED namespace is external linkage and "
+          "still merges tree-wide (slots 1/2), while a plain `static` in one TU still "
+          "does not reach another (slots 2/2, one discharged one hit)",
+          "named %d/%d, static %d/%d %s" % (nm.slots, nm.decls, st.slots, st.decls,
+                                            [(h[0], h[3]) for h in st.hits]))
 
     def _index_names(src):
         return set(Tree(_write_sources({"probe.cpp": src})).funcs)
