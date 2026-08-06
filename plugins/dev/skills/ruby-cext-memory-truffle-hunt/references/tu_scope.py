@@ -870,6 +870,37 @@ def innermost_block(body, off, within=None):
     return min(encl, key=lambda oc: oc[1] - oc[0]) if encl else None
 
 
+def _stmt_start(body, off):
+    """Offset just past the statement boundary before `off`, ignoring `;` inside parens.
+
+    A `for` HEADER HOLDS TWO SEMICOLONS THAT ARE NOT STATEMENT SEPARATORS (#30 review), and
+    a plain `rfind(";")` takes the last of them:
+
+        for (i = 0; i < n; i++) p = "safe";
+
+    measuring the head as `i++)` rather than `for (i = 0; i < n; i++)`, so `_ARM_HEAD` never
+    sees the `for` and the write reads as unconditional -- although a zero-iteration loop
+    never runs it. Measured: rmagick's row disappears for the `for` spelling and survives for
+    the `while` spelling, whose head contains no semicolon at all, which is what named the
+    cause.
+
+    A `(` met while the depth is already zero is left at zero rather than going negative:
+    that means the scan has walked out of an enclosing argument list, and stopping there
+    would cut the head shorter than the statement, not longer.
+    """
+    depth = 0
+    for i in range(off - 1, -1, -1):
+        c = body[i]
+        if c == ")":
+            depth += 1
+        elif c == "(":
+            if depth:
+                depth -= 1
+        elif depth == 0 and c in ";{}":
+            return i + 1
+    return 0
+
+
 _BARE_ARM = re.compile(r"\b(?:else|do)\s*$")
 _ARM_HEAD = re.compile(r"\b(if|for|while|switch)\s*$")
 # A conditional OPERATOR guarding a write that has no conditional STATEMENT around it:
@@ -909,8 +940,7 @@ def conditional_stmt(body, off):
     That is the safe direction here and deliberately so -- an unrecognised guard KILLS a
     live row, an over-recognised one merely keeps a row a human then reads.
     """
-    pre = body[:off]
-    head = pre[max(pre.rfind(";"), pre.rfind("{"), pre.rfind("}")) + 1:].rstrip()
+    head = body[_stmt_start(body, off):off].rstrip()
     if _BARE_ARM.search(head):
         return True
     if _COND_OP.search(head):

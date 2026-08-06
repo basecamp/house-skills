@@ -1685,6 +1685,18 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
     #                   this local. The third spelling of the `->`/`.` rule writes() already
     #                   carries, and the one character that was missing from it.
     #
+    #     AND ONE MORE, WHOSE CONTROL NAMED ITS OWN CAUSE:
+    #
+    #       for-body    `for (n = 0; n < 3; n++) p = "safe"; return p;`  -- must STILL report
+    #       while-body  `while (out) p = "safe"; return p;`              -- ditto, and this
+    #                   one was ALREADY right
+    #
+    #     The `for` header holds two semicolons that are not statement separators, so the
+    #     statement-boundary scan took the last of them and measured the head as `n++)`
+    #     rather than `for (n = 0; n < 3; n++)`. `while`, whose head has no semicolon at
+    #     all, was correct the whole time -- the pair is what identified the cause rather
+    #     than merely the symptom, and it is why both spellings are kept here.
+    #
     #     THE FUNNEL IS ASSERTED IN EVERY ARM. A regression that empties the index prints
     #     `0 fn(s), 0 conversions` and would otherwise read as four passing greens.
     kill_src = """#include <ruby.h>
@@ -1716,6 +1728,9 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
         "restore":   ('    q = p;\n    p = "safe";\n    p = q;\n', "p",
                       ["RETURNS-INTERIOR"]),
         "qual-write":('    Holder::p = "safe";\n', "p", ["RETURNS-INTERIOR"]),
+        "for-body":  ('    for (n = 0; n < 3; n++) p = "safe";\n', "p",
+                      ["RETURNS-INTERIOR"]),
+        "while-body":('    while (out) p = "safe";\n', "p", ["RETURNS-INTERIOR"]),
     }
     kr = {}
     for tag, (mid, ret, _want) in kill_arms.items():
