@@ -116,6 +116,70 @@ allocating source, slots discharged (per rule), slots remaining. "0 hits" on a t
 slots is a different fact from "0 hits" on a tree with 40 slots, and only the counters tell
 them apart. Round 4's `*: 0 suspects` on an unexpanded shell glob is the precedent.
 
+C++ SCOPES, AND THE STATIC THAT LIVES IN A CLASS BODY
+-----------------------------------------------------
+`static VALUE` is not a file-scope-only spelling. C++ gives it three more homes, and all
+three have the SAME storage duration -- one slot, alive for the whole process, invisible to
+the GC unless somebody hands it over:
+
+  namespace prof { static VALUE cache; }     namespace scope IS file scope
+  extern "C" { static VALUE cache; }         a linkage block is not a scope at all
+  class Registry { static VALUE cache; };    a static DATA MEMBER
+
+top_level_units walked OVER all three. A namespace or a linkage block reads as a function
+body, so its entire contents were consumed as one unit and dropped; a class body reads as
+neither an aggregate nor a function, so it was yielded whole and then rejected by
+_unit_slots. This is the sibling of the hole sweep_unmarked.py closed the same round --
+`struct|union` did not match `class`, so vernier measured 0 suspects while holding three
+unmarked VALUEs -- and it recurs here because the two scripts lex C++ separately.
+
+The measured before-state on a probe shaped like vernier: an INDENTED `    static VALUE
+cache;` inside a class body was found by ACCIDENT, because the function-local-static scan
+is `^[ \t]+static\s+VALUE` and a member declaration is also indented -- keyed BARE, so
+`Registry::cache` and a file-scope `cache` collapse into one row. An UNINDENTED member, or
+one written `public: static VALUE cache;` on a single line, was not found at all. Accidental
+recall under the wrong key is the worst of the three outcomes: it looks like coverage.
+
+So class_scopes walks namespaces, linkage blocks and nested class bodies for real, and
+_class_member_slots keys what it finds `Class::member`. The qualifier is not decoration --
+`rb_global_variable(&Registry::cache)` normalises to `Registry::cache`, and a bare key
+cannot match it.
+
+  access labels     `public:` is a LABEL, not a statement, so no `;` separates it from the
+                    member after it. Same one-fragment defect sweep_unmarked.py fixed in its
+                    field matcher this round; here it hides the FIRST member of every
+                    section.
+  method bodies     a class body interleaves declarations with method bodies. blank_bodies
+                    turns both braces into `;` so `void f() { } static VALUE cache;` is two
+                    fragments, not one -- without it every member after the first method is
+                    invisible, which is the commonest C++ class layout there is.
+  out-of-line       `VALUE Registry::cache = rb_str_new2("x");` at file scope is the
+                    DEFINITION the ODR requires, and it is where the interesting assignment
+                    usually lives. It is BOTH a declaration and a store, and it is treated
+                    as both: declarator() keeps the `::` so the definition raises a slot
+                    under the same `Registry::cache` key the class body raised (dedupe
+                    merges them), and the ordinary source scan reads its initialiser. The
+                    slot is raised from the definition too, deliberately, so a class
+                    declared in a header this tree does not ship still leaves a row rather
+                    than a silent zero.
+  both spellings    a member is `Registry::cache` from outside and bare `cache` from inside
+                    its own methods, and both name one object, so the source pattern makes
+                    the qualifier OPTIONAL. That inherits the tree-wide name aliasing this
+                    script already documents for its dedupe rule -- an unrelated `cache =`
+                    elsewhere in the tree is read as a source. Registrations are matched on
+                    the QUALIFIED key only: an extra source can only make an all-sources
+                    discharge harder, but an extra registration match would CLEAR a row, and
+                    that is the direction this sweep is not allowed to be wrong in.
+
+KNOWN, NOT FIXED HERE
+---------------------
+`_index_structs` still indexes `struct|union` only, so a file-scope OBJECT of C++ class type
+(`static ThreadTable table;`) resolves to no struct body and contributes no INSTANCE fields;
+and `_struct_slots` splits a struct body on `;` alone, so a field declared after an in-class
+method definition shares a fragment with it and is dropped. Both are the instance-field
+half of the C++ hole, they are predicate A's subject matter more than this one's, and
+neither is touched here. Named so the next reader gets a gap rather than a clean sheet.
+
 LEXING
 ------
 Copied from sweep_unmarked.py. strip_noise blanks comments and string bodies but keeps
@@ -293,8 +357,22 @@ def find_calls(body):
     return out
 
 
-def top_level_units(src):
-    """[(offset, text)] -- one entry per depth-0 declaration or definition.
+# C++ SCOPE HEADS. Each is matched against the text between the last `;`/`}` and a `{`, so
+# every pattern is `$`-anchored.
+#
+# `extern "C"` reaches here AFTER strip_noise, which blanks string BODIES and keeps the
+# quotes -- the text is `extern " " {`, so the pattern has to allow a blanked literal.
+NAMESPACE_HEAD = re.compile(r"\bnamespace(?:\s+\w+(?:\s*::\s*\w+)*)?\s*$")
+LINKAGE_HEAD = re.compile(r"\bextern\s*\"[^\"]*\"\s*$")
+# A NAMED class/struct/union body, optionally `final`, optionally with a base clause.
+# Anonymous aggregates (`static struct {`) deliberately do not match: they stay on the
+# existing _unit_slots path, which reads their declarator list and walks the OBJECT.
+CLASS_HEAD = re.compile(r"\b(?:class|struct|union)\s+(\w+)\s*(?:final\b\s*)?(?::[^{;]*)?$")
+ACCESS_LABEL = re.compile(r"\b(?:public|private|protected)\s*:")
+
+
+def top_level_units(src, base=0):
+    """[(offset, text)] -- one entry per declaration or definition at static-storage scope.
 
     The `{` disposition is the whole trick. A depth-0 brace is part of the CURRENT
     statement when it opens an aggregate (`static struct {`) or an initialiser (`... = {`),
@@ -302,6 +380,17 @@ def top_level_units(src):
     `Init_stackprof`'s body into the next declaration and the `static VALUE sym_object,
     ...;` line after it becomes a declarator list of the function -- silently dropping 28
     slots, which is a recall hole that reports as a clean sheet.
+
+    C++ adds a third disposition, and it is the one this walk was missing: a brace that
+    opens a scope which is NOT a new storage duration. `namespace prof {` and `extern "C" {`
+    both read as function bodies to the rule above, so their entire contents were consumed
+    as one unit and dropped -- every namespace-scope `static VALUE` in a C++ gem, invisible.
+    They are walked THROUGH: `base` carries the enclosing offset so a slot found three
+    namespaces deep still reports its own file:line.
+
+    Class BODIES are not walked here. They are a different scope with a different key
+    (`Class::member`), and _index_slots reads them through class_scopes; a class body still
+    falls out of this loop as an inert unit that _unit_slots rejects.
     """
     n, i, start = len(src), 0, 0
     while i < n:
@@ -311,17 +400,83 @@ def top_level_units(src):
             if close < 0:
                 return
             pre = src[start:i].rstrip()
+            if NAMESPACE_HEAD.search(pre) or LINKAGE_HEAD.search(pre):
+                for u in top_level_units(src[i + 1:close], base + i + 1):
+                    yield u
+                i = start = close + 1
+                continue
             if re.search(r"\b(struct|union|enum)\b\s*\w*$", pre) or pre.endswith("="):
                 i = close + 1
                 continue
-            yield start, src[start:close + 1]
+            yield base + start, src[start:close + 1]
             i = start = close + 1
             continue
         if c == ";":
-            yield start, src[start:i + 1]
+            yield base + start, src[start:i + 1]
             i = start = i + 1
             continue
         i += 1
+
+
+def class_scopes(src, base=0, prefix=""):
+    """[(qualifier, body offset, body text)] for every C++ class/struct/union BODY.
+
+    Descends through namespaces and linkage blocks (which do not qualify a member name) and
+    through nested class bodies (which do), so `class Outer { class Inner { ... }; };` yields
+    both, and Inner's members are keyed `Outer::Inner::member`.
+
+    Function bodies are NOT descended: a class defined inside a function is a local class,
+    and a local class cannot have a static data member at all.
+    """
+    n, i, start = len(src), 0, 0
+    while i < n:
+        c = src[i]
+        if c == "{":
+            close = match_brace(src, i)
+            if close < 0:
+                return
+            pre = src[start:i].rstrip()
+            body, boff = src[i + 1:close], base + i + 1
+            m = CLASS_HEAD.search(pre)
+            if m:
+                qual = prefix + m.group(1) + "::"
+                yield qual, boff, body
+                for s in class_scopes(body, boff, qual):
+                    yield s
+            elif NAMESPACE_HEAD.search(pre) or LINKAGE_HEAD.search(pre):
+                for s in class_scopes(body, boff, prefix):
+                    yield s
+            i = start = close + 1
+            continue
+        if c == ";":
+            start = i + 1
+        i += 1
+
+
+def blank_bodies(src):
+    """Blank every brace-delimited group, replacing BOTH braces with `;`.
+
+    A class body interleaves member declarations with method bodies, and a method body's
+    statements are not members. Length and newlines are preserved so offsets into the result
+    still map back to the file, which every hit's file:line depends on.
+
+    Turning the braces into `;` rather than blanking them is what separates
+    `void f() { } static VALUE cache;` into two fragments. Left as one, the fragment leads
+    with `void f()` and the member declaration behind it never matches -- and "a method,
+    then a static" is the commonest class layout there is, so that alone would have made the
+    descent look like it works while finding nothing.
+    """
+    out, depth = [], 0
+    for ch in src:
+        if ch == "{":
+            depth += 1
+            out.append(";")
+        elif ch == "}":
+            depth = max(0, depth - 1)
+            out.append(";")
+        else:
+            out.append(ch if not depth else ("\n" if ch == "\n" else " "))
+    return "".join(out)
 
 
 # ------------------------------------------------------- the vocabulary
@@ -494,10 +649,16 @@ class Tree:
             self._index_dtypes(src)
             self._index_funcs(src)
         self.unresolved_members = 0   # struct members whose type did not resolve
+        # C++ descent coverage. A tree with 0 class members is only readable next to the
+        # number of class bodies the walk actually entered: "0 members" on 0 bodies is a C
+        # gem, "0 members" on 40 bodies is a measured absence, and a parse that entered no
+        # bodies at all reports the same 0 as both.
+        self.class_bodies = 0
         self.slots = []
         self.objects = {}        # file-scope object name -> (path, offset)
         for path, src in self.files.items():
             self._index_slots(path, src)
+        self.class_members = sum(1 for s in self.slots if "::" in s.key)
         # Dedupe by KEY, not by (file, key). kgio declares `static VALUE sym_wait_writable`
         # in three separate files -- three genuinely distinct slots that a name-keyed source
         # scan cannot tell apart anyway. Merging them makes the all-sources discharge rules
@@ -653,16 +814,63 @@ class Tree:
             # is declared at stackprof.c:168 and printed as :167 -- an off-by-one in the
             # one coordinate a reader uses to find the defect.
             self._unit_slots(path, off, unit)
+        # C++ class bodies, keyed `Class::member`. Walked before the function-local scan
+        # below, because that scan cannot tell a member from a local and would key the
+        # member wrong.
+        scopes = list(class_scopes(src))
+        self.class_bodies += len(scopes)
+        for qual, boff, body in scopes:
+            self._class_member_slots(path, qual, boff, body)
+        member_spans = [(boff, boff + len(body)) for _q, boff, body in scopes]
         # Function-LOCAL statics have static storage duration and exactly the same problem;
         # top_level_units deliberately skips function bodies, so they are picked up here.
         # vernier's commented-out `static VALUE gc_hook = Data_Wrap_Struct(...)` inside
         # Init_vernier is what this branch exists for.
         for m in re.finditer(r"^[ \t]+static\s+VALUE\s+([^;=(){}]+)[;=]", src, re.M):
+            # An INDENTED class member matches this pattern too -- which is how the sweep
+            # had accidental, bare-keyed recall on class statics before class_scopes
+            # existed. Keeping both would report one slot twice, once under a key that
+            # cannot match `rb_global_variable(&Registry::cache)`.
+            if any(a <= m.start() < b for a, b in member_spans):
+                continue
             for decl in split_args(m.group(1)):
                 nm, arr, ptr = declarator(decl)
                 if nm and not ptr:
                     self.slots.append(Slot(path, m.start(), nm + arr, nm, "scalar",
                                            "static VALUE " + decl.strip()))
+
+    def _class_member_slots(self, path, qual, boff, body):
+        """`static VALUE` DATA MEMBERS of one C++ class body, keyed `Class::member`.
+
+        Non-static members are deliberately not enumerated here: they are per-INSTANCE, and
+        an instance of a file-scope object is _struct_slots' subject while an instance
+        handed to TypedData_Wrap_Struct is sweep_unmarked.py's. Only `static` has the
+        file-scope storage duration this predicate is about.
+        """
+        flat = ACCESS_LABEL.sub(lambda m: blank(m.group(0)), blank_bodies(body))
+        for m in re.finditer(r"[^;]*;", flat):
+            frag = m.group(0)[:-1]
+            v = re.match(r"^\s*((?:[A-Za-z_]\w*\s+)*?)VALUE\s+(.+)$", frag, re.S)
+            if not v:
+                continue
+            lead = v.group(1).split()
+            # `static` must be present -- that is the whole discriminator -- and every other
+            # leading token has to be a type keyword or an ALL-CAPS macro, the same gate
+            # _unit_slots case (3) uses so that `EXTERN VALUE x;` survives it.
+            if "static" not in lead or not all(
+                    t in TYPE_KW or t in ("constexpr", "thread_local", "mutable")
+                    or t.isupper() for t in lead):
+                continue
+            # `static VALUE make(VALUE klass);` is a static METHOD, not a slot.
+            if "(" in split_top_off(v.group(2), "=")[0][1]:
+                continue
+            off = boff + m.start() + len(frag) - len(frag.lstrip())
+            for decl in split_args(v.group(2)):
+                nm, arr, ptr = declarator(decl)
+                if nm:
+                    self.slots.append(Slot(path, off, qual + nm + arr, qual + nm,
+                                           "ptr" if ptr else "scalar",
+                                           re.sub(r"\s+", " ", frag).strip()))
 
     def _unit_slots(self, path, off, unit):
         head_off = off + len(unit) - len(unit.lstrip())
@@ -708,9 +916,16 @@ class Tree:
         # everywhere else. Requiring a storage keyword found ONE slot in the whole gem --
         # a function-local static -- and the coverage line said `slots 1/1`, which reads
         # like a small gem rather than a parser that dropped the entire header.
+        #
+        # The paren gate is on the DECLARATOR, not on the whole statement. It is there to
+        # reject `VALUE rb_foo(VALUE self);` and `static VALUE (*fp)(VALUE);`, both of which
+        # put a `(` before any `=`. Gating on the whole statement also rejected every
+        # initialiser that calls something -- illegal for a static in C, ordinary in C++,
+        # and exactly the shape an out-of-line static member definition takes:
+        # `VALUE Registry::cache = rb_str_new2("x");` produced no slot at all.
         v = re.match(r"^\s*((?:[A-Za-z_]\w*\s+)*?)VALUE\s+([^;]+);$", unit)
         if v and all(t in TYPE_KW or t.isupper() for t in v.group(1).split()) \
-                and "(" not in v.group(2):
+                and "(" not in split_top_off(v.group(2), "=")[0][1]:
             v = re.match(r"^.*?VALUE\s+([^;]+);$", unit, re.S)
             for decl in split_args(v.group(1)):
                 nm, arr, ptr = declarator(decl)
@@ -730,6 +945,12 @@ class Tree:
         """
         if depth > 4:
             return
+        # C++ access specifiers are LABELS, not statements, so no `;` separates one from the
+        # member behind it: `struct S { public: VALUE held; }` puts `public:` and
+        # `VALUE held` in ONE fragment, the type matcher reads `public` as the type name and
+        # the FIRST member of every section disappears. Blanked, not deleted, so the member
+        # keeps its offset and reports its own file:line.
+        body = ACCESS_LABEL.sub(lambda m: blank(m.group(0)), body)
         for soff, stmt in split_top_off(body, ";"):
             lead = len(stmt) - len(stmt.lstrip())
             s = stmt.strip()
@@ -783,8 +1004,20 @@ class Tree:
             return self._src_memo[slot.key]
         out = []
         if slot.kind == "scalar" or "." not in slot.key:
-            pat = re.compile(r"(?<![\w.>])%s\s*(?:\[[^\[\]]*\])?\s*=(?!=)"
-                             % re.escape(slot.field))
+            # A C++ static data member is spelled `Registry::cache` from outside the class
+            # and bare `cache` from inside its own methods, and both name ONE object. So
+            # the class qualifier is optional in the pattern: requiring it loses every store
+            # made from a method body, and dropping it loses nothing but reads an unrelated
+            # `cache =` elsewhere in the tree as a source -- the same tree-wide name
+            # aliasing the dedupe rule already documents, and the safe direction, since an
+            # extra source can only make an all-sources discharge HARDER to earn.
+            name, qual = slot.field, ""
+            if "::" in name:
+                scope, name = name.rsplit("::", 1)
+                qual = r"(?:%s\s*::\s*)?" % r"\s*::\s*".join(
+                    re.escape(p) for p in scope.split("::"))
+            pat = re.compile(r"(?<![\w.>])%s%s\s*(?:\[[^\[\]]*\])?\s*=(?!=)"
+                             % (qual, re.escape(name)))
             for path, src in list(self.files.items()) + [(None, self.pasted)]:
                 for m in pat.finditer(src):
                     out.append((rhs_after(src, m.end() - 1), path, m.start(), None))
@@ -885,7 +1118,13 @@ def declarator(decl):
     ptr = "*" in d
     arr = "[]" if "[" in d else ""
     d = re.sub(r"\[[^\[\]]*\]", "", d).replace("*", " ")
-    ids = [i for i in re.findall(r"[A-Za-z_]\w*", d) if i not in TYPE_KW]
+    # `::` is kept ATTACHED, so the out-of-line definition `VALUE Registry::cache = ...;`
+    # yields `Registry::cache` -- the same key the class body raised, which is what lets
+    # the dedupe merge the declaration and the definition into one slot instead of two, and
+    # what lets `rb_global_variable(&Registry::cache)` match. Taking the last identifier
+    # instead named it `cache`, which matches neither.
+    d = re.sub(r"\s*::\s*", "::", d)
+    ids = [i for i in re.findall(r"[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*", d) if i not in TYPE_KW]
     return (ids[-1] if ids else "", arr, ptr)
 
 
@@ -1049,6 +1288,8 @@ class Result:
         self.fields = 0
         self.allocating = 0        # slots with >=1 source that can allocate
         self.unresolved_members = 0
+        self.class_bodies = 0      # C++ class/struct bodies the descent entered
+        self.class_members = 0     # `Class::member` static declarations seen
         self.hits = []             # (grade, path, line, key, headline, detail)
         self.discharges = []       # (rule, path, line, key, why)
 
@@ -1067,6 +1308,8 @@ def sweep(tree, name, rules=ALL_RULES):
     r.scalars = sum(1 for s in tree.slots if s.kind == "scalar")
     r.fields = sum(1 for s in tree.slots if s.kind != "scalar")
     r.unresolved_members = tree.unresolved_members
+    r.class_bodies = tree.class_bodies
+    r.class_members = tree.class_members
     for slot in sorted(tree.slots, key=lambda s: (str(s.path), s.off, s.key)):
         rel = str(slot.path.relative_to(tree.root)) if slot.path else "?"
         src = tree.files.get(slot.path, "")
@@ -1223,9 +1466,10 @@ def report(r, out=sys.stdout, verbose=False):
     # apart: no C sources, no file-scope VALUE at all, everything discharged by a named
     # rule, or the unit parser resolved nothing.
     print("%-24s %2d file(s) | slots %3d/%-3d (scalar %2d, field %3d, unresolved-member %2d) "
-          "| allocating %2d | discharged %3d [%s] | HITS %d"
+          "| c++ %2d class-body/%-3d static-decl | allocating %2d | discharged %3d [%s] "
+          "| HITS %d"
           % (r.name, r.files, r.slots, r.decls, r.scalars, r.fields, r.unresolved_members,
-             r.allocating, len(r.discharges),
+             r.class_bodies, r.class_members, r.allocating, len(r.discharges),
              " ".join("%s=%d" % (k, v) for k, v in sorted(rules.items())) or "-",
              len(r.hits)), file=out)
     return len(r.hits)
@@ -1266,6 +1510,76 @@ def _mutate(src_tree, edits):
         assert old in txt, "mutation anchor absent: %r in %s" % (old[:60], rel)
         p.write_text(txt.replace(old, new, 1))
     return dst
+
+
+# C++ CONTROLS. Generated at test time from a source string, never checked in, because the
+# corpus holds no instance of the shape: vernier is its only real C++ tree and every one of
+# its 28 in-class `static VALUE` declarations is a static METHOD. A predicate with no
+# control for a shape it claims to cover is a claim, not a result.
+#
+# Measured on the PRE-FIX script, which is what makes these reds rather than decoration:
+#   `public: static VALUE cache;`            -- 0 slots. The label and the declaration share
+#                                               one fragment and nothing matched.
+#   the member after an inline method body   -- 0 slots, same fragment as the method.
+#   `Rooted::cCollector` unindented          -- 0 slots.
+#   an INDENTED `    static VALUE x;`        -- 1 slot, keyed BARE `x`, by accident, via the
+#                                               function-local-static scan. Accidental recall
+#                                               under a key that cannot match
+#                                               `rb_global_variable(&Registry::x)` is worse
+#                                               than none: it reads as coverage.
+
+RED_CXX_STATIC_MEMBER = """
+#include <ruby.h>
+
+/* vernier's shape: a namespace, a class, access labels, inline methods, and the
+   out-of-line definitions the ODR requires. Every static below has file-scope storage
+   duration and nothing registers any of it. */
+namespace prof {
+
+class Registry {
+    public: static VALUE cache;
+
+    VALUE build(VALUE k) { cache = rb_str_new2("x"); return cache; }
+
+    /* declared AFTER an inline method body, with no `;` between them */
+    static VALUE names[4];
+};
+
+VALUE Registry::cache = Qnil;
+VALUE Registry::names[4];
+
+void fill(void) { Registry::names[0] = rb_ary_new(); }
+
+}
+"""
+
+GREEN_CXX_STATIC_MEMBER = """
+#include <ruby.h>
+
+/* The same shape, discharged: rb_define_class installs the object under a permanent
+   constant, so the slot is rooted by Ruby and must NOT report. The class body is at
+   column 0 -- the indentation the function-local-static scan needs is absent, so nothing
+   but the descent can see this member at all. */
+namespace prof {
+class Rooted {
+public:
+static VALUE cCollector;
+};
+VALUE Rooted::cCollector = Qnil;
+}
+
+extern "C" void Init_probe(void) {
+    prof::Rooted::cCollector = rb_define_class("Collector", rb_cObject);
+}
+"""
+
+
+def _sweep_source(src, rules=ALL_RULES):
+    """Sweep a one-file tree generated from a C++ source string."""
+    tmp = pathlib.Path(tempfile.mkdtemp()) / "ext"
+    tmp.mkdir(parents=True)
+    (tmp / "probe.cc").write_text(src)
+    return _sweep(tmp, rules)
 
 
 def self_test(pool):
@@ -1430,6 +1744,43 @@ def self_test(pool):
               "%d hits" % (rmr.slots, len(rmr.discharges), len(rmr.hits)),
               [h[3] for h in rmr.hits])
 
+    # 5f. C++ RED. A `static VALUE` DATA MEMBER of a class is a file-scope slot, and the
+    #     descent has to find it under a key the registration vocabulary can match.
+    cxx = _sweep_source(RED_CXX_STATIC_MEMBER)
+    chits = {h[3]: h for h in cxx.hits}
+    check("Registry::cache" in chits and chits["Registry::cache"][0] == "ALLOCATES",
+          "C++ RED: `public: static VALUE cache;` is found and reported, keyed "
+          "Registry::cache, grade %s"
+          % (chits["Registry::cache"][0] if "Registry::cache" in chits else "NOT FOUND"),
+          sorted(chits))
+    check("Registry::names[]" in chits,
+          "C++ RED: a member declared after an inline METHOD BODY is still a member -- "
+          "without blank_bodies the two share one fragment and this one disappears",
+          sorted(chits))
+    check("rb_str_new2" in " ".join(chits.get("Registry::cache", (0,) * 5 + ([],))[5]),
+          "...and the store made from inside a method, spelled BARE `cache = ...`, is read "
+          "as a source of the qualified slot")
+    check(cxx.class_bodies == 1 and cxx.class_members >= 2,
+          "C++ RED coverage: %d class bod(ies) entered, %d static VALUE member declaration"
+          "(s) seen -- a zero here would be a parse miss wearing a green tick"
+          % (cxx.class_bodies, cxx.class_members))
+
+    # 5g. C++ GREEN. The same shape, rooted the way the brief blesses. Over-clearing is the
+    #     failure mode this sweep exists to prevent, so the green is asserted as a NAMED
+    #     discharge on an ENUMERATED slot, never as an absence.
+    cxg = _sweep_source(GREEN_CXX_STATIC_MEMBER)
+    gdis = {d[3]: d for d in cxg.discharges}
+    check(not cxg.hits and gdis.get("Rooted::cCollector", ("",))[0] == "const-table",
+          "C++ GREEN: a class static assigned from rb_define_class is ENUMERATED and then "
+          "discharged by const-table -- %s"
+          % (gdis["Rooted::cCollector"][4] if "Rooted::cCollector" in gdis
+             else "NOT DISCHARGED (absent, not cleared)"),
+          [h[3] for h in cxg.hits] + sorted(gdis))
+    check(cxg.slots == 1 and cxg.class_bodies == 1,
+          "...and the in-class declaration and the out-of-line definition "
+          "`VALUE Rooted::cCollector = Qnil;` merge into ONE slot, not two (%d slot(s) from "
+          "%d declaration(s))" % (cxg.slots, cxg.decls))
+
     # 6. MUTATION TABLE. Disable each discharge rule in turn; a rule that can be removed
     #    without breaking a control is decorative and should be deleted. msgpack is in the
     #    control set because `const-published` fires nowhere else in the corpus -- with the
@@ -1492,22 +1843,26 @@ def main():
         sys.exit(self_test(a.dirs))
     rules = () if a.no_discharge else tuple(x for x in ALL_RULES
                                             if x not in a.disable_rule)
-    f, grades = [0] * 7, {}
+    f, grades = [0] * 9, {}
     for d in a.dirs:
         root = pathlib.Path(d)
         r = sweep(Tree(root), root.name, rules)
         report(r, verbose=a.verbose)
         for i, v in enumerate((r.files, r.slots, r.scalars, r.fields, r.allocating,
-                               len(r.discharges), len(r.hits))):
+                               len(r.discharges), len(r.hits), r.class_bodies,
+                               r.class_members)):
             f[i] += v
         for h in r.hits:
             grades.setdefault(h[0], []).append("%s %s:%d  %s" % (r.name, h[1], h[2], h[3]))
     print("\nFUNNEL over %d tree(s), %d C file(s):\n"
           "  file-scope VALUE slots ........................ %4d  (scalar %d, field %d)\n"
+          "  C++ class bodies descended into ............... %4d\n"
+          "  ...`Class::member` static declarations seen ... %4d  (in-class and "
+          "out-of-line, before the by-key dedupe)\n"
           "  ...with at least one allocating source ........ %4d\n"
           "  discharged by a named rule .................... %4d\n"
           "  REMAINING (hits) .............................. %4d"
-          % (len(a.dirs), f[0], f[1], f[2], f[3], f[4], f[5], f[6]))
+          % (len(a.dirs), f[0], f[1], f[2], f[3], f[7], f[8], f[4], f[5], f[6]))
     for g in ("ALLOCATES", "FOREIGN", "CALL", "OPAQUE", "CONST-LOOKUP", "UNSOURCED"):
         for where in grades.get(g, []):
             print("      %-10s %s" % (g, where))
