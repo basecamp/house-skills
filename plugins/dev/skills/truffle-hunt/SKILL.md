@@ -298,6 +298,14 @@ Three rules keep the table honest:
 3. **Follow the table when it is uncomfortable.** A defect that segfaults a released gem and
    still answers "no" to untrusted input goes public. The table is written down precisely so
    that this decision is not re-litigated per finding.
+4. **A reachable call site is not a reachable defect — look for the gate between them.** Having
+   found untrusted input arriving at the call, you are half done; the other half is whether
+   anything stands between that call and the defective line. The worked case: `iconv`'s four real
+   rows are all `rb_warning`, reached on an inbound-mail path where the sender controls both the
+   charset and the payload — and `rb_warning` wraps its entire body in `if (RTEST(ruby_verbose))`
+   (CRuby `error.c:497`), so the dereference never runs. Both apps have `$VERBOSE` falsy, one of
+   them deliberately. **Name the gate in the report** so the next round re-checks it instead of
+   re-deriving it — a gate is a configuration, and configurations change.
 
 **Q2, once the table says private: which private path.** In order — GitHub private vulnerability
 reporting if the repo has it enabled, then `SECURITY.md`'s stated address, then `security@` on
