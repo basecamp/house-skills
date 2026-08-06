@@ -571,6 +571,66 @@ class Tree:
             self.macro_defs.setdefault(m.group(1), []).append(
                 ([p for p in (params or []) if p], src[j:nl]))
 
+    DESIGNATOR_RE = re.compile(r"\.(?:dmark|dfree|dsize|dcompact)\s*=")
+
+    def _expand_designator_macros(self, body):
+        """Expand a function-like macro that SUPPLIES a `.dcompact =` designator.
+
+        ffi writes every one of its twenty dtypes as
+
+            .dmark = buffer_mark, .dfree = ..., .dsize = ...,
+            ffi_compact_callback( buffer_compact )
+
+        with `#define ffi_compact_callback(x) .dcompact = (x),` in compat.h. The designator
+        regex cannot see through the call, so `.dcompact` reads as absent and **all thirty**
+        movable fields in the tree report NO-COMPACT -- the largest single block of false
+        positives in the corpus, on a gem that does compaction correctly. ffi is loaded by
+        all five apps, so this is thirty rows a human re-triages every round.
+
+        NOT AN OVER-CLEAR, and the reason is the shape of the #ifdef rather than trust in
+        the macro. compat.h defines the pair together:
+
+            #ifdef HAVE_RB_GC_MARK_MOVABLE
+            #  define ffi_compact_callback(x) .dcompact = (x),
+            #else
+            #  define rb_gc_mark_movable(x) rb_gc_mark(x)      <- pinning
+            #  define ffi_compact_callback(x)                  <- empty
+            #endif
+
+        The arm that drops the dcompact is the same arm that makes the mark PINNING, so
+        there is no configuration in which a movable field lacks an update. Taking any arm
+        that supplies the designator is therefore right for the same reason `_index_macros`
+        concatenates all arms rather than picking the first. Settled on the artifact, per
+        this file's rule: `nm` on 1.17.x imports `_rb_gc_location`, on 1.15.5 it does not.
+
+        Only macros whose replacement CONTAINS a designator are expanded -- expanding the
+        rest costs time and invents text, the same bound `_expand_pastes` draws.
+        """
+        for name, defs in self.macro_defs.items():
+            if not any(self.DESIGNATOR_RE.search(b) for _p, b in defs):
+                continue
+            if name not in body:
+                continue
+            for m in reversed(list(re.finditer(r"\b%s\s*(?=\()" % re.escape(name), body))):
+                args, past = call_args(body, m.end())
+                if args is None:
+                    continue
+                repl = ""
+                for params, text in defs:
+                    if not self.DESIGNATOR_RE.search(text):
+                        continue
+                    repl = text
+                    for p, a in zip(params, args):
+                        repl = re.sub(r"\b%s\b" % re.escape(p.strip()), a.strip(), repl)
+                    # `.dcompact = (buffer_compact),` -- the macro parenthesises its
+                    # parameter, and the designator regex accepts `[\w:]+`, which a `(`
+                    # is not. Without this the expansion is textually correct and changes
+                    # nothing, which is the most expensive kind of correct.
+                    repl = re.sub(r"(\.\w+\s*=\s*)\(\s*([\w:]+)\s*\)", r"\1\2", repl)
+                    break
+                body = body[:m.start()] + repl + body[past:]
+        return body
+
     # -- token-paste expansion (predicate A) --------------------------------
 
     def _expand_pastes(self):
@@ -945,7 +1005,7 @@ class Tree:
             close = match_brace(src, open_idx)
             if close < 0:
                 continue
-            body = src[open_idx + 1:close]
+            body = self._expand_designator_macros(src[open_idx + 1:close])
             entry = {}
             for f in re.finditer(r"\.(dmark|dfree|dsize|dcompact)\s*=\s*([\w:]+)", body):
                 entry[f.group(1)] = f.group(2)
