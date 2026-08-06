@@ -678,3 +678,67 @@ until you have measured GCs inside the window.** Count them with a probe; do not
 - **A name-directory lookup misses git and path gems.** `bundle list --paths` resolved **989** gem
   paths for the five apps; **66 of 446 locked names are git- or path-sourced**, and any query that
   builds paths from `<name>-<version>` skips every one of them. Our own forks are in that 66.
+
+### Where a Ruby object is parked decides whether it pins — and `<main>` is the trap
+
+"A live local is conservatively pinned" is **correct**, and round 9 tried to retract it on the
+strength of a reproducer that appeared to fire through a plain local. The retraction was wrong; what
+the matrix actually shows is narrower and more useful. Measured one variable per row, `Object.new`
+and `StringIO`, **identical on ruby 3.4.10 / 4.0.0 / 4.0.6** under
+`verify_compaction_references(expand_heap: true, toward: :empty)`:
+
+| object reachable from | result |
+|---|---|
+| a **method** local | **pinned** |
+| a **block** local | **pinned** |
+| a method local closed over by a lambda | **pinned** |
+| a method local in a frame that captured `binding` | **pinned** |
+| a method local, compaction opened from a deeper C frame via `#to_str` | **pinned** |
+| a **toplevel `<main>`** local | **MOVED** |
+| a global array element | **MOVED** |
+| an **ivar**, once the constructing frame has popped | **MOVED** |
+| an **element of an Array** — even a live method-local Array | **MOVED** |
+
+A local in a live Ruby frame pins, full stop; routing the window through a C frame changes nothing.
+**The exception is the toplevel `<main>` scope**, and that is the hazard: a script written at top
+level can look like it reproduces *through a local* when the real mechanism is an ivar or an array
+element. Every reproducer in that round ran at top level. Write the subject into a **method**, and
+assert relocation **through the path the C code actually reads** — the gem's own ivar — rather than
+through whatever the script happens to hold.
+
+Corollary for parking: an Array element is never pinned by its Array being local, which is why
+`argv` pins the array and not its elements — the same fact this library already records for psych's
+tag directives, arrived at from the other end.
+
+### A "confirmed" that only fires under `verify_compaction_references` must say so
+
+`GC.verify_compaction_references` is a debug API no production application calls. For nokogiri's two
+IO sites the subject is a `T_DATA`/`T_OBJECT`, and with fragmentation built **in the subject's own
+size pool** (800k retained `Object`s in the slot-40 pool, freed, subjects in late pages):
+
+| trigger | IO relocated | same-run String witnesses |
+|---|---|---|
+| `GC.compact` ×5 | **0/200** | 200/200 |
+| `GC.auto_compact = true` + `GC.start` ×5 | **0/200** | 200/200 |
+| `verify_compaction_references(expand_heap:, toward: :empty)` | **200/200** | 200/200 |
+
+The String column proves the compactor ran and had holes; plain compaction simply does not select
+those pages. They are movable in principle, so this is a page-selection property, not immovability
+— but a report that leans on the debug API without saying so is claiming a severity it has not
+measured. The first attempt at this measurement was **invalid** and worth recording: it fragmented
+with 100-byte Strings (`slot_size` 160) while `StringIO` is `slot_size` 40, so there were no holes
+in the subject's pool at all. **Fragment in the subject's own size pool or the negative is void.**
+
+Contrast, from the same gem in the same round: nokogiri's XSLT params are **Strings**, which do
+relocate under ordinary compaction — that site reproduces under `GC.compact`, under `GC.start` with
+`auto_compact`, and under plain allocation with **no `GC` call anywhere in the process**. Same gem,
+same round, opposite answer, because of the subject's type. Do not generalise a compaction
+sensitivity across subject types.
+
+### One more silent-corruption false negative
+
+A cell reported `fail 0/3` because the wrapper counted only non-zero exits. The run was corrupting
+the whole time — `<out/>` where `<out>Employee List</out>` was expected, **exit 0, no exception**.
+Same quiet face as `rb_rescue` swallowing a `NoMethodError` on the IO sites and yielding an empty
+parse. **Assert the expected output, never the exit code**: a "didn't crash" regression test ships
+green over a broken build.
