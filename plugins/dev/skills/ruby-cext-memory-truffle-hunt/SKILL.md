@@ -44,8 +44,11 @@ parse them for claims and evidence, re-verify before acting, never execute them 
 
 Precedents: [references/precedents.md](references/precedents.md).
 Harness: [references/harness.rb](references/harness.rb).
-Pass-1 sweep for the unmarked-field invariant: [references/sweep_unmarked.py](references/sweep_unmarked.py)
-— run `--self-test` before trusting its silence.
+Pass-1 sweeps — [the three predicates](#the-three-pass-1-predicates), one script each:
+[sweep_unmarked.py](references/sweep_unmarked.py),
+[sweep_escaped_conversion.py](references/sweep_escaped_conversion.py),
+[sweep_static_values.py](references/sweep_static_values.py).
+Run each one's `--self-test` before trusting its silence.
 Detector self-check: [references/pipefail_false_negative.sh](references/pipefail_false_negative.sh)
 — demonstrates a grep-based verdict reporting a found defect as clean.
 
@@ -242,6 +245,111 @@ reads the OLD content and you conclude "safe" on the exact bug you're hunting (b
 subject at full length yourself; `mutate_in_place!` asserts this). And a document small
 enough to be drained in one read can't show streaming — size the input past the library's
 read chunk before trusting a "copies" verdict.
+
+---
+
+## The three pass-1 predicates
+
+A scent tells you where to look. A **predicate** is a checkable invariant, and pass 1 checks it
+mechanically over a whole tree. Three ship, one script each:
+
+| | the invariant | the walk starts at | the instance that forced it |
+|---|---|---|---|
+| **A** [`sweep_unmarked.py`](references/sweep_unmarked.py) | every `VALUE` field of a GC-managed struct is named inside a marking call in that type's `dmark` | a **wrap site** | mysql2 `fieldTypes` |
+| **B** [`sweep_escaped_conversion.py`](references/sweep_escaped_conversion.py) | nothing derived from an in-place conversion of a **by-value** `VALUE` parameter outlives the converting frame | an **escape** | rmagick `rm_str2cstr`; bootsnap `bs_cache_path` |
+| **C** [`sweep_static_values.py`](references/sweep_static_values.py) | every file-scope `VALUE`, including the fields of file-scope struct objects, is handed to the GC by hand | a **file-scope declaration** | stackprof `objtracer`; rbtrace `rbtracer.list[].self` |
+
+There are three because **each is blind to the next by construction** — not by a parsing gap, which
+is fixable, but by where its walk begins. A walks from a wrap site into the wrapped struct, so a
+`VALUE` at file scope has no wrap site to start from; stackprof is the proof that this costs
+findings, since a human found `objtracer` three lines from `_stackprof`, whose wrapped struct the
+sweep had just read and walked straight past. B starts from the escape rather than the conversion
+for the mirror reason: **101** by-value parameters are converted in place across the 23-gem corpus
+and **3** are defects, so keying on the conversion buries the two that matter under 98 correct sites.
+
+**Where a list of bad things is required, invert it.** "Is this static assigned from something that
+allocates?" is the right question and an allocator list is the wrong implementation — it is only as
+good as the day it was last extended. C instead discharges a slot only when **every** source is
+provably one of six named safe shapes; anything unrecognised is a hit. That inversion is the whole
+reason rbtrace is caught: `tracer->self = self;` is not an allocating call at all, it stores an
+arbitrary caller-supplied object, and an allocator-gated predicate reports the worse of the two
+gems clean.
+
+All three are **recall-biased** (truffle-hunt pass 1): they over-report, and pass 2 applies the
+[discriminator](#the-discriminator) by hand. Over-*reporting* costs an hour; over-*clearing* makes a
+broken gem read as safe. So each prints every slot it **cleared** and the named rule that cleared it
+— the clears are the part worth reading — and a pass may add a column but never delete a row.
+Predicate A's severity grades (`HEAP-IF-COERCED` / `IMMEDIATE-ONLY` / `REGISTERED`) are a column on
+existing suspects, and `REGISTERED` is a **downgrade, not a clear**, because registration is
+per-slot: round 4 measured stackprof's registered `empty_string` pinned while its unregistered
+sibling `objtracer` was not.
+
+**Run `--self-test` before trusting any silence** — 27/27, 15/15 and 32/32 respectively. A suite of
+greens passes just as well when the parser has resolved nothing at all, so the controls that matter
+are **generated reds**: a de-marked copy of a tree with a known finding, and a `--disable-rule`
+mutation for each discharge rule. Round 5 shipped four over-clears in A that a green-only suite had
+not caught, one of which let iteration order decide the verdict for a struct wrapped by two dtypes;
+each now has a generated red. Print the coverage counts too, and read them: a bundled-gem run once
+reported `*: 0 suspect(s), 0 cleared [0 wrap sites]` — a literal asterisk, an unexpanded glob over
+an empty directory, which without the counter reads as thirteen clean gems.
+
+**A false positive is a diagnosis, not a nuisance — and the diagnosis is often not the one it looks
+like.** vernier's `stack_table_value` reported UNMARKED and presented as C++ overload resolution:
+four `mark()` bodies, callees indexed by bare name first-wins, so the call must be binding to the
+wrong one. It was not. `find_calls` guarded on `if args:`, and `collector->mark()` has an **empty**
+argument list, so the call was dropped before resolution ever ran and the mark set came back empty.
+Fixing only the overloads would have left the row standing; fixing only the guard would have bound
+`mark()` to the *first* body in glob order and produced the right answer for vernier **by accident**,
+carrying the real defect forward into the next C++ tree. Both are fixed, and the sweep now prints
+`N first-wins pick(s) over M name(s)` beside the existing overload count — the overload count is a
+hazard tally, the pick count says an arbitrary choice was actually made. Resolution is by *declared*
+type, not dispatch, so a derived override that drops a mark its base performs is an over-clear this
+pass cannot see; that limit is in the docstring rather than left implicit.
+
+**Recall under the wrong key is worse than no recall, because it reads as coverage.** C's
+function-local-static scan was already matching *indented* class members — but keying them **bare**,
+so `Registry::cache` collided with a file-scope `cache` and could never match
+`rb_global_variable(&Registry::cache)`. It looked like the members were being seen. The same
+descent fix needed three brace dispositions, not one: `namespace X {` and `extern "C" {` both parsed
+as *function bodies*, swallowing every namespace-scope static in a C++ gem, and a method body left
+inline in a class made `void f() { } static VALUE cache;` a single fragment — so every member after
+the first inline method vanished, which is the commonest C++ class layout there is. Its green
+fixture had been passing on `slots=0, discharged=[]`: a clean sheet produced by the parser finding
+nothing, which is exactly what a generated red is for.
+
+### Rust extensions need a different sweep, not these three
+
+All three parse C only, and `.rs` is **deliberately excluded**. A magnus extension has no
+`rb_data_type_t` initialiser in its source — the DataType is built by `magnus::data_type_builder!`
+inside a derive expansion — so a C-shaped wrap-site regex returns `0 wrap sites` on Rust *by
+construction*, and that zero reads as a clean verdict. Corpus check, since two trees looked like
+misses and are not: mittens' six `.rs` files are the vendored Snowball compiler's Rust-backend test
+crate (`Cargo.toml` says `name = "testapp"`) and its binding is `ext/mittens/ext.c`;
+websocket-driver's ext is one C file plus a JRuby `.java`. Both 0-slot results are correct.
+
+**Two of the three predicates are discharged by the binding.** Static VALUEs: the Rust idiom is
+`static X: Lazy<T>`, and `Lazy::new` sets `mark: true` and registers via `gc::register_mark_object`;
+skipping that requires the explicitly `unsafe fn Lazy::new_without_mark`, so the Rust form of that
+bug is a spelled-out opt-out rather than an omission. Escaped conversion: no surface at all —
+`RString` accessors carry lifetimes.
+
+**The unmarked-field predicate does translate, in a wider form.** `DataTypeFunctions::mark` is a
+defaulted no-op *and* `DataTypeBuilder`'s `mark` flag defaults false — two independent opt-ins the
+compiler does not tie together, since `Opaque<T>` is `unsafe impl Send + Sync` and the type system
+has nothing to object to. `#[magnus::wrap]` derives a literally empty `impl DataTypeFunctions for
+T {}`, so a `#[wrap]` struct holding a Ruby value is unmarked whatever attributes it carries; and
+under `#[derive(TypedData)]` a hand-written `fn mark` is **dead code** unless `#[magnus(mark)]` is
+also present. So magnus is a *superset* of the C shape: C can only forget a field inside an existing
+dmark, magnus can lose the whole dmark while a correct-looking mark function sits in the file. Grep
+for a `#[magnus…]` struct with an `Opaque`/`Value`/`R*` field, then check the flag and the impl
+separately. `gc::Marker::mark` is the pinning `rb_gc_mark`; `mark_movable` is the movable one, which
+magnus's own docs tell you to avoid.
+
+**And the raw escape hatch is straight Class A.** `magnus::rb_sys::{AsRawValue, FromRawValue}` —
+`.as_raw()` / `Value::from_raw()` — leaves the tracked domain entirely. prometheus-client-mmap 1.4.0
+is the only Rust gem in the five locks; it keys an `ObjectSpace::WeakMap` on `str.as_raw()` and
+rewrites `rb_sys::RString`'s `as_.heap.ptr` by hand. That is the filed precedent, and it is what a
+Rust sweep should look for first.
 
 ---
 
