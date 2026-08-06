@@ -258,12 +258,95 @@ finding.
 | Our fork only | Patch the fork; if it diverged from a still-affected upstream, do both |
 | First-party code | Fix it in the repo; never publish the reproducer |
 
-**Pick the disclosure channel before filing publicly.** If untrusted input can reach the defect
-— corrupting memory, data, or an authorization decision — use the project's private path
-(`SECURITY.md`, GitHub private vulnerability reporting, `security@`) and don't attach a public
-reproducer. A public issue is for latent or local defects needing a maintainer's judgement;
-when you file publicly, say which reachability check made you judge it not exploitable. Get
-this wrong and the cost lands on every user of the library, not on you.
+**Pick the disclosure channel before filing publicly**, and pick it from the table below rather
+than from how the crash felt. Get this wrong and the cost lands on every user of the library,
+not on you.
+
+### The disclosure test
+
+**The discriminator is whether untrusted input can reach the defect — not how bad the crash is.**
+A segfault reachable only through an API the developer chose to call is a public issue. A wrong
+value returned to a caller because a request-sized string crossed an allocator boundary is a
+private report. Severity ranks the report; it does not route it.
+
+Read *untrusted input* as anything supplied at runtime by a request, a peer, a file, or a
+database row. Read *reach* as: that input is what makes the defect fire, with the application's
+own source held fixed.
+
+| What actually pulls the trigger | Untrusted? | Channel |
+|---|---|---|
+| Size, content, count or encoding of data flowing through a call the app already makes | yes | **private** — no public reproducer |
+| A request value passed through into the argument that selects the defective path | yes | **private** |
+| *Which* API the developer chose to call, or an option/argument that is a literal in app source | no | **public issue** |
+| A build or deploy option an operator sets | no | **public issue**, and name the operator dependency |
+| No public entry point reaches it at all | n/a | **public issue**, filed explicitly as latent |
+
+Not inputs to this test, however tempting: how loud the crash is, whether it is exploitable
+beyond memory corruption, whether one of our own apps is affected, how small the fix is, and how
+responsive the maintainer has been.
+
+Three rules keep the table honest:
+
+1. **"Developer-chosen" is a claim about the corpus, not about the signature.** It means no app
+   routes untrusted data into the choosing position. That is a grep, and the report states it.
+   One app passing a request parameter into a tag name, a dictionary, or a format selector moves
+   the row from public to private on its own.
+2. **Same shape, same channel.** Two defects that answer the table identically route
+   identically, in the same week, to the same kind of venue. If you are about to split a pair,
+   either the table says they differ — write down which row each landed on — or you are routing
+   by vibe.
+3. **Follow the table when it is uncomfortable.** A defect that segfaults a released gem and
+   still answers "no" to untrusted input goes public. The table is written down precisely so
+   that this decision is not re-litigated per finding.
+4. **A reachable call site is not a reachable defect — look for the gate between them.** Having
+   found untrusted input arriving at the call, you are half done; the other half is whether
+   anything stands between that call and the defective line. The worked case: `iconv`'s four real
+   rows are all `rb_warning`, reached on an inbound-mail path where the sender controls both the
+   charset and the payload — and `rb_warning` wraps its entire body in `if (RTEST(ruby_verbose))`
+   (CRuby `error.c:497`), so the dereference never runs. Both apps have `$VERBOSE` falsy, one of
+   them deliberately. **Name the gate in the report** so the next round re-checks it instead of
+   re-deriving it — a gate is a configuration, and configurations change.
+
+**Q2, once the table says private: which private path.** In order — GitHub private vulnerability
+reporting if the repo has it enabled, then `SECURITY.md`'s stated address, then `security@` on
+the project domain, then the maintainer directly. If the project has no private path at all, do
+not fall back to a public issue with a reproducer attached: file the minimal public report
+without the trigger, and tell the maintainer privately where the trigger is.
+
+Worked rows, for calibration. **Two of this round's are held back until their fixes ship** — one
+is under an embargoed advisory and one is not yet reported at all, so they appear here as shapes
+rather than as targets. That is §8's check-in test applied to this file: a skill ships, and a
+worked row naming an unfixed defect is a disclosure.
+
+| Finding | Trigger | Row | Channel |
+|---|---|---|---|
+| *(held)* a conversion whose window opens only **above the allocator's embedded boundary** | the **size** of untrusted data | row 1 | private |
+| *(held)* a decoder that reads back a stored self-reference, on a branch **the input selects** | a flag in the input's own header | row 1 | private |
+| psych `start_document_try` | tags the developer hands the emitter | row 3 | public issue |
+| `iconv`'s `rb_warning` sites | attacker-controlled charset *and* payload — but see rule 4 | row 3 | public issue |
+
+**The second row is the best worked example of rule 1, and the lesson keeps without the target.**
+It went in as row 3: the branch that reads the stale pointer also *calls* a configuration API, and
+the obvious reading was "the developer chose to use that feature." Wrong — that API is what the C
+code calls **in response to** the condition, and the condition is set by a flag in the input. The
+reproducer had used the API only on the *encoding* side, to manufacture the test data, which is
+exactly how the misreading survived three rounds.
+
+**Discriminator, and it is cheap:** build the input in one process, consume it in another that
+*provably cannot name* the suspected API, and grep the consumer to prove it. If it still fires, the
+API was scenery.
+
+Then rule 1 was applied to the corpus rather than to the signature, and it moved the row a second
+time — a widely-bundled HTTP library retains one of these decoders across a response body and feeds
+it chunk by chunk, so ordinary remote input reaches it and nobody chose anything. The one-shot
+class-method form is pinned for the duration of its own call and measured clean; **a retained
+decoder plus a per-chunk feed is the shape to grep for.**
+
+Two lessons worth more than either finding. The first framing was not careless — it named a real
+API that really does appear in the reproducer, on the *other* side of the test data. And a defect
+can be routed by an honest reading of what pulls the trigger and still be wrong, because
+*"developer chose it"* is a claim about every caller in the corpus, and only a grep and a run can
+check it.
 
 Then check the code still matches **upstream HEAD** — `gh api repos/OWNER/REPO/contents/PATH
 --jq .content | base64 -d` — and search for prior art. Issue anatomy:
@@ -307,6 +390,6 @@ its scent library rediscovers everything next time.
 - [ ] Negatives carry a stated sensitivity
 - [ ] Loaded artifact verified (binary, version, linked library)
 - [ ] Every delegated finding independently re-reproduced
-- [ ] Findings routed; disclosure channel chosen deliberately
+- [ ] Findings routed; disclosure channel picked from §7's table, and the row cited in the report
 - [ ] Every corpus member labelled; reachable vs latent shown
 - [ ] Reproducers and new scents checked into the scent library, sanitised where §7 requires
