@@ -804,3 +804,34 @@ content, proving the dangling read hit the recycled slot), firing at ≥1000 sam
 the window and clean at ≤100. Four of the six rows never belonged in the section at all: they had
 been executed at their pinned versions in an earlier round, and one gem's hit sets were never
 identical across the boundary to begin with.
+
+### The failure mode to look for: a defect that empties an INDEX, not one that drops a row
+
+Round 9 extracted two shared rules into `tu_scope.py`, each after it had been independently
+re-derived several times across the four sweeps:
+
+1. **Translation-unit scoping** — an internal-linkage name resolved tree-wide instead of in the
+   using file. Patched **six times** across four scripts before it was named.
+2. **Which braces open a storage scope** — `namespace X {` and `extern "C" {` are transparent, and
+   a walk that counts raw braces indexes *nothing* inside one. Ported **four times**.
+
+A third is queued and has been fixed three times already: the **post-declarator walker**, i.e. the
+tokens between `)` and `{` — `__attribute__((...))`, `noexcept`, and C++ trailing return types
+(`auto f(VALUE) -> VALUE {`).
+
+**What they share is why they survived, and it generalises past this toolchain.** A defect that
+drops one row looks like a defect that dropped one row. A defect that **empties an index** looks
+like a **clean gem** — the funnel prints small honest-looking numbers, every later stage agrees,
+and the output is indistinguishable from a well-audited extension. sassc read as clean at **95**
+indexed functions; the real number is **983**. The fix moved +1,140 spans across nine trees and
+changed **zero** rows.
+
+So: **when a fix is row-neutral, report the funnel delta**, or it looks like a no-op and gets
+reverted by the next person optimising. And when a gem reports zero, the first question is not
+"is it clean" but **"did the parser see anything at all"** — which is what the coverage counters
+are for, and why they are printed rather than logged.
+
+**Corollary, learned the expensive way:** opening a walker up is not free. Relaxing the
+post-declarator step to skip `__attribute__` made it **invent four functions** out of `XX(...)`
+X-macro lists and a `__declspec(...)` before a `typedef enum {`. Every widening needs a **rejection
+table asserted in the self-test**, not just an acceptance fixture.
