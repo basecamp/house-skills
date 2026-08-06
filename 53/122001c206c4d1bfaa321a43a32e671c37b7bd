@@ -1,0 +1,19 @@
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/precedents.md
+  s_da8dda8cb965b8::t_059c6a985d6915 681-744
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "53122001c206c4d1bfaa321a43a32e671c37b7bd",
+  "prompts": {},
+  "sessions": {
+    "s_da8dda8cb965b8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "da6edcec-9c69-4e89-8417-99deee78a7e8",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
