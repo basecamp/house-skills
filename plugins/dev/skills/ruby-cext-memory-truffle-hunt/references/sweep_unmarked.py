@@ -2800,6 +2800,26 @@ static const rb_data_type_t t_type = { "tbox", { t_mark, t_free, }, };
 static VALUE t_wrap(VALUE k, TBox *b) { return TypedData_Wrap_Struct(k, &t_type, b); }
 """
 
+# ...and the variadic spelling (#30 review, second P2). `X(T... t) : T(t)... {` puts a PACK
+# EXPANSION between the initialiser group and the comma-or-end, so a walk accepting only
+# those two rejects the constructor exactly as the template-id did. Same symptom, same
+# assertion, and it needs no trailing initialiser to bite: `...` IS the last thing in the
+# list, which is the position the accidental rescue above cannot reach.
+RED_CXX_PACK_INIT = """
+#include <ruby.h>
+template <typename... T> class PBox : public T... {
+    public:
+        VALUE held = Qnil;      /* a member, unmarked: MUST report */
+        VALUE marked = Qnil;    /* a member, marked: must clear */
+        PBox(T... t) : T(t)... { VALUE ctor_local = Qnil; rb_gc_mark(ctor_local); }
+        void mark() { rb_gc_mark(marked); }
+};
+static void p_mark(void *p) { PBox<> *b = static_cast<PBox<> *>(p); b->mark(); }
+static void p_free(void *p) { delete (PBox<> *)p; }
+static const rb_data_type_t p_type = { "pbox", { p_mark, p_free, }, };
+static VALUE p_wrap(VALUE k, PBox<> *b) { return TypedData_Wrap_Struct(k, &p_type, b); }
+"""
+
 RED_HELPER_PARAM = """
 #include <ruby.h>
 static VALUE g_root;
@@ -3255,6 +3275,23 @@ def self_test(base, siblings=()):
           "still reports and `marked` still clears",
           "%s | fields %s | cleared %s"
           % (sorted(tcats), sorted(tfields), sorted(tcleared)))
+
+    # The pack case is asserted on `blank_method_bodies` DIRECTLY rather than through
+    # flagged/cleared, and the reason is a recall limit worth writing down: this predicate
+    # does not index a VARIADIC TEMPLATE class at all. Measured on this very fixture,
+    # `flagged_from_source` returns no fields and no categories, so an assertion phrased
+    # like the template-id one above would be satisfied by the sweep seeing nothing --
+    # exactly the "passes because it indexed zero" failure the funnel assertions elsewhere
+    # exist to stop. Blanking is the behaviour the walk actually governs, so it is the
+    # behaviour asserted. `VALUE held` is the control: it sits outside every method body,
+    # so a blanker that blanked the whole class would fail here too.
+    packed = blank_method_bodies(RED_CXX_PACK_INIT)
+    check("ctor_local" not in packed and "VALUE held" in packed,
+          "green (c++ pack ctor-init) `PBox(T... t) : T(t)...` is a constructor: the pack "
+          "expansion ends the initialiser list, so the body is blanked and `ctor_local` "
+          "cannot reach value_fields, while the member declaration outside it survives",
+          "ctor_local present=%s, held present=%s"
+          % ("ctor_local" in packed, "VALUE held" in packed))
 
     # The helper tier credits only the arguments the callee actually marks.
     cats, fields = flagged_from_source(RED_HELPER_PARAM)

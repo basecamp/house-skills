@@ -549,6 +549,14 @@ def _skip_member_init(src, k):
         k = close + 1
         while k < n and src[k] in " \t\r\n":
             k += 1
+        # A PACK EXPANSION ENDS THE GROUP TOO (#30 review). `X(T... t) : T(t)... {` is a
+        # variadic constructor forwarding to each base in turn, and the `...` sits between
+        # the group and the comma-or-end, so a walk that accepts only those two rejects the
+        # constructor and stops blanking its body.
+        if src[k:k + 3] == "...":
+            k += 3
+            while k < n and src[k] in " \t\r\n":
+                k += 1
         if k < n and src[k] == ",":
             k += 1
             continue
@@ -824,10 +832,18 @@ def writes(body, name):
     over-reported; under DOMINATING_WRITE it killed the alias and dropped two real
     ESCAPES-INTO-CONTAINER rows in json's cResumableParser_feed. Found on the corpus.
 
+    `::` IS THE THIRD SPELLING OF THAT SAME RULE (#30 review). `Holder::p = safe;` is a
+    write to a static member, not to the local `p`, and the lookbehind excluded `.` and
+    `->` while letting `::` through -- so a C++ file with a member sharing a local's name
+    killed the local's alias and predicate B reported a clean sheet on a live interior
+    pointer. Excluding `:` cannot suppress a real write: a label or a `case` puts
+    whitespace between the colon and the name, so the character immediately before the
+    name is a space and the write still matches.
+
     One of the three disqualifiers in source_reads(), which is the only caller that matters.
     """
     return [m.start() for m in
-            re.finditer(r"(?<![=!<>+\-*/%%&|^.])\b%s\s*=(?!=)" % re.escape(name), body)]
+            re.finditer(r"(?<![=!<>+\-*/%%&|^.:])\b%s\s*=(?!=)" % re.escape(name), body)]
 
 
 def blocks(body):
@@ -1204,11 +1220,35 @@ def alias_reads(body, seeds, exclude=()):
     `p = "safe"` leaves `p` a carrier that is no longer carrying, and a caller matching the
     NAME reports the string literal as an escaping interior pointer -- which is what
     predicate B did. The kill is rule 5, not a special case beside it.
+
+    A CARRIER CAN BE RESTORED AFTER IT IS KILLED (#30 review), and one `since` per name
+    cannot say so:
+
+        char *q = p;        /* q carries */
+        p = "safe";         /* p stops carrying */
+        p = q;              /* p carries AGAIN */
+        return p;           /* a real escape, reported as a clean sheet */
+
+    `self_derived` does not reach it -- the right-hand side reads `q`, not `p` -- and
+    re-seeding `p` in `alias_map` would be wrong in the other direction, because the map
+    holds ONE offset per name and moving it forward would discard the reads before the
+    kill. A name's live region is a set of INTERVALS, and that is a bigger change than this
+    rule needs.
+
+    So the restoration pass below is ADDITIVE ONLY: for a copy whose two sides are both
+    carriers, union the reads of the left-hand side taken from the copy onward. It can add
+    offsets and can never remove one, so it cannot resurrect the over-clear this same
+    function has now shipped twice. Both callers treat a larger read set as a longer window
+    or a live carrier -- over-reporting, which is the side each of them fails on.
     """
     m = alias_map(body, seeds, exclude)
     out = set()
     for nm, since in m.items():
         out.update(source_reads(body, nm, since, kill=DOMINATING_WRITE))
+    if m:
+        for off, lhs, rhs in local_copies(body, min(m.values())):
+            if lhs in m and rhs in m and lhs not in exclude and off > m[rhs]:
+                out.update(source_reads(body, lhs, off, kill=DOMINATING_WRITE))
     return out
 
 

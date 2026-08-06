@@ -1675,6 +1675,16 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
     #     spellings silently dropped rmagick's row when measured. `kill` remains the arm
     #     that proves the kill is narrowed rather than switched off.
     #
+    #     AND TWO MORE FROM THE SAME REVIEW, both measured on rmagick before being fixed:
+    #
+    #       restore     `q = p; p = "safe"; p = q; return p;`  -- a carrier can be RESTORED
+    #                   after it is killed. One `since` per name cannot say so, so
+    #                   alias_reads() unions a second read set from the restoring copy
+    #                   rather than moving the seed; see its docstring for why additive.
+    #       qual-write  `Holder::p = "safe"; return p;`        -- a QUALIFIED member is not
+    #                   this local. The third spelling of the `->`/`.` rule writes() already
+    #                   carries, and the one character that was missing from it.
+    #
     #     THE FUNNEL IS ASSERTED IN EVERY ARM. A regression that empties the index prints
     #     `0 fn(s), 0 conversions` and would otherwise read as four passing greens.
     kill_src = """#include <ruby.h>
@@ -1703,6 +1713,9 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
         "and-write": ('    out && (p = "safe");\n', "p", ["RETURNS-INTERIOR"]),
         "or-write":  ('    out || (p = "safe");\n', "p", ["RETURNS-INTERIOR"]),
         "tern-write":('    out ? (p = "safe") : 0;\n', "p", ["RETURNS-INTERIOR"]),
+        "restore":   ('    q = p;\n    p = "safe";\n    p = q;\n', "p",
+                      ["RETURNS-INTERIOR"]),
+        "qual-write":('    Holder::p = "safe";\n', "p", ["RETURNS-INTERIOR"]),
     }
     kr = {}
     for tag, (mid, ret, _want) in kill_arms.items():
