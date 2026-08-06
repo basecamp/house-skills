@@ -412,7 +412,7 @@ existing suspects, and `REGISTERED` is a **downgrade, not a clear**, because reg
 per-slot: round 4 measured stackprof's registered `empty_string` pinned while its unregistered
 sibling `objtracer` was not.
 
-**Run `--self-test` before trusting any silence** — 27/27, 15/15 and 38/38 respectively. A suite of
+**Run `--self-test` before trusting any silence** — A is 38/38 (1 skipped). A suite of
 greens passes just as well when the parser has resolved nothing at all, so the controls that matter
 are **generated reds**: a de-marked copy of a tree with a known finding, and a `--disable-rule`
 mutation for each discharge rule. Round 5 shipped four over-clears in A that a green-only suite had
@@ -433,6 +433,18 @@ carrying the real defect forward into the next C++ tree. Both are fixed, and the
 hazard tally, the pick count says an arbitrary choice was actually made. Resolution is by *declared*
 type, not dispatch, so a derived override that drops a mark its base performs is an over-clear this
 pass cannot see; that limit is in the docstring rather than left implicit.
+
+**The same disease had a second host: the file.** Round 7 found `structs`, `funcs` and `dtypes` all
+keyed by *bare name*, first-wins, so a `static` definition in one translation unit answered for a
+same-named one in another — and nokogiri 1.19.4 has two `static void mark`s, in `xml_document.c` and
+`xslt_stylesheet.c`. The document's won on glob order and `func_instances` reported UNMARKED on a
+field its own file marks; reverse the order and the *unmarked* field gets cleared instead, which is
+the over-clear the same bug produces in the other direction. Resolution now prefers the using file
+and falls back tree-wide — the fallback is what still reaches mysql2's struct in `result.h`, so
+this is **not** "file-scope everything", and the preference only fires where C's own linkage rules
+say it should. `N shadowed name(s)` prints beside the overload count. Note that the first-wins
+counter did *not* cover this and could not: a `.dmark` is looked up by name and never passes
+through `callee_key`, so nothing counted the pick.
 
 **Recall under the wrong key is worse than no recall, because it reads as coverage.** C's
 function-local-static scan was already matching *indented* class members — but keying them **bare**,
