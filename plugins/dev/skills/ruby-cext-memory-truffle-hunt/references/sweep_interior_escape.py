@@ -151,12 +151,18 @@ for this: it has zero `RSTRING_PTR`/`StringValue`/`char *`-from-String in the wh
 so its zero is `0 derivations`, not `0 hits after 40 discharges`, and the counters are
 the only thing that tells those two apart.
 
-ACCEPTANCE (--self-test): see self_test(). Twelve positive controls, thirteen negative
-controls, a per-rule mutation table, and generated reds rather than a green-only suite.
-Run it before trusting any result -- silence is a property of the query until the counts
-say otherwise.
+ACCEPTANCE (--self-test): see self_test(). Twelve positive controls, four clean negative
+controls, eleven pinned-residue trees, a per-rule mutation table, and generated reds
+rather than a green-only suite. Two of the reds are SYNTHETIC TREES WRITTEN BY THE TEST,
+because the corpus is neutral on both shapes and a corpus-neutral fix is exactly the one a
+green suite cannot tell from no fix at all: `RSTRING_GETMEM`'s output pointer, and a
+definition at namespace or `extern "C"` scope. Each pins the FUNNEL COUNTERS and not only
+the hit count -- an untracked pointer and an empty index both end in `hit 0`, and they are
+different failures. Run it before trusting any result: silence is a property of the query
+until the counts say otherwise.
 """
 import argparse
+import bisect
 import pathlib
 import re
 import shutil
@@ -242,6 +248,68 @@ def match_brace(src, open_idx):
             if depth == 0:
                 return i
     return -1
+
+
+# C++ SCOPE HEADS, and the walk that treats them as transparent. Ported from
+# sweep_static_values.py by way of sweep_escaped_conversion.py, which took the same three
+# brace dispositions in the same round: a depth-0 `{` belongs to the CURRENT statement when
+# it opens an aggregate or an initialiser, ENDS it when it opens a function body, and --
+# the disposition C++ adds -- opens a scope with no storage duration of its own when it
+# follows `namespace X` or `extern "C"`. This predicate only ever had the first two, so
+# every definition in a namespaced or `extern "C"`-wrapped tree sat at nonzero brace depth
+# and _index_funcs skipped it: `0 fn(s)`, `0 derivations`, `0 hits` -- a clean sheet on an
+# empty index, which is exactly the shape of zero this file's ZERO MUST BE READABLE section
+# exists to make impossible.
+#
+# `extern "C"` reaches here AFTER strip_noise, which blanks string BODIES and keeps the
+# quotes -- the text is `extern " " {`, so the pattern has to allow a blanked literal.
+NAMESPACE_HEAD = re.compile(r"\bnamespace(?:\s+\w+(?:\s*::\s*\w+)*)?\s*$")
+LINKAGE_HEAD = re.compile(r"\bextern\s*\"[^\"]*\"\s*$")
+
+
+def top_level_units(src, base=0, transparent=None):
+    """Walk the declarations at static-storage scope, collecting transparent braces.
+
+    `transparent`, when a set is passed, collects the offsets of the `{` and `}` of every
+    namespace and linkage block the walk descends through. The walk that knows which braces
+    are scopes is the walk that knows which braces are not, so _index_funcs reads it from
+    here rather than keeping a second opinion about C++ syntax.
+    """
+    n, i, start = len(src), 0, 0
+    while i < n:
+        c = src[i]
+        if c == "{":
+            close = match_brace(src, i)
+            if close < 0:
+                return
+            pre = src[start:i].rstrip()
+            if NAMESPACE_HEAD.search(pre) or LINKAGE_HEAD.search(pre):
+                if transparent is not None:
+                    transparent.add(i)
+                    transparent.add(close)
+                for u in top_level_units(src[i + 1:close], base + i + 1, transparent):
+                    yield u
+                i = start = close + 1
+                continue
+            if re.search(r"\b(struct|union|enum)\b\s*\w*$", pre) or pre.endswith("="):
+                i = close + 1          # an aggregate or an initialiser: same statement
+                continue
+            yield base + start, src[start:close + 1]
+            i = start = close + 1
+            continue
+        if c == ";":
+            yield base + start, src[start:i + 1]
+            i = start = i + 1
+            continue
+        i += 1
+
+
+def scope_zero_braces(src):
+    """Offsets of the `{`/`}` that open and close a namespace or linkage block."""
+    transparent = set()
+    for _u in top_level_units(src, 0, transparent):
+        pass
+    return transparent
 
 
 def split_args(text):
@@ -516,12 +584,30 @@ class Tree:
         `RB_VM_LOCK_ENTER() { ... }` -- parses as a definition nested inside a real
         function, and the innermost-frame lookup would then bound a scan by the macro's
         block instead of the function's body. That is a false NEGATIVE generator.
+
+        Depth is counted over STORAGE scopes, not braces. `namespace X {` and
+        `extern "C" {` nest their contents without giving them a new storage duration, so
+        scope_zero_braces marks that pair and the count skips it -- otherwise a C++ tree
+        that wraps its extension in either one indexes zero functions, every later stage
+        walks an empty list, and the run reports `0 fn(s) | derive 0/0 -> hit 0`. That zero
+        is indistinguishable from racc's, which is the one this file's counters were added
+        to tell apart. sweep_static_values.py needed the same three dispositions first and
+        sweep_escaped_conversion.py ported them the same round; this is the same walk, not
+        a third opinion.
         """
-        depth, cursor = 0, 0
+        transparent = scope_zero_braces(src)
+        # brace offsets and the storage depth after each, so a name's depth is a bisect
+        # rather than a re-count of the file
+        bpos, bdepth, depth = [], [], 0
+        for m in re.finditer(r"[{}]", src):
+            if m.start() in transparent:
+                continue
+            depth += 1 if m.group() == "{" else -1
+            bpos.append(m.start())
+            bdepth.append(depth)
         for m in re.finditer(r"\b([A-Za-z_]\w*)\s*(?=\()", src):
-            depth += src.count("{", cursor, m.start()) - src.count("}", cursor, m.start())
-            cursor = m.start()
-            if depth != 0 or m.group(1) in NOT_CALLS:
+            k = bisect.bisect_left(bpos, m.start())
+            if (bdepth[k - 1] if k else 0) != 0 or m.group(1) in NOT_CALLS:
                 continue
             args, past = call_args(src, m.end())
             if args is None:
@@ -657,7 +743,26 @@ def pointer_alias(fn, deriv_off, macro):
     The target must be pointer-typed. Without that check `c = RSTRING_PTR(s)[i]` makes an
     `int` look like an alias of the buffer, and every later mention of `c` reads as an
     escape.
+
+    `RSTRING_GETMEM` DOES NOT RETURN THE POINTER, IT WRITES IT. `RSTRING_GETMEM(str, p,
+    len)` expands to an assignment to `p` and one to `len`, so there is no `p =` in the
+    source for the scan below to find and the alias came back None -- which means
+    `last_use` came back None, which means the window scan had nothing to bound and every
+    such row discharged `no-window`. A function that derives with the macro, opens a
+    compaction window and then reads `p` produced ZERO hits: the derivation was counted in
+    the funnel and then silently cleared, which is the failure mode this predicate is most
+    biased against. The macro's SECOND argument is the derived pointer, so it is named here
+    and joins escape and window analysis on the same footing as an explicit alias.
+    (Predicate B has the sibling of this gap on the same macro, as an alias source for its
+    escape analysis; the two are fixed separately because the walks start in different
+    places.) A non-identifier output -- json's `RSTRING_GETMEM(obj, search.ptr, len)` --
+    is left unaliased rather than guessed at, because every downstream user of `alias`
+    builds a `\\b...\\b` word-boundary regex from it.
     """
+    if macro == "RSTRING_GETMEM":
+        args, _past = call_args(fn.body, deriv_off - fn.bstart + len(macro))
+        out = args[1].strip() if args and len(args) > 1 else ""
+        return out if re.fullmatch(r"[A-Za-z_]\w*", out) else None
     if is_indexed(fn, deriv_off, macro):
         return None
     stmt = statement_before(fn.body, deriv_off - fn.bstart).replace("\n", " ")
@@ -1238,6 +1343,28 @@ class Result:
 # are runtime values, not source constants, so the rule cleared 0 rows over the whole
 # 55-tree corpus. A discharge rule that never fires is a rule nobody has tested, and
 # keeping it would be silence that reads as coverage. It stays as a COLUMN.
+# DEFERRED, DELIBERATELY: THE PINNING-MARK DISCHARGE. Written down, not built.
+#
+# Three trees now carry rows whose ONLY defect is that this predicate cannot read a mark
+# function: zlib's seven `z->buf` rows, json's `parser->buffer` (parser.c:2218,
+# `rb_gc_mark(parser->buffer); // pin the buffer`), and msgpack's `c->mapped_string`
+# (buffer.c:119,122). All three derive an interior pointer from a VALUE field of a wrapped
+# struct whose dmark PINS that field, so the bytes cannot move and the object cannot be
+# freed -- a true clear, and the largest remaining block of hand-cleared rows.
+#
+# It is not built here because the discharge turns on ONE token. `rb_gc_mark` pins;
+# `rb_gc_mark_movable` does not, and a rule that cannot tell them apart would clear the
+# movable case too -- over-clearing a whole class in a single step, which is the one failure
+# mode this predicate is built against. So it may only ship with a generated red for BOTH
+# marks, on one synthetic tree:
+#
+#   red A   dmark calls rb_gc_mark_movable(w->buf); the derive from w->buf must still HIT.
+#   red B   dmark calls rb_gc_mark(w->buf);         the same derive must discharge, naming
+#                                                   the mark function and the file:line.
+#
+# and a third arm for the case that decides whether it is worth building at all: the field
+# named in NEITHER call, which must hit. Predicate A already parses dmark bodies and grades
+# pinning versus movable; the work is reading that answer from here, not re-deriving it.
 RULES = ("guarded", "no-window", "last-use-after", "copies-immediately",
          "copies-in-callee")
 
@@ -1411,6 +1538,22 @@ def _hits(root, disabled=(), discharge=True):
     return _sweep(root, disabled, discharge).hits
 
 
+def _synth(name, files):
+    """Write a synthetic tree from the test itself and return its path.
+
+    `_mutate` needs a real gem to start from, which is right for the polarity controls but
+    wrong for a shape no tree in the corpus happens to contain. These fixtures are written
+    here, in full, so the red is generated rather than checked in -- and so that reading the
+    check tells you what it pins without opening another file.
+    """
+    tmp = pathlib.Path(tempfile.mkdtemp()) / name
+    for rel, text in files.items():
+        p = tmp / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    return tmp
+
+
 def _mutate(src_tree, edits):
     """Copy a real tree and apply (relpath, old, new) edits. Returns a temp path.
 
@@ -1447,7 +1590,7 @@ POSITIVES = [
 # Negative controls that must come back with ZERO hits, each cleared by a named rule.
 # racc is the "zero for the right reason" control: no interior derivation exists in the
 # tree at all, so its zero has to show up as `derive 0/0`, not `hit 0 (discharged 40)`.
-NEGATIVES = ["json-", "erb-", "bcrypt-", "ed25519-", "racc-"]
+NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-"]
 
 # The rest of the round-6 negative set does NOT come back clean, and pinning the numbers
 # is more honest than widening a rule until they do. Each entry is the count triaged by
@@ -1495,9 +1638,46 @@ NEGATIVES = ["json-", "erb-", "bcrypt-", "ed25519-", "racc-"]
 # `rb_str_derive` derives only to compare pointers and to compute an offset. **Neither has
 # been worked through.** The numbers are pinned at the new values so that FURTHER growth
 # still trips the check; they are not a claim that the 24 added rows have been read.
+#
+# ROUND 9: TRACKING `RSTRING_GETMEM`'s OUTPUT POINTER ADDED FIVE ROWS, AND HERE IS EACH.
+# json moves OUT of NEGATIVES, which is a real loss of a clean control and is recorded as
+# one rather than papered over by widening a rule.
+#
+#   json 0 -> 2    parser.c:2410 `cResumableParser_feed` is the predicate's own shape,
+#                  verbatim: RSTRING_GETMEM(parser->buffer, start, len) written straight
+#                  into parser->state.start/end/cursor, a heap struct read on a LATER
+#                  Ruby call. Cleared in triage by the PINNING mark -- json's
+#                  JSON_ResumableParser_mark calls `rb_gc_mark(parser->buffer)` at
+#                  parser.c:2218, with the comment `// pin the buffer`, while every other
+#                  field in the same function uses rb_gc_mark_movable. That is a
+#                  deliberate pin and it is correct. Same disposition as zlib's seven
+#                  z->buf rows, and now the second corpus witness for the pinning-mark
+#                  discharge that is deferred until it can ship with a generated red for
+#                  BOTH marks.
+#                  parser.c:140 `rstring_cache_cmp` is NOISE, from `carries()`: the
+#                  function returns `int` and the pointer is only an ARGUMENT inside
+#                  `return rstring_cache_memcmp(str, rstring_ptr, length)`. Not a new
+#                  mechanism -- `return f(RSTRING_PTR(s))` has always read as an escape --
+#                  and left alone deliberately, because narrowing `carries()` to reject an
+#                  argument position would also reject `return strchr(p, ',')`, which
+#                  really does return an interior pointer.
+#   msgpack 2 -> 3 buffer.c `_msgpack_buffer_append_reference` is msgpack's zero-copy
+#                  chunk: RSTRING_GETMEM(mapped_string, data, length) then
+#                  `b->tail.first = data; b->tail.last = data + length`. It stores the
+#                  string alongside the pointer and marks it with the PINNING
+#                  `rb_gc_mark(c->mapped_string)` (buffer.c:119,122) -- the idiom this
+#                  skill's safe-idiom table already cites msgpack's buffer for. Third
+#                  witness for the deferred rule; both versions move together.
+#   puma 5 -> 6    puma_http11.c:388 `HttpParser_execute` derives with the macro and the
+#                  only window is `rb_raise` on the `from >= dlen` branch, which is
+#                  mutually exclusive with the `puma_parser_execute(http, dptr, ...)`
+#                  branch that reads the pointer. That is this file's stated ORDERING
+#                  blind spot -- no CFG, so a window on a branch the deref cannot reach
+#                  still counts -- and it is noise under a limit that is written down
+#                  rather than a new one.
 TRIAGED = {"mysql2-0.5.6": 11, "zlib-basecamp-patch-": 20, "iconv-": 14, "zstd-": 6,
            "sqlite3-2.9.5": 3, "websocket-driver-": 2, "stringio-": 1,
-           "msgpack-1.8.4": 2, "msgpack-1.8.3": 2}
+           "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 2, "puma-": 6}
 
 
 def self_test(pool):
@@ -1592,8 +1772,8 @@ def self_test(pool):
         if s.hits:
             flagged.append("%s: %s" % (prefix,
                                        ["%s:%d" % (h[1], h[2]) for h in s.hits][:4]))
-    check(not flagged, "the 5 clean negative controls are unflagged or cleared by a "
-                       "named rule", flagged)
+    check(not flagged, "the %d clean negative controls (%s) are unflagged or cleared by a "
+                       "named rule" % (len(NEGATIVES), ", ".join(NEGATIVES)), flagged)
 
     # 5b. the triaged residue. Pinned, so noise cannot grow unnoticed and a genuine new
     #     row cannot hide inside an existing pile. Growth is a FAIL even though the rows
@@ -1696,6 +1876,115 @@ def self_test(pool):
               "strdups are preceded by ruby_xmalloc, so the copy does not dominate "
               "(%d rows stand)" % len(h212),
               "expected 13, got %d" % len(h212))
+
+    # 8b/8c. GENERATED RED: `RSTRING_GETMEM` WRITES ITS POINTER, IT DOES NOT RETURN ONE.
+    #
+    #    The corpus cannot host this control. Every RSTRING_GETMEM site in it is in a tree
+    #    that is either pinned residue or a positive control for something else, so a green
+    #    suite would have stayed green with the macro's output argument untracked -- which is
+    #    what it did, for eight rounds. The fixture is written here in full.
+    #
+    #    The window is a FLAG, not a second file. Both trees derive with the macro; the red
+    #    puts `rb_funcall(GC.compact)` between the derive and the read of `p` and the control
+    #    does not. So the check measures window participation and not the macro's name.
+    #    `probe_escape` rides along in both, because the escape half needs no window at all.
+    #
+    #    AND THE COUNTERS ARE ASSERTED, NOT ONLY THE HIT COUNT. If the output argument stops
+    #    being aliased the derivation is still counted and the row discharges `no-window` --
+    #    `derive 1/1 -> hit 0`, a clean sheet with a full funnel. If the INDEX regresses
+    #    instead, `derive` goes to 0. Those are different failures and they must not present
+    #    the same way, so both numbers are pinned.
+    getmem_c = ("#include <ruby.h>\n"
+                "\n"
+                "static VALUE\n"
+                "probe_window(VALUE self, VALUE str)\n"
+                "{\n"
+                "    const char *p;\n"
+                "    long len;\n"
+                "    int n;\n"
+                "    RSTRING_GETMEM(str, p, len);\n"
+                "%s"
+                "    n = p[len - 1];\n"
+                "    return INT2FIX(n);\n"
+                "}\n"
+                "\n"
+                "static VALUE\n"
+                "probe_escape(VALUE self, VALUE str)\n"
+                "{\n"
+                "    const char *q;\n"
+                "    long len;\n"
+                "    RSTRING_GETMEM(str, q, len);\n"
+                "    return rb_str_new(q, len);\n"
+                "}\n"
+                "\n"
+                "void Init_probe(void)\n"
+                "{\n"
+                "    rb_define_method(rb_cObject, \"win\", probe_window, 1);\n"
+                "    rb_define_method(rb_cObject, \"esc\", probe_escape, 1);\n"
+                "}\n")
+    window_line = "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+    gred = _sweep(_synth("fx-getmem-red", {"ext/probe.c": getmem_c % window_line}))
+    gctl = _sweep(_synth("fx-getmem-control", {"ext/probe.c": getmem_c % ""}))
+    check(gred.funcs == 3 and len(gred.derivations) == 2 and len(gred.hits) == 2
+          and {h[0] for h in gred.hits} == {"HELD-ACROSS-WINDOW", "ESCAPES-BY-RETURN"},
+          "RSTRING_GETMEM red: the macro's OUTPUT argument is the derived pointer, so "
+          "both the window and the escape are seen",
+          "funcs %d, derive %d, hits %s" % (gred.funcs, len(gred.derivations),
+                                            [(h[0], h[2]) for h in gred.hits]))
+    check(gctl.funcs == 3 and len(gctl.derivations) == 2 and len(gctl.hits) == 1
+          and gctl.hits[0][0] == "ESCAPES-BY-RETURN"
+          and any(d[0] == "no-window" for d in gctl.discharges),
+          "RSTRING_GETMEM control: with the window flag off the same derivation "
+          "discharges no-window -- the row is produced by the window, not by the macro",
+          "funcs %d, derive %d, hits %s, discharges %s"
+          % (gctl.funcs, len(gctl.derivations), [(h[0], h[2]) for h in gctl.hits],
+             [d[0] for d in gctl.discharges]))
+
+    # 8d/8e. GENERATED RED: A NAMESPACE OR LINKAGE BLOCK IS NOT A FUNCTION BODY.
+    #
+    #    Before the port, a definition inside `namespace X { ... }` or `extern "C" { ... }`
+    #    sat at nonzero brace depth and _index_funcs skipped it. The measured red on this
+    #    fixture is `0 fn(s) | derive 0/0 -> hit 0` -- the shape of zero that racc's control
+    #    exists to distinguish from a real one, produced here by an EMPTY INDEX. So the
+    #    counters are the assertion and the hit count is the corollary.
+    #
+    #    The wrapper is the flag. The same source unwrapped must give the same funnel and
+    #    the same row, because a namespace has no storage duration of its own: that is the
+    #    claim the port makes, and comparing the two trees is the only thing that tests it
+    #    rather than restating it.
+    def _ns_tree(wrapped):
+        ns_open, ns_close = ("namespace probe {\n", "}\n") if wrapped else ("", "")
+        ln_open, ln_close = ("extern \"C\" {\n", "}\n") if wrapped else ("", "")
+        return _synth("fx-ns-%s" % ("wrapped" if wrapped else "flat"), {"ext/probe.cpp":
+            "#include <ruby.h>\n\n" + ns_open +
+            "static VALUE\n"
+            "held_across_window(VALUE self, VALUE str)\n"
+            "{\n"
+            "    const char *p = RSTRING_PTR(str);\n"
+            "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+            "    return rb_str_new(p, RSTRING_LEN(str));\n"
+            "}\n" + ns_close + "\n" + ln_open +
+            "void Init_probe(void)\n"
+            "{\n"
+            "    rb_define_method(rb_cObject, \"held\", held_across_window, 1);\n"
+            "}\n" + ln_close})
+    nsw, nsf = _sweep(_ns_tree(True)), _sweep(_ns_tree(False))
+    check(nsw.funcs == 2 and len(nsw.derivations) == 1 and len(nsw.hits) == 1
+          and nsw.hits[0][0] == "ESCAPES-BY-RETURN",
+          "namespace red: definitions inside `namespace X {` and `extern \"C\" {` are "
+          "indexed -- an unported walk reports 0 fn(s), 0 derivations, a clean sheet on an "
+          "empty index",
+          "funcs %d, derive %d, hits %s" % (nsw.funcs, len(nsw.derivations),
+                                            [(h[0], h[2]) for h in nsw.hits]))
+    check((nsw.funcs, len(nsw.derivations), len(nsw.with_window),
+           [(h[0], h[1]) for h in nsw.hits])
+          == (nsf.funcs, len(nsf.derivations), len(nsf.with_window),
+              [(h[0], h[1]) for h in nsf.hits]),
+          "namespace transparency: the same source wrapped and unwrapped gives the same "
+          "funnel and the same row",
+          "wrapped %d/%d/%d vs flat %d/%d/%d"
+          % (nsw.funcs, len(nsw.derivations), len(nsw.hits),
+             nsf.funcs, len(nsf.derivations), len(nsf.hits)))
 
     # 9. PER-RULE MUTATION TABLE. A discharge rule with no generated red is a rule nobody
     #    has tested; round 5 shipped four over-clears in predicate A that a green-only

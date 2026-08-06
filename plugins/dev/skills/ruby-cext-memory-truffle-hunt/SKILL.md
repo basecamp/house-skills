@@ -158,10 +158,22 @@ conflating them is the easiest way to burn a real lead:
 > live. That is the documented rationale for `RB_GC_GUARD`
 > (`include/ruby/internal/memory.h`).
 >
-> So an in-call `char *` is safe **only** while a `VALUE` for the same String provably stays
-> on the stack: an unmodified argument, a struct field on the stack, or an explicit
-> `RB_GC_GUARD` after the pointer's last use. Anything stored at **registration** and read in
-> a **later** call is never safe.
+> So an in-call `char *` is safe **only** while some conservatively scanned location provably
+> holds a `VALUE` for the same String across the pointer's whole lifetime. Four things
+> establish that: a **live use of the `VALUE` at or after the pointer's last read**, an
+> explicit **`RB_GC_GUARD` after that last read**, a **struct field in the frame**, or a
+> derive that takes the `VALUE`'s **address** and so forces it a stack slot — plus the
+> caller's **`argv`**, which is scanned storage of its own rather than anything the callee's
+> frame does. Both of those last two are measured below.
+>
+> **"The parameter is unmodified" is not one of them.** That is a claim about the source
+> text, and the sentence above is the reason it does not carry: in an optimised build a
+> `VALUE` argument with no syntactic use after the derive may have its stack or register
+> slot reused or eliminated on the spot, exactly as `RB_GC_GUARD`'s own documentation says.
+> Treating "nothing reassigned it" as a discharge throws away real dangling-pointer sites —
+> okra is the reproduced one, where the register holding the `VALUE` was overwritten by the
+> `GumboOutput *` between the pointer load and the read. Anything stored at **registration**
+> and read in a **later** call is never safe.
 
 `yajl` is the honest example of surviving on stack-liveness alone: `yajl_parse` is
 non-copying and re-enters Ruby from its callbacks, with no `RB_GC_GUARD` anywhere — correct
@@ -323,7 +335,9 @@ as an argument), `as_raw`, `opaque =`, `PQsetNotice*`, `xmlReaderForIO`,
 the store.
 
 **Negative signals:** `RB_GC_GUARD` present; openssl's `volatile VALUE *` write-back idiom
-(`ossl_obj2bio`); the String is a stack argument live across the whole call.
+(`ossl_obj2bio`); the `VALUE` is *used* at or after the pointer's last read, so the frame
+demonstrably still holds it — not merely that an argument was never reassigned, which is a
+property of the source text and proves nothing about the frame.
 
 **A NULL/absent arena or allocator argument is a red flag.** protobuf's `Convert_StringData`
 aliases the caller's bytes when passed a NULL arena and copies otherwise — the comment even
@@ -412,7 +426,11 @@ existing suspects, and `REGISTERED` is a **downgrade, not a clear**, because reg
 per-slot: round 4 measured stackprof's registered `empty_string` pinned while its unregistered
 sibling `objtracer` was not.
 
-**Run `--self-test` before trusting any silence** — A is 38/38 (1 skipped). A suite of
+**Run `--self-test` before trusting any silence** — A is 48/48 (1 skipped), B 23/23, C 53/53,
+D 21/21. Note the pool argument differs: A and C take the corpus **parent**, B and D take the gem
+directories (`$CORPUS/*/`). Given the wrong one, B and D print `fixture missing` and **exit 0** —
+a self-test that passes because its fixtures were absent. A aborts with exit 2 instead; the other
+two should. A suite of
 greens passes just as well when the parser has resolved nothing at all, so the controls that matter
 are **generated reds**: a de-marked copy of a tree with a known finding, and a `--disable-rule`
 mutation for each discharge rule. Round 5 shipped four over-clears in A that a green-only suite had
@@ -596,16 +614,27 @@ you built against the one that loaded**, and treat a mismatch as a failed run:
 
 ```sh
 # Match both extensions and FAIL when nothing loaded. A bare `\.bundle` grep prints
-# nothing on Linux, where the extension is `.so` — and `shasum` on the built artifact
-# alone still exits 0, so the check that exists to catch a stale binary reports a pass.
+# nothing on Linux, where the extension is `.so`.
 dlext=$(ruby -e 'puts RbConfig::CONFIG["DLEXT"]')
+built=path/to/built.$dlext
 loaded=$(ruby -Ipath/to/lib -rharness -e 'require "the_gem"; puts Hunt.loaded_binary("gem_c")')
+
 [ -n "$loaded" ] || { echo "no loaded binary matched gem_c — failed run, not a pass"; exit 1; }
-shasum "path/to/built.$dlext" $loaded
+[ "$(printf '%s\n' "$loaded" | wc -l)" -eq 1 ] ||
+  { printf 'two loaded candidates — that is the finding:\n%s\n' "$loaded"; exit 1; }
+
+# `shasum a b` is a DISPLAY, not a check: its default mode prints one digest per file and
+# exits 0 whether or not they agree, so the step that exists to reject a stale extension
+# reports a pass on exactly the mismatch it was added to catch. `--check` is the verifying
+# mode — relabel the built artifact's digest with the loaded path and let shasum compare.
+shasum "$built" | sed "s| .*|  $loaded|" | shasum --check --status ||
+  { echo "loaded binary is not the artifact just built — failed run, not a pass"
+    shasum "$built" "$loaded"; exit 1; }
 ```
 
 `Hunt.loaded_binary` matches `\.(bundle|so)\z` and returns **every** hit, not the first:
-two loaded candidates is itself the finding, and `shasum` over all of them shows it.
+two loaded candidates is itself the finding, which is why the count is asserted before the
+digest rather than left for a human to notice in the output.
 
 The general rule: when a red/green comparison needs two builds, rebuild and re-stage *inside*
 the same step that runs the test, so the two can never drift apart.
