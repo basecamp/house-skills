@@ -1,0 +1,20 @@
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/SKILL.md
+  s_e4dc5311e27670::t_09cd51313d6b7a 415
+  s_e4dc5311e27670::t_8ad66ca7525042 437-448
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "c9386e65c333014111b248cf2d63d873330ddfea",
+  "prompts": {},
+  "sessions": {
+    "s_e4dc5311e27670": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b4125831-cfa6-4336-96d7-6e128ffcf078",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
