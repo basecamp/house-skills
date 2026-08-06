@@ -2,6 +2,7 @@
 
     from tu_scope import Scope, TREE, declared_scope, bind
     from tu_scope import top_level_units, scope_zero_braces, storage_depth
+    from tu_scope import match_brace, match_paren, skip_post_declarator
 
 WHY THIS FILE EXISTS
 --------------------
@@ -78,6 +79,63 @@ is walked THROUGH rather than into: `base` carries the enclosing offset, so a
 declaration three namespaces deep still reports its own file:line, and its key is the
 bare name -- which is correct for resolution (a namespace-scope name is reachable from
 the whole file) and is the stated residual for a registration spelled `&prof::cache`.
+
+THE THIRD THING, AND IT IS THE SAME WALK ONE STEP LATER: WHERE A DECLARATOR ENDS
+-------------------------------------------------------------------------------
+`storage_depth` says a definition is top-level; `skip_post_declarator` says where its
+BODY starts. Every function index in this directory is the same five lines -- find an
+identifier followed by `(`, match the parameter list, require a `{` -- and every one of
+them has been patched for the same reason: **tokens between the `)` and the `{` that the
+walk did not know how to cross**. Four appearances, three scripts, one gap:
+
+    sweep_interior_escape.py  `__attribute__((...))`, `noexcept`   (round 9, thread D:321)
+    sweep_interior_escape.py  `auto f(VALUE) -> VALUE {`           (round 9 review)
+    sweep_static_values.py    `static VALUE f(void) __attribute__((noinline)) {`
+                                                                  (round 9 review, C:929)
+
+The measured symptom is identical in every host and it is the one this directory keeps
+having to name: not a dropped row but an EMPTIED INDEX. Predicate D printed
+`0 fn(s) | derive 0/0 -> hit 0`; predicate C printed `slots 0/0, HITS 0` on a file whose
+attributed function holds an allocating `static VALUE cache`. Both read as a clean gem.
+That is the whole reason this walk lives here now instead of being ported a fifth time.
+
+WHY THE WORDS ARE OPEN AND THE PARENTHESES ARE CLOSED
+`__attribute__` and `noexcept` shipped first as a CLOSED word list, and the trailing
+return type broke it again within one review -- a list that has to be extended once per
+spelling is a list that reports a clean gem once per spelling. So a bare token run is
+crossed freely and a parenthesised group is crossed only after a keyword known to
+introduce one. The split is where the danger is: a bare token cannot turn a
+non-definition into a definition, because every construct that would be mis-read
+announces itself with a character this walk refuses. A `(` is different -- it is how a
+SECOND declarator gets between the two, which is exactly how `MACRO(x)` followed by a
+real definition would hand the walk that definition's body under the macro's name.
+
+THE REJECTION TABLE. It travels with the walk, and it is asserted by both callers'
+self-tests rather than described here only -- opening the words up is what made
+predicate D invent four functions out of trilogy's `XX(...)` X-macro lists and ffi's
+`__declspec(align(8))`, each followed by a `typedef enum {` whose aggregate body was
+then indexed as a function body under the macro's name.
+
+    f(str) VALUE str; {           K&R parameter declarations -- the `;`
+    VALUE f(VALUE);               a prototype, then anything -- the `;`
+    struct S s = f(x), t = {1};   a declarator list with an initialiser -- the `=`
+    MACRO(a) static VALUE g(V x)  a macro, then a definition -- the `(` of `g(`
+    XX(A, 1) typedef enum {       an X-macro list, then a type -- `typedef`
+    __declspec(align(8)) struct   an attribute, then a type -- `struct`
+
+A keyword that starts a new declaration cannot appear in a declarator suffix, so
+POST_DECL_STOP stops the walk exactly as `;` does. Predicate C's neighbours are
+different from predicate D's -- it is looking for `static VALUE` declarations, so a
+`typedef struct { ... } static_thing;` sitting after a rejection boundary is the shape
+that would cost it -- and `typedef`, `struct` and `static` are all in the stop set for
+precisely that reason.
+
+STILL UNHANDLED, named so the next one is not a surprise: a constructor
+member-initialiser list (`Foo::Foo(int x) : a(x) {`) stops at the `(` of `a(`; a
+trailing return type that is itself a function-pointer type (`-> VALUE (*)(int)`) stops
+at its `(`; and one naming an elaborated type (`-> struct S`) stops at `struct`. All
+three cost recall rather than clearing a row, which is the direction this function is
+allowed to be wrong in.
 """
 
 import bisect
@@ -216,6 +274,76 @@ def match_brace(src, open_idx):
             if depth == 0:
                 return i
     return -1
+
+
+def match_paren(src, open_idx):
+    """Index of the `)` matching the `(` at open_idx, or -1."""
+    depth = 0
+    for i in range(open_idx, len(src)):
+        if src[i] == "(":
+            depth += 1
+        elif src[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+# ----------------------------------------------- where a declarator ends and a body begins
+#
+# The rejection table and the reason the words are open while the parentheses stay closed
+# are in this module's docstring; these three sets are that table's implementation.
+POST_DECL_PAREN = frozenset(("__attribute__", "__asm__", "asm", "__declspec", "throw",
+                             "noexcept", "alignas", "_Alignas"))
+POST_DECL_STOP = frozenset(("typedef", "struct", "union", "enum", "class", "namespace",
+                            "template", "using", "static", "extern", "inline", "register"))
+# The punctuation a declarator suffix may legally carry: the trailing-return arrow, pointer
+# and reference declarators, template arguments, and the `::` of a qualified return type.
+# `;`, `=`, `,`, `(`, `[`, `{` are all absent on purpose -- see the rejection table.
+POST_DECL_PUNCT = frozenset("*&<>:~->")
+
+_POST_DECL_WORD = re.compile(r"[A-Za-z_]\w*")
+
+
+def skip_post_declarator(src, k):
+    """Advance past the attributes, specifiers and trailing return type between `)` and `{`.
+
+    Returns the first offset the walk will not consume; a caller accepts the definition
+    only if that offset holds the `{`. Stopping early is therefore always a REJECT, which
+    is the recall-losing direction and the one this function is allowed to be wrong in.
+    """
+    n = len(src)
+    while k < n:
+        while k < n and src[k] in " \t\r\n":
+            k += 1
+        if k >= n:
+            return k
+        m = _POST_DECL_WORD.match(src, k)
+        if m:
+            word, j = m.group(), m.end()
+            if word in POST_DECL_STOP:
+                return k                # a new declaration begins: not this declarator
+            t = j
+            while t < n and src[t] in " \t\r\n":
+                t += 1
+            if t < n and src[t] == "(":
+                # A parenthesised group belongs to this declarator only when a keyword
+                # known to take one introduced it. Otherwise it is a second declarator and
+                # the walk has left the definition it started from.
+                if word not in POST_DECL_PAREN:
+                    return k
+                close = match_paren(src, t)
+                if close < 0:
+                    return k
+                k = close + 1
+                continue
+            k = j                       # a bare word: `noexcept`, `const`, `VALUE`, ...
+            continue
+        if src[k] in POST_DECL_PUNCT:
+            k += 1
+            continue
+        return k
+    return k
 
 
 def top_level_units(src, base=0, transparent=None):

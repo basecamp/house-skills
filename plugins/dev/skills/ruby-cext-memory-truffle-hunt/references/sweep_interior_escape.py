@@ -269,24 +269,14 @@ def strip_directives(src):
 match_brace = tu_scope.match_brace
 
 
-def match_paren(src, open_idx):
-    """Index of the `)` matching the `(` at open_idx, or -1."""
-    depth = 0
-    for i in range(open_idx, len(src)):
-        if src[i] == "(":
-            depth += 1
-        elif src[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
-
-
-# POST-DECLARATOR ATTRIBUTES AND SPECIFIERS. A definition may put tokens between the
-# parameter list's `)` and the body's `{`, and both C and C++ have them:
+# WHERE A DECLARATOR ENDS AND A BODY BEGINS -- one implementation, in tu_scope.py, beside
+# the linkage rule and the transparent-scope walk the same scripts kept re-deriving. A
+# definition may put tokens between the parameter list's `)` and the body's `{`, in both C
+# and C++:
 #
-#     static VALUE bad(VALUE str) __attribute__((noinline)) { ... }   /* C   */
-#     static VALUE bad(VALUE str) noexcept { ... }                    /* C++ */
+#     static VALUE bad(VALUE str) __attribute__((noinline)) { ... }   /* C     */
+#     static VALUE bad(VALUE str) noexcept { ... }                    /* C++   */
+#     static auto bad(VALUE str) -> VALUE { ... }                     /* C++11 */
 #
 # _index_funcs used to skip WHITESPACE ONLY and then require `{`, so it never reached the
 # brace and dropped the whole function -- derivations, windows and escapes with it. A tree
@@ -294,96 +284,18 @@ def match_paren(src, open_idx):
 # index again, the shape of zero this file's ZERO MUST BE READABLE section exists to make
 # impossible, and the same failure the namespace port fixed from the other direction.
 #
-# THE CLOSED LIST WAS THE WRONG SHAPE, AND THE THIRD VARIANT IS WHAT SAID SO. Round 9
-# shipped `__attribute__((...))` and `noexcept`; the very next review brought the C++
-# trailing return type, which the walk stopped at because `->` is not a word at all:
-#
-#     auto bad(VALUE str) -> VALUE { ... }        /* C++11 */
-#
-# Same measured symptom every time -- `0 fn(s) | derive 0/0 -> hit 0` -- so a list that has
-# to be extended once per spelling is a list that reports a clean gem once per spelling.
-#
-# So the WORDS are open and the PARENTHESES stay closed, and the split is where the danger
-# is. A bare token run between `)` and `{` cannot, by itself, turn a non-definition into a
-# definition: the constructs that would be mis-read all announce themselves with a
-# character this walk refuses. A parenthesised group is different -- it is how a SECOND
-# declarator gets between the two, which is exactly how `MACRO(x)` followed by a real
-# definition would hand this walk the real definition's body under the macro's name -- so a
-# `(` is skipped only after one of the attribute keywords that is known to introduce one.
-#
-# WHAT IT MUST STILL REJECT, and does, each because the character is not skippable:
-#
-#     f(str) VALUE str; {          K&R parameter declarations -- the `;`
-#     VALUE f(VALUE);              a prototype, then anything -- the `;`
-#     struct S s = f(x), t = {1};  a declarator list with an initialiser -- the `=`
-#     MACRO(a) static VALUE g(V x) { a macro, then a definition -- the `(` of `g(`
-#     XX(A, 1) typedef enum {       an X-macro list, then a type -- `typedef` (see below)
-#
-# THE TYPE-INTRODUCING KEYWORDS ARE REJECTED BY NAME, and they were the price of opening the
-# words: measured over the corpus, the open walk recovered 93 real definitions (74 of them
-# nio4r's bundled libev, whose every function carries an `EV_NOEXCEPT` macro the closed list
-# had never heard of) and INVENTED four -- trilogy's `XX(...)` X-macro list and ffi's
-# `__declspec(align(8))`, each followed by a `typedef enum {` or `typedef struct {` whose
-# aggregate body was then indexed as a function body under the macro's name. A keyword that
-# starts a new declaration cannot appear in a declarator suffix, so it stops the walk
-# exactly as `;` does.
-#
-# STILL UNHANDLED, named so the next one is not a surprise: a constructor member-initialiser
-# list (`Foo::Foo(int x) : a(x) {`) stops at the `(` of `a(`; a trailing return type that is
-# itself a function-pointer type (`-> VALUE (*)(int)`) stops at its `(`; and one naming an
-# elaborated type (`-> struct S`) stops at `struct`. All three are rejected the same way the
-# closed list rejected them, so none is a regression -- and all three cost recall rather
-# than clearing a row.
-POST_DECL_PAREN = {"__attribute__", "__asm__", "asm", "__declspec", "throw", "noexcept",
-                   "alignas", "_Alignas"}
-POST_DECL_STOP = {"typedef", "struct", "union", "enum", "class", "namespace", "template",
-                  "using", "static", "extern", "inline", "register"}
-# The punctuation a declarator suffix may legally carry: the trailing-return arrow, pointer
-# and reference declarators, template arguments, and the `::` of a qualified return type.
-# `;`, `=`, `,`, `(`, `[`, `{` are all absent on purpose -- see the rejection table above.
-POST_DECL_PUNCT = frozenset("*&<>:~->")
-
-
-def skip_post_declarator(src, k):
-    """Advance past the attributes, specifiers and trailing return type between `)` and `{`.
-
-    Returns the first offset the walk will not consume; _index_funcs accepts the definition
-    only if that offset holds the `{`. Stopping early is therefore always a REJECT, which is
-    the recall-losing direction and the one this function is allowed to be wrong in.
-    """
-    n = len(src)
-    word_re = re.compile(r"[A-Za-z_]\w*")
-    while k < n:
-        while k < n and src[k] in " \t\r\n":
-            k += 1
-        if k >= n:
-            return k
-        m = word_re.match(src, k)
-        if m:
-            word, j = m.group(), m.end()
-            if word in POST_DECL_STOP:
-                return k                # a new declaration begins: not this declarator
-            t = j
-            while t < n and src[t] in " \t\r\n":
-                t += 1
-            if t < n and src[t] == "(":
-                # A parenthesised group belongs to this declarator only when a keyword
-                # known to take one introduced it. Otherwise it is a second declarator and
-                # the walk has left the definition it started from.
-                if word not in POST_DECL_PAREN:
-                    return k
-                close = match_paren(src, t)
-                if close < 0:
-                    return k
-                k = close + 1
-                continue
-            k = j                       # a bare word: `noexcept`, `const`, `VALUE`, ...
-            continue
-        if src[k] in POST_DECL_PUNCT:
-            k += 1
-            continue
-        return k
-    return k
+# This file fixed it twice in one round -- once by naming `__attribute__` and `noexcept` in
+# a closed list, and once by opening the words and closing the parentheses when the trailing
+# return type broke the list again. Predicate C then reported the FOURTH appearance of the
+# same gap in its own function index, which is why the walk now has one home. The rejection
+# table, the reason the words are open, and the recall limits that remain are all in
+# tu_scope's docstring; the assertions for them are in this file's self-test at 8v/8w and in
+# predicate C's.
+match_paren = tu_scope.match_paren
+POST_DECL_PAREN = tu_scope.POST_DECL_PAREN
+POST_DECL_STOP = tu_scope.POST_DECL_STOP
+POST_DECL_PUNCT = tu_scope.POST_DECL_PUNCT
+skip_post_declarator = tu_scope.skip_post_declarator
 
 
 # C++ SCOPE HEADS AND THE WALK THAT TREATS THEM AS TRANSPARENT -- one implementation, in
@@ -3083,6 +2995,16 @@ def self_test(pool):
         # a declarator list with a braced initialiser: the `=`
         "init": "struct S s = mk(1), t = {2};\n"
                 "static VALUE bad(VALUE str)\n{\n    return Qnil;\n}\n",
+        # THE TWO THE CORPUS FOUND AND THIS TABLE DID NOT. `typedef` stops the walk, and
+        # both stop words were added on the strength of a corpus row rather than a fixture
+        # -- so emptying POST_DECL_STOP broke nothing here while predicate C's copy of the
+        # table caught it. These are the shapes that were actually invented: ffi's
+        # `__declspec(align(8))` and trilogy's X-macro list, each followed by a type whose
+        # aggregate body was then indexed as a function body under the macro's name.
+        "typedef-aggregate": "__declspec(align(8)) typedef struct { int x; } thing_t;\n"
+                             "static VALUE bad(VALUE str)\n{\n    return Qnil;\n}\n",
+        "x-macro": "XX(A, 1)\ntypedef enum { E_A } phase_t;\n"
+                   "static VALUE bad(VALUE str)\n{\n    return Qnil;\n}\n",
     }
     indexed = {}
     for tag, src in rejects.items():
@@ -3090,10 +3012,12 @@ def self_test(pool):
             f.name for f in Tree(_synth("fx-rej-%s" % tag,
                                         {"ext/probe.cpp": "#include <ruby.h>\n\n" + src})
                                  ).funcs)
-    check(indexed == {"macro": ["bad"], "knr": [], "proto": ["bad"], "init": ["bad"]},
+    check(indexed == {"macro": ["bad"], "knr": [], "proto": ["bad"], "init": ["bad"],
+                      "typedef-aggregate": ["bad"], "x-macro": ["bad"]},
           "post-declarator green: the open walk still refuses to invent a body -- a macro "
-          "call, a prototype and an initialiser list each index the ONE real definition, "
-          "and K&R indexes none (a stated recall limit, unchanged)", indexed)
+          "call, a prototype, an initialiser list, `__declspec(...) typedef struct` and an "
+          "X-macro list each index the ONE real definition, and K&R indexes none (a stated "
+          "recall limit, unchanged)", indexed)
 
     # 8f. ROUND 9: A DISCHARGE RESOLVED THROUGH ANOTHER TRANSLATION UNIT'S BODY (:1360).
     #

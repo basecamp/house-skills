@@ -224,6 +224,18 @@ but an INDEX emptied, which is the shape of zero that reads as a clean gem. The 
 lives in tu_scope.py -- one implementation, four ports' worth of the same lesson -- and
 both the slot walk and the function index read the depth from it.
 
+THE FUNCTION INDEX HAD A SECOND WAY TO COME BACK EMPTY, and the next review found it: the
+walk required the body's `{` to sit immediately after the parameter list's `)`, so a
+definition carrying an attribute was not indexed either. `static VALUE bad(void)
+__attribute__((noinline)) { static VALUE cache; ... }` measured the same `slots 0/0, decls
+0, HITS 0`. That is the FOURTH appearance of one walker gap across three scripts --
+predicate D hit it twice in one round, for `__attribute__`/`noexcept` and then for a C++
+trailing return type -- so tu_scope.skip_post_declarator is now its one home, and its
+REJECTION TABLE travels with it. The table matters more here than it looks: the failure
+mode of a walk that crosses too much is a body indexed under the wrong name, and in THIS
+predicate a wrongly-opened span is then scanned for `static VALUE` declarations. Both
+callers assert the table, and each holds down a constant the other does not exercise.
+
 KNOWN, NOT FIXED HERE
 ---------------------
 A METHOD BODY defined inline in a class body is still not scanned for function-local
@@ -914,6 +926,26 @@ class Tree:
         one file disagreed about C++ for a round: file-scope slots inside a namespace were
         found while function-local ones in the same namespace were not. tu_scope.storage_depth
         is the same walk both now read, and predicate D's function index reads it too.
+
+        AND THE DECLARATOR DOES NOT END AT THE `)`. This walk skipped WHITESPACE ONLY and
+        then required `{`, so a definition carrying anything between the parameter list and
+        the body was never indexed at all:
+
+            static VALUE bad(void) __attribute__((noinline)) { static VALUE cache; ... }
+
+        Measured on that fixture unfixed: `slots 0/0, decls 0, HITS 0` -- the allocating
+        `cache` inside it is invisible, and the file reads exactly as clean as a gem with no
+        statics in it. The SAME gap, in three scripts, four times: predicate D hit it for
+        `__attribute__`/`noexcept` and again for a C++ trailing return type, and this is the
+        fourth. tu_scope.skip_post_declarator is that walk's one home, and its rejection
+        table travels with it -- opening the crossing up is what once let predicate D invent
+        four function bodies out of X-macro lists and `__declspec(...)` before a
+        `typedef enum {`. THIS predicate's neighbours are different and the risk runs the
+        other way: it is looking for `static VALUE` declarations, so a
+        `typedef struct { ... } static_thing;` after a rejection boundary is the shape that
+        would cost it a wrong span. `typedef`, `struct` and `static` are all stop words, and
+        the self-test asserts the table here as well as in D -- one walk, two neighbourhoods,
+        two sets of controls.
         """
         spans = self.func_spans.setdefault(path, [])
         depth_at = tu_scope.storage_depth(src)
@@ -923,9 +955,7 @@ class Tree:
             args, past = call_args(src, m.end())
             if args is None:
                 continue
-            k = past
-            while k < len(src) and src[k] in " \t\r\n":
-                k += 1
+            k = tu_scope.skip_post_declarator(src, past)
             if k >= len(src) or src[k] != "{":
                 continue
             close = match_brace(src, k)
@@ -994,8 +1024,27 @@ class Tree:
         #   read in another -- the shape this predicate is about -- and it was the one
         #   spelling the pattern could not see. Qualifiers are allowed on either side of
         #   `static` now (LOCAL_QUAL), which also picks up `static thread_local VALUE`.
-        pat = re.compile(r"\b" + LOCAL_QUAL + r"static\s+" + LOCAL_QUAL
-                         + r"VALUE\s+([^;=(){}]+)[;=]")
+        #
+        # AND THE THIRD: THE MATCH USED TO END AT THE FIRST `=`. `[^;=(){}]+[;=]` reads a
+        # declarator list only up to its first initialiser, so
+        #
+        #     static VALUE rooted = Qnil, bad = Qnil;
+        #
+        # declared ONE slot. Register `rooted` and the file reports `slots 1/1`, one
+        # `registered-slot` discharge and HITS 0 while `bad` takes an `rb_str_new_cstr` and
+        # is never seen -- a clean-looking sheet produced by half a declaration. The whole
+        # STATEMENT is read now, to its top-level `;`, and split_args -- the top-level comma
+        # splitter the file-scope and struct walks already use -- separates the declarators.
+        # It is genuinely top-level, which is the property that matters here: the commas
+        # inside `static VALUE a = f(x, y), b;` are at paren depth 1 and yield `a` and `b`,
+        # not four things.
+        #
+        # The paren gate moves with it, and it is on the DECLARATOR rather than the
+        # statement, exactly as _unit_slots case (3) does it: `static VALUE (*fp)(void);` is
+        # a function pointer and not a slot, while `static VALUE c = rb_str_new_cstr("x");`
+        # is a slot whose initialiser happens to call something. The old character class
+        # rejected both by refusing to cross a `(` at all.
+        pat = re.compile(r"\b" + LOCAL_QUAL + r"static\s+" + LOCAL_QUAL + r"VALUE\b")
         for a, b in self.func_spans.get(path, ()):
             for m in pat.finditer(src, a, b):
                 # An INDENTED class member matches this pattern too -- which is how the
@@ -1004,7 +1053,17 @@ class Tree:
                 # under a key that cannot match `rb_global_variable(&Registry::cache)`.
                 if any(x <= m.start() < y for x, y in member_spans):
                     continue
-                for decl in split_args(m.group(1)):
+                chunks = split_top_off(src[m.end():b], ";")
+                if len(chunks) < 2:
+                    continue                    # no terminator in the body: not a statement
+                rest = chunks[0][1]
+                # A `;` reached only by walking OUT of the enclosing block belongs to some
+                # later statement, not to this one.
+                if rest.count("}") > rest.count("{") \
+                        or "(" in split_top_off(rest, "=")[0][1]:
+                    continue
+                decl_text = re.sub(r"\s+", " ", m.group(0) + rest).strip() + ";"
+                for decl in split_args(rest):
                     nm, arr, ptr = declarator(decl)
                     if nm and not ptr:
                         # A function-local static is internal to its BLOCK, which is one
@@ -1020,8 +1079,7 @@ class Tree:
                         # INCLUDER, and this pass cannot resolve includes. Those stay
                         # tree-wide keyed, the same residual as a header file static.
                         self.slots.append(Slot(path, m.start(), nm + arr, nm, "scalar",
-                                               re.sub(r"\s+", " ", m.group(0)).strip()
-                                               .rstrip(";=").rstrip() + ";",
+                                               decl_text,
                                                scope=Scope(path, (a, b))
                                                if path.suffix in TU_EXT else TREE))
 
@@ -2458,6 +2516,122 @@ void Init_probe(void) {
 """ + ln_close)
 
 
+def RED_ATTRIBUTED_FUNCTION(lead, tail):
+    """A function-local static inside an ATTRIBUTED definition -- the declarator is the flag.
+
+    ROUND 9 REVIEW (:929): the function index skipped WHITESPACE ONLY between the parameter
+    list's `)` and the body's `{`, so a definition carrying an attribute was never indexed,
+    contributed no span, and every function-local `static VALUE` inside it was invisible.
+    Measured on the attributed arm below, unfixed: `slots 0/0, decls 0, HITS 0` -- against
+    2 slots and 1 hit for the identical source without the attribute. An emptied index, not
+    a dropped row, which is why the COUNTERS are the assertion and the hit count is the
+    corollary.
+
+    THE DECLARATOR IS THE FLAG. Six spellings of one pair of functions must give one funnel
+    and one set of rows, because nothing between the `)` and the `{` affects storage
+    duration. `("VALUE", "")` is the green the reviewer asked for -- an ordinary
+    unattributed function must still index -- and the two `auto ... -> VALUE` arms are what
+    hold POST_DECL_PUNCT down in this caller, since a C++ trailing return type is the
+    variant that broke predicate D's closed word list and predicate C reads the same C++
+    trees.
+
+    Two functions, as elsewhere in this file: `cache` is the RED and `keep` is the GREEN in
+    the same scope. A walk that indexes the function but misplaces its body would drop
+    `keep`'s registration and turn one over-clear into an over-report.
+    """
+    return ("#include <ruby.h>\n\n"
+            "static " + lead + "\ncached(void)" + tail + """
+{
+    static VALUE cache;
+    if (!cache) {
+        cache = rb_str_new_cstr("lost");
+    }
+    return cache;
+}
+
+static """ + lead + """
+rooted(void)""" + tail + """
+{
+    static VALUE keep;
+    if (!keep) {
+        keep = rb_str_new_cstr("kept");
+        rb_global_variable(&keep);
+    }
+    return keep;
+}
+
+void Init_probe(void)
+{
+    rb_define_method(rb_cObject, "c", cached, 0);
+    rb_define_method(rb_cObject, "r", rooted, 0);
+}
+""")
+
+
+RED_INITIALISED_DECLARATOR_LIST = """
+#include <ruby.h>
+
+/* ROUND 9 REVIEW (:998): THE MATCH USED TO END AT THE FIRST `=`. A declarator list is not
+   over when its first declarator takes an initialiser, but `[^;=(){}]+[;=]` stopped there
+   and declared ONE slot out of two. Measured unfixed: `slots 1/1`, one `registered-slot`
+   discharge for `rooted`, HITS 0 -- while `bad` takes an rb_str_new_cstr and was never a
+   slot at all. The green is in the same declaration on purpose: `rooted` must STILL
+   discharge, or reading the whole statement has just broken the registration rule. */
+static VALUE
+probe(VALUE self)
+{
+    static VALUE rooted = Qnil, bad = Qnil;
+    if (NIL_P(rooted)) {
+        rooted = rb_str_new_cstr("kept");
+        rb_global_variable(&rooted);
+    }
+    bad = rb_str_new_cstr("lost");
+    return bad;
+}
+
+void Init_probe(void) { rb_define_method(rb_cObject, "p", probe, 0); }
+"""
+
+
+def GREEN_SINGLE_INITIALISED(registered):
+    """ONE declarator, initialised -- the shape the fix must not disturb. REGISTERED is the flag.
+
+    The over-clear was in the declarators AFTER an initialiser, so the single-declarator case
+    is where a fix that reads too much would show first: it must still be exactly one slot,
+    and it must still discharge when and only when it is registered.
+    """
+    reg = "\n        rb_global_variable(&only);" if registered else ""
+    return ("#include <ruby.h>\n\n"
+            "static VALUE\nprobe(VALUE self)\n{\n"
+            "    static VALUE only = Qnil;\n"
+            "    if (NIL_P(only)) {\n"
+            "        only = rb_str_new_cstr(\"x\");" + reg + "\n"
+            "    }\n"
+            "    return only;\n}\n\n"
+            "void Init_probe(void) { rb_define_method(rb_cObject, \"p\", probe, 0); }\n")
+
+
+GREEN_TOP_LEVEL_COMMAS = """
+#include <ruby.h>
+
+/* The commas that separate declarators are the TOP-LEVEL ones. `a = f(x, y), b` is two
+   declarators and four commas; splitting on all of them yields four things, two of which
+   are `y)` and fragments of a call. `fp` is here because reading the whole statement means
+   crossing a `(` the old character class refused outright: a function pointer is still not
+   a slot, and the gate that says so is on the declarator, not on the statement. */
+static VALUE
+probe(VALUE self)
+{
+    static VALUE a = rb_funcall(self, rb_intern("dup"), 2, x, y), b;
+    static VALUE (*fp)(void);
+    b = rb_str_new_cstr("lost");
+    return a;
+}
+
+void Init_probe(void) { rb_define_method(rb_cObject, "p", probe, 0); }
+"""
+
+
 GREEN_HEADER_STATIC_H = """
 #ifndef probe_h
 #define probe_h
@@ -2490,17 +2664,27 @@ def _sweep_source(src, rules=ALL_RULES, suffix=".cc"):
     return _sweep_sources({"probe" + suffix: src}, rules)
 
 
+def _write_sources(files):
+    """Materialise {relative filename: source} as a tree, and return its root.
+
+    Split out from _sweep_sources because the rejection table asserts the FUNCTION INDEX
+    rather than the sweep's rows: what a mis-crossed post-declarator walk invents is a
+    function, and a fixture that only reads hits cannot see one appear.
+    """
+    tmp = pathlib.Path(tempfile.mkdtemp()) / "ext"
+    tmp.mkdir(parents=True)
+    for rel, src in files.items():
+        (tmp / rel).write_text(src)
+    return tmp
+
+
 def _sweep_sources(files, rules=ALL_RULES):
     """Sweep a generated tree of {relative filename: source}.
 
     Several of the shapes below are only expressible across MORE THAN ONE FILE -- internal
     linkage is per translation unit, so a one-file fixture cannot state the question at all.
     """
-    tmp = pathlib.Path(tempfile.mkdtemp()) / "ext"
-    tmp.mkdir(parents=True)
-    for rel, src in files.items():
-        (tmp / rel).write_text(src)
-    return _sweep(tmp, rules)
+    return _sweep(_write_sources(files), rules)
 
 
 def self_test(pool):
@@ -2903,6 +3087,86 @@ def self_test(pool):
           % (nfw.slots, nfw.decls, sorted(h[3] for h in nfw.hits),
              nff.slots, nff.decls, sorted(h[3] for h in nff.hits)))
 
+    # 5p3. ROUND-9 REVIEW: THE DECLARATOR DOES NOT END AT THE `)` EITHER (:929).
+    #      5p2 above put the FUNCTIONS inside a namespace into the index; this puts the
+    #      functions that carry an attribute into it. Fourth appearance of one walker gap --
+    #      predicate D fixed it twice in one round, for `__attribute__`/`noexcept` and then
+    #      for a C++ trailing return type -- so the walk is tu_scope.skip_post_declarator
+    #      and not a third implementation.
+    #
+    #      THE DECLARATOR IS THE FLAG, and the bare one is the green: six spellings of one
+    #      pair of functions must give one funnel and one set of rows. Unfixed, every arm
+    #      but the bare one measures `slots 0/0, decls 0, HITS 0` against its 2 slots and
+    #      one hit -- so the counters are asserted first and the hit set second.
+    heads = (("VALUE", ""), ("VALUE", " __attribute__((noinline))"), ("VALUE", " noexcept"),
+             ("VALUE", " __attribute__((noinline)) noexcept"), ("auto", " -> VALUE"),
+             ("auto", " __attribute__((noinline)) -> VALUE"))
+    at = {h: _sweep_source(RED_ATTRIBUTED_FUNCTION(*h)) for h in heads}
+    bare = at[heads[0]]
+    bared = {d[3]: d[0] for d in bare.discharges}
+    check(bare.slots == 2 and bare.decls == 2 and {h[3] for h in bare.hits} == {"cache"}
+          and bared.get("keep") == "registered-slot",
+          "attributed-function GREEN (the flag off): an ordinary unattributed definition "
+          "indexes both its function-local statics (%d slot(s) from %d declaration(s), "
+          "hits %s, keep %s)"
+          % (bare.slots, bare.decls, sorted(h[3] for h in bare.hits) or "none",
+             bared.get("keep", "NOT DISCHARGED")),
+          [h[3] for h in bare.hits] + ["discharged:" + d[3] for d in bare.discharges])
+    shape = {h: (r.slots, r.decls, sorted(x[3] for x in r.hits),
+                 sorted((d[0], d[3]) for d in r.discharges)) for h, r in at.items()}
+    check(all(shape[h] == shape[heads[0]] for h in heads),
+          "attributed-function RED: `__attribute__((noinline))`, `noexcept`, both together "
+          "and a C++ trailing return type between the `)` and the `{` each give the same "
+          "funnel and the same rows as the bare definition -- the whitespace-only walk never "
+          "reached the brace, indexed no function, and reported slots 0/0 on an EMPTIED INDEX",
+          [((l + t) or "<bare>", shape[(l, t)][0], shape[(l, t)][1], shape[(l, t)][2])
+           for l, t in heads])
+
+    # 5p4. THE REJECTION TABLE, ASSERTED IN THIS PREDICATE'S OWN NEIGHBOURHOOD.
+    #      Opening the crossing up is what let predicate D invent four function bodies out
+    #      of X-macro lists and `__declspec(...)` before a `typedef enum {`, so the table
+    #      travels with the walk -- but the shapes that sit next to a rejection boundary
+    #      differ per caller, and THIS predicate is looking for `static VALUE`
+    #      declarations. A span wrongly opened over `typedef struct { ... } static_thing;`
+    #      is scanned for them, which is why the aggregate case is here and not only in D.
+    #
+    #      Each fixture must index exactly the one real definition and still find its
+    #      `cache`. K&R indexes none: a stated recall limit, unchanged by opening the words.
+    rejects = {
+        # a macro invocation, then a real definition: the `(` of `probe(` stops the walk
+        "macro": "MY_EXPORT(sym)\n",
+        # K&R parameter declarations: the `;`
+        "knr": None,
+        # a prototype, then a definition: the `;`
+        "proto": "static VALUE helper(VALUE);\n",
+        # a declarator list with a braced initialiser: the `=`
+        "init": "struct S s = mk(1), t = {2};\n",
+        # an attribute, then a typedef'd aggregate: `typedef` stops it. A span opened over
+        # the aggregate body would be handed to the function-local `static VALUE` scan.
+        "typedef-aggregate": "__declspec(align(8)) typedef struct { int x; } static_thing;\n",
+        # an X-macro list, then a type: trilogy's shape, the one D actually invented from
+        "x-macro": "XX(A, 1)\ntypedef enum { E_A } phase_t;\n",
+    }
+    body = ("{\n    static VALUE cache;\n    if (!cache) {\n"
+            "        cache = rb_str_new_cstr(\"lost\");\n    }\n    return cache;\n}\n")
+    rj, rjh = {}, {}
+    for tag, lead in rejects.items():
+        head = ("static VALUE probe(v) VALUE v;\n" if lead is None
+                else lead + "static VALUE probe(void)\n")
+        files = {"probe.c": "#include <ruby.h>\n\n" + head + body}
+        rj[tag] = sorted(Tree(_write_sources(files)).funcs)
+        rjh[tag] = sorted(h[3] for h in _sweep_sources(files).hits)
+    check(rj == {"macro": ["probe"], "knr": [], "proto": ["probe"], "init": ["probe"],
+                 "typedef-aggregate": ["probe"], "x-macro": ["probe"]},
+          "post-declarator rejection table: a macro call, a prototype, an initialiser list, "
+          "`__declspec(...) typedef struct` and an X-macro list each index the ONE real "
+          "definition and invent nothing -- the open walk's failure mode is a body attributed "
+          "to the wrong name, and that body is then scanned for `static VALUE`", rj)
+    check(all(rjh[t] == (["cache"] if t != "knr" else []) for t in rejects),
+          "...and the real definition's own function-local static is still found in every "
+          "one of them (K&R indexes no function at all: a stated recall limit, unchanged)",
+          rjh)
+
     # 5q. THREAD-LOCAL (thread 6).
     tlr = _sweep_source(RED_THREAD_LOCAL)
     tlh = {h[3] for h in tlr.hits}
@@ -2953,6 +3217,56 @@ def self_test(pool):
           "discharges ITS slot, and the row that stands is the LATER declaration -- a "
           "block-scoping fix that clears nothing is the registration rule turned off",
           [(d[0], d[2]) for d in tls.discharges] + [(h[0], h[2]) for h in tls.hits])
+
+    # 5v. ROUND-9 REVIEW: DECLARATORS AFTER AN INITIALISER (:998).
+    #     `static VALUE rooted = Qnil, bad = Qnil;` ended the match at the first `=`, so the
+    #     statement declared one slot instead of two. Measured on the fixture unfixed:
+    #     `slots 1/1`, one `registered-slot` discharge, HITS 0 -- a live over-clear in which
+    #     the registration of the FIRST declarator is the whole reason the second's
+    #     rb_str_new_cstr never appears.
+    #
+    #     The SLOT and DECLARATION counts are asserted beside the hit set, because the two
+    #     failure modes print the same HITS: a fix that stopped seeing the declaration
+    #     altogether reports `slots 0/0` and reads exactly as clean as reading half of it did.
+    idl = _sweep_source(RED_INITIALISED_DECLARATOR_LIST, suffix=".c")
+    idd = {d[3]: d[0] for d in idl.discharges}
+    check(idl.slots == 2 and idl.decls == 2 and {h[3] for h in idl.hits} == {"bad"}
+          and idd.get("rooted") == "registered-slot" and len(idl.discharges) == 1,
+          "initialised-declarator-list RED: one statement declares TWO slots (%d found from "
+          "%d declaration(s)), the unregistered one reports (hits %s), and GREEN in the same "
+          "declaration -- `rooted`'s rb_global_variable still discharges ITS slot (%s)"
+          % (idl.slots, idl.decls, sorted(h[3] for h in idl.hits) or "none",
+             idd.get("rooted", "NOT DISCHARGED")),
+          [h[3] for h in idl.hits] + ["discharged:" + d[3] for d in idl.discharges])
+
+    # 5w. GREEN: the single-declarator case the fix must not disturb, registration as the
+    #     flag. Reading the whole statement is only correct if it changes nothing here.
+    sir = _sweep_source(GREEN_SINGLE_INITIALISED(True), suffix=".c")
+    siu = _sweep_source(GREEN_SINGLE_INITIALISED(False), suffix=".c")
+    check(sir.slots == 1 and not sir.hits
+          and {d[3]: d[0] for d in sir.discharges}.get("only") == "registered-slot"
+          and siu.slots == 1 and {h[3] for h in siu.hits} == {"only"},
+          "single-initialised-declarator GREEN: `static VALUE only = Qnil;` is still exactly "
+          "one slot, and still discharges when and only when it is registered "
+          "(registered %d slot/%d hit, unregistered %d slot/%d hit)"
+          % (sir.slots, len(sir.hits), siu.slots, len(siu.hits)),
+          [h[3] for h in sir.hits] + ["unreg:" + h[3] for h in siu.hits])
+
+    # 5x. ...and the commas that separate declarators are the TOP-LEVEL ones. A splitter that
+    #     is not would turn `a = f(x, y), b` into four fragments, two of them call arguments.
+    #     Both declarators are unregistered statics taking an allocating source -- `a` from
+    #     rb_funcall in its own initialiser, `b` from rb_str_new_cstr -- so the shape of the
+    #     fixture says two slots and two rows, named `a` and `b`. A splitter that is not
+    #     top-level reports four slots under names like `y)`; one that still stops at the
+    #     first `=` reports one.
+    tlc = _sweep_source(GREEN_TOP_LEVEL_COMMAS, suffix=".c")
+    check(tlc.slots == 2 and {h[3] for h in tlc.hits} == {"a", "b"},
+          "top-level-comma GREEN: `static VALUE a = f(x, y), b;` is exactly `a` and `b` "
+          "(%d slot(s), hits %s), and the `static VALUE (*fp)(void);` beside it is still "
+          "rejected as a function pointer -- reading the whole statement crosses a `(` the "
+          "old character class refused outright"
+          % (tlc.slots, sorted(h[3] for h in tlc.hits) or "none"),
+          sorted(h[3] for h in tlc.hits))
 
     # 5t. HEADER carve-out. The scope split applies to translation units; a `static VALUE`
     #     in a HEADER keeps its tree-wide key, or its stores -- which live in the .c that
