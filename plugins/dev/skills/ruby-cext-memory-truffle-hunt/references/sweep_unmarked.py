@@ -517,9 +517,23 @@ class Tree:
         self.sigs = {}           # same key -> parameter-list text
         self.methods = set()     # (class, method) pairs declared in-tree
         self.bases = {}          # class -> [base classes named in its base-clause]
-        self.type_of_dtype = {}  # rb_data_type_t name -> wrapped struct type name
+        self.type_of_dtype = {}  # (path, dtype) -> wrapped struct type name
         self.wrap_sites = []     # (path, dtype, struct_type, macro)
-        self._helper_memo = {}   # ("dmark"|"dcompact") -> {fn -> kind}, with cycle guard
+        # Per-file companions to the three first-wins indexes above. A `static` struct,
+        # function or descriptor is file-local, so two translation units may each define
+        # one under the same name and the tree-wide `setdefault` binds every use to
+        # whichever file `rglob` reached first. Resolution therefore PREFERS a definition
+        # in the file the use was seen in and falls back to the tree-wide index, which is
+        # what a struct declared in a .h and wrapped in a .c still needs (mysql2's
+        # `mysql2_result_wrapper` lives in result.h). See `shadowed`.
+        self.structs_at = {}     # (path, name) -> body text
+        self.funcs_at = {}       # (path, bare name) -> body text
+        self.sigs_at = {}        # (path, bare name) -> parameter-list text
+        self.func_spans_at = {}  # (path, bare name) -> (body_start, body_end)
+        self.dtypes_at = {}      # (path, name) -> {"dmark": fn, ...}
+        self.dtype_file = {}     # name -> the first file declaring it
+        self.shadowed = {}       # kind -> {name: how many files define it}
+        self._helper_memo = {}   # ("dmark"|"dcompact", at) -> {fn -> kind}, cycle-guarded
         self.func_spans = {}     # function name -> (path, body_start, body_end) offsets
         self.func_defs = {}      # function name -> how many definitions carry that name
         self.ambiguous = {}      # bare name -> how often a call FELL BACK to first-wins
@@ -531,12 +545,69 @@ class Tree:
             self._index_structs(path, src)
             self._index_aliases(src)
             self._index_funcs(path, src)
-            self._index_dtypes(src)
+            self._index_dtypes(path, src)
             self._index_statics(src)
         for path, src in self.files.items():
             self._index_wraps(path, src)
         self._index_get_struct_types()
         self.pasted = self._expand_pastes()
+
+    # -- file-scoped resolution (round 7) ------------------------------------
+    #
+    # ROUND 7: THREE FIRST-WINS INDEXES BOUND A NAME TO THE WRONG TRANSLATION UNIT
+    #
+    # `structs`, `funcs` and `dtypes` were all keyed by BARE NAME with `setdefault`, so the
+    # first file `rglob` returned owned the name for the whole tree. That is round-5 (a)
+    # again -- a verdict decided by iteration order -- but across files rather than across
+    # dtypes, and it is not a hypothetical: nokogiri 1.19.4 defines `static void mark` in
+    # BOTH xml_document.c and xslt_stylesheet.c. `xml_document.c` sorts first, so
+    # `nokogiri_xslt_stylesheet_tuple_type.dmark = mark` resolved to the DOCUMENT's mark
+    # and `func_instances` reported UNMARKED -- a false positive on a field that
+    # xslt_stylesheet.c's own `mark` marks with a plain `rb_gc_mark`, three lines down.
+    #
+    # The mirror of that false positive is the over-clear the reviewer described, and it is
+    # the reason this is a fix rather than a nuisance: swap the file order and it is the
+    # UNMARKED field that gets cleared by an unrelated same-named callback. The same holds
+    # for a struct body (a later `wrapper` holding a VALUE analysed against an earlier
+    # `wrapper` holding an int) and for a file-local `static const rb_data_type_t`.
+    #
+    # THE RULE IS "PREFER THIS FILE, THEN FALL BACK TREE-WIDE", NOT "FILE-SCOPE EVERYTHING".
+    # A non-static definition genuinely is tree-wide, and so is every struct declared in a
+    # header -- mysql2 wraps `mysql2_result_wrapper` in result.c and declares it in
+    # result.h, which is the whole reason this script is a tree-wide resolver at all. The
+    # fallback is therefore load-bearing, and the preference only ever fires when the
+    # SAME file defines the name, which is exactly the `static` case. Measured over the
+    # 99-tree corpus: one gem changes (nokogiri, above), because one gem is the only one
+    # where a shadowed name reaches a wrap site at all.
+    #
+    # The C++ `Cls::method` index is left tree-wide. Round 6 resolves those by receiver
+    # type, no corpus tree declares one class name in two files, and a same-named class in
+    # two translation units is a different hazard from a `static` callback.
+
+    def _shadow(self, kind, name):
+        """Tally how many files define `name`. A count above 1 is printed by report()."""
+        seen = self.shadowed.setdefault(kind, {})
+        seen[name] = seen.get(name, 0) + 1
+
+    def struct_body(self, name, at=None):
+        """The struct body `name` denotes, as seen from file `at`."""
+        if at is not None and (at, name) in self.structs_at:
+            return self.structs_at[(at, name)]
+        return self.structs.get(name)
+
+    def dtype_key(self, name, at=None):
+        """(declaring file, name) for the rb_data_type_t `name` names, seen from `at`.
+
+        The key, not the bare name, is what `sweep` de-dupes on: two translation units
+        each declaring `static const rb_data_type_t data_type` are two descriptors and
+        two verdicts, and the bare name collapsed them into one.
+        """
+        if at is not None and (at, name) in self.dtypes_at:
+            return (at, name)
+        return (self.dtype_file.get(name), name)
+
+    def dtype_entry(self, key):
+        return self.dtypes_at.get(key, {})
 
     # -- function-like macros -----------------------------------------------
 
@@ -692,8 +763,15 @@ class Tree:
             self._src_memo[name] = out
         return self._src_memo[name]
 
-    def body_of(self, name):
-        """The body of an in-tree callee, function or function-like macro."""
+    def body_of(self, name, at=None):
+        """The body of an in-tree callee, function or function-like macro.
+
+        `at` is the file the call was resolved FROM; a definition there wins over the
+        tree-wide first-wins one, because a `static` callee is file-local. See the
+        file-scoped resolution note above.
+        """
+        if at is not None and (at, name) in self.funcs_at:
+            return self.funcs_at[(at, name)]
         return self.funcs.get(name, self.macros.get(name))
 
     # -- structs ------------------------------------------------------------
@@ -737,6 +815,9 @@ class Tree:
             for nm in names:
                 self.structs.setdefault(nm, body)
                 self.struct_file.setdefault(nm, path)
+                if (path, nm) not in self.structs_at:
+                    self.structs_at[(path, nm)] = body
+                    self._shadow("struct", nm)
 
     # -- C++ methods (round 6, defect B1) -----------------------------------
 
@@ -945,9 +1026,9 @@ class Tree:
             if old != new:
                 self.aliases.setdefault(new, old)
 
-    def resolve(self, name, depth=6):
-        """Follow typedef aliases to something we have a struct body for."""
-        while name and name not in self.structs and depth > 0:
+    def resolve(self, name, at=None, depth=6):
+        """Follow typedef aliases to something we have a struct body for, seen from `at`."""
+        while name and self.struct_body(name, at) is None and depth > 0:
             name = self.aliases.get(name)
             depth -= 1
         return name
@@ -977,6 +1058,11 @@ class Tree:
                 if close > 0:
                     self.funcs.setdefault(name, src[k + 1:close])
                     self.sigs.setdefault(name, src[m.end():j])
+                    if (path, name) not in self.funcs_at:
+                        self.funcs_at[(path, name)] = src[k + 1:close]
+                        self.sigs_at[(path, name)] = src[m.end():j]
+                        self.func_spans_at[(path, name)] = (k + 1, close)
+                        self._shadow("callback", name)
                     # Offsets, not just text: predicate A reports the file:line of the
                     # coercion it found, and a body extracted into a string has none.
                     self.func_spans.setdefault(name, (path, k + 1, close))
@@ -999,7 +1085,7 @@ class Tree:
 
     # -- rb_data_type_t -----------------------------------------------------
 
-    def _index_dtypes(self, src):
+    def _index_dtypes(self, path, src):
         for m in re.finditer(r"\brb_data_type_t\s+(\w+)\s*=\s*\{", src):
             open_idx = src.index("{", m.end() - 1)
             close = match_brace(src, open_idx)
@@ -1033,6 +1119,10 @@ class Tree:
                         if re.fullmatch(r"[\w:]+", v):
                             entry[key] = v
             self.dtypes.setdefault(m.group(1), entry)
+            if (path, m.group(1)) not in self.dtypes_at:
+                self.dtypes_at[(path, m.group(1))] = entry
+                self.dtype_file.setdefault(m.group(1), path)
+                self._shadow("dtype", m.group(1))
 
     # -- wrap / get sites ---------------------------------------------------
 
@@ -1058,13 +1148,16 @@ class Tree:
                     continue
                 st = type_name(args[ti]) if ti is not None else None
                 if st is None:
-                    st = self.sizeof_arg(args, di)
+                    st = self.sizeof_arg(args, di, path)
                 # A ternary picks between two dtypes; register BOTH, or the wrap site
                 # silently disappears (msgpack buffer_class.c:151).
                 for dtype in dtype_candidates(args[di]):
                     self.wrap_sites.append((path, dtype, st, macro))
-                    if st and dtype not in self.type_of_dtype:
-                        self.type_of_dtype[dtype] = st
+                    # Keyed by the DESCRIPTOR, not its name: two files may each declare a
+                    # `static const rb_data_type_t data_type` wrapping different structs.
+                    dk = self.dtype_key(dtype, path)
+                    if st and dk not in self.type_of_dtype:
+                        self.type_of_dtype[dk] = st
         for macro, (ti, mi) in self.UNTYPED.items():
             for m in re.finditer(r"\b%s\s*(?=\()" % macro, src):
                 args, _ = call_args(src, m.end())
@@ -1074,13 +1167,16 @@ class Tree:
                 # Synthesise a pseudo-dtype so legacy gems are covered by the same walk.
                 key = "<inline:%s>" % base_type(args[mi])
                 self.dtypes.setdefault(key, {"dmark": base_type(args[mi])})
+                self.dtypes_at.setdefault((path, key), {"dmark": base_type(args[mi])})
+                self.dtype_file.setdefault(key, path)
                 self.wrap_sites.append((path, key, st, macro))
-                if st and key not in self.type_of_dtype:
-                    self.type_of_dtype[key] = st
+                dk = self.dtype_key(key, path)
+                if st and dk not in self.type_of_dtype:
+                    self.type_of_dtype[dk] = st
 
     SIZEOF = re.compile(r"\bsizeof\s*\(\s*(?:struct\s+)?(\w+)\s*\)")
 
-    def sizeof_arg(self, args, skip):
+    def sizeof_arg(self, args, skip, at=None):
         """Recover the wrapped struct from a `sizeof(...)` in the call's OTHER arguments.
 
         The function forms carry no struct-type argument, so TYPED registers them with
@@ -1100,41 +1196,67 @@ class Tree:
             if i == skip:
                 continue
             for m in self.SIZEOF.finditer(a):
-                if self.resolve(m.group(1)) in self.structs:
+                if self.struct_body(self.resolve(m.group(1), at), at) is not None:
                     return m.group(1)
         return None
 
     # -- resolution ---------------------------------------------------------
 
     def _index_get_struct_types(self):
-        """dtype -> {struct type names it is READ BACK as}. See struct_types_for()."""
+        """(path, dtype) -> {struct type names it is READ BACK as}. See struct_types_for()."""
         self.get_struct_types = {}
-        for src in self.predirective.values():
+        for path, src in self.predirective.items():
             for m in re.finditer(
                     r"TypedData_Get_Struct\s*\(\s*[^,]+?,\s*(?:struct\s+|union\s+|class\s+)?"
                     r"(\w+)\s*,\s*&\s*(\w+)\s*,", src):
-                self.get_struct_types.setdefault(m.group(2), set()).add(m.group(1))
+                dk = self.dtype_key(m.group(2), path)
+                self.get_struct_types.setdefault(dk, set()).add(m.group(1))
 
-    def struct_type_for(self, dtype):
-        """Infer the wrapped struct even when only Wrap_Struct is used."""
-        if dtype in self.type_of_dtype:
-            r = self.resolve(self.type_of_dtype[dtype])
-            if r in self.structs:
+    def struct_type_for(self, dkey):
+        """Infer the wrapped struct even when only Wrap_Struct is used.
+
+        `dkey` is a (declaring file, name) pair, and its file is the scope every name
+        below resolves in -- the callbacks a descriptor names are its own file's.
+        """
+        at = dkey[0]
+        if dkey in self.type_of_dtype:
+            r = self.resolve(self.type_of_dtype[dkey], at)
+            if self.struct_body(r, at) is not None:
                 return r
         # Fall back to the type's own dfree/dsize/dmark, which must cast the payload.
         for key in ("dsize", "dfree", "dmark", "dcompact"):
-            fn = self.dtypes.get(dtype, {}).get(key)
-            body = self.funcs.get(fn, "") if fn else ""
+            fn = self.dtype_entry(dkey).get(key)
+            # `funcs`, not `body_of`: a macro body has never been a source of the payload
+            # cast here, and widening the lookup while file-scoping it would fold two
+            # changes into one measurement.
+            body = (self.funcs_at.get((at, fn)) or self.funcs.get(fn, "")) if fn else ""
             for pat in (r"sizeof\s*\(\s*(?:struct\s+)?(\w+)\s*\)",
                         r"\(\s*(?:const\s+)?(?:struct\s+)?(\w+)\s*\*\s*\)"):
                 for cm in re.finditer(pat, body):
-                    r = self.resolve(cm.group(1))
-                    if r in self.structs:
+                    r = self.resolve(cm.group(1), at)
+                    if self.struct_body(r, at) is not None:
                         return r
-        return self.type_of_dtype.get(dtype)
+        return self.type_of_dtype.get(dkey)
 
-    def helper_kind(self, fn, key, depth=1):
-        """Does in-tree function `fn` mark (key=dmark) or update (key=dcompact)?
+    def params_of(self, fn, at=None):
+        """[parameter name] for an in-tree function or function-like macro, in order."""
+        sig = self.sigs_at.get((at, fn)) if at is not None else None
+        if sig is None:
+            sig = self.sigs.get(fn)
+        if sig is None:
+            defs = self.macro_defs.get(fn)
+            return [p.strip() for p in defs[0][0]] if defs else []
+        out = []
+        for a in split_args(sig):
+            # The declarator's last identifier is the name: `const VALUE *ary` -> ary.
+            toks = re.findall(r"[A-Za-z_]\w*", a.split("=")[0])
+            out.append(toks[-1] if toks and toks[-1] not in ("void",) else None)
+        return out
+
+    def helper_kind(self, fn, key, at=None, depth=1):
+        """How in-tree function `fn` marks (key=dmark) / updates (key=dcompact), and WHAT.
+
+        Returns (kind, marked parameter indices).
 
         One level of onward callees, which is the transitivity the v2 `mark_text` folded
         in wholesale. sqlite3 PR #723 marks three of its six fields through
@@ -1142,30 +1264,63 @@ class Tree:
         (b) fix would flag all three and acceptance item 4 would fail. That fixture is
         the control which separates the correct fix from the merely plausible one.
 
+        ROUND 7: WHICH PARAMETER, NOT JUST "SOMETHING". The kind alone said only that the
+        callee contains a marking primitive somewhere, and `_collect_marks` then credited
+        EVERY token in the call's argument list. So
+
+            static void note(VALUE v) { rb_gc_mark(g_root); }   /* marks a GLOBAL */
+            static void w_mark(void *p) { ...; note(w->cb); }
+
+        cleared `cb` as "marked pin (via helper)" on a field ordinary GC can free -- the
+        over-clear family this script exists to prevent, reached through the one tier that
+        was still crediting by association. A parameter counts as marked when its name
+        appears as a token inside a marking primitive's own argument list, which credits
+        `rb_gc_mark(ary)` (sqlite3, bare) and `rb_gc_mark(pk->buffer_ref)` (msgpack,
+        through a member) alike -- the second is loose, and deliberately so: it is the
+        clearing direction only for a token that is already reached by the DIRECT tier one
+        frame in, so nothing rests on it.
+
+        A helper whose marks attribute to no parameter at all returns an empty index set
+        and therefore credits nothing, which is the same conservative direction round-5
+        (c) took for the movable axis: report, do not clear.
+
         Conservative on disagreement: a helper with any movable path counts as movable,
         because an unwarranted NO-COMPACT costs a pass-2 discharge while a missed one
         ships a stale pointer.
         """
-        memo = self._helper_memo.setdefault(key, {})
+        memo = self._helper_memo.setdefault((key, at), {})
         if fn in memo:
             return memo[fn]
-        memo[fn] = None                       # cycle guard: recursion resolves to None
-        kinds = set()
-        for name, _args, recv, op in find_calls(self.body_of(fn) or ""):
+        memo[fn] = (None, frozenset())        # cycle guard: recursion resolves to nothing
+        params = self.params_of(fn, at)
+        index = {p: i for i, p in enumerate(params) if p}
+        kinds, marked = set(), set()
+        for name, args, recv, op in find_calls(self.body_of(fn, at) or ""):
             k = loc_kind(name) if key == "dcompact" else prim_kind(name)
-            if k is None and depth > 0:
+            if k:
+                for tok in arg_tokens(args):
+                    if tok in index:
+                        marked.add(index[tok])
+            elif depth > 0:
                 callee = self.callee_key(name, recv, op, fn)
-                if callee != fn and self.body_of(callee) is not None:
-                    k = self.helper_kind(callee, key, depth - 1)
+                if callee != fn and self.body_of(callee, at) is not None:
+                    k, inner = self.helper_kind(callee, key, at, depth - 1)
+                    # Map the inner call's marked positions back onto OUR parameters, so
+                    # a two-hop helper still says which argument it was that got marked.
+                    for i in inner:
+                        if i < len(args):
+                            for tok in arg_tokens([args[i]]):
+                                if tok in index:
+                                    marked.add(index[tok])
             if k:
                 kinds.add(k)
         best = None
         for k in kinds:
             best = stronger(best, k)
-        memo[fn] = best
-        return best
+        memo[fn] = (best, frozenset(marked))
+        return memo[fn]
 
-    def _collect_marks(self, fn, key, direct, helper, mentioned, depth=1):
+    def _collect_marks(self, fn, key, direct, helper, mentioned, at=None, depth=1):
         """Walk a mark function and one level of in-tree callees, crediting fields.
 
         Two ways a callee marks, and BOTH have a real instance in the corpus:
@@ -1180,9 +1335,10 @@ class Tree:
                     frame in, so the field is credited at the helper tier.
 
         The second is why the helper tier is kept distinct: the primitive's kind is known
-        but which argument it applied to is not, which is the whole of round-5 defect (c).
+        but which argument it applied to is only as good as `helper_kind`'s parameter
+        mapping, which is the whole of round-5 defect (c) and round-7's refinement of it.
         """
-        body = self.body_of(fn) or ""
+        body = self.body_of(fn, at) or ""
         mentioned |= set(re.findall(r"[A-Za-z_]\w*", body))
         for name, args, recv, op in find_calls(body):
             kind = loc_kind(name) if key == "dcompact" else prim_kind(name)
@@ -1196,15 +1352,20 @@ class Tree:
             # BaseCollector::mark, and binding it to whichever `mark()` the file order
             # produced is how vernier's `stack_table_value` reported UNMARKED.
             callee = self.callee_key(name, recv, op, fn)
-            if callee == fn or self.body_of(callee) is None:
+            if callee == fn or self.body_of(callee, at) is None:
                 continue
-            hk = self.helper_kind(callee, key)
+            hk, marked = self.helper_kind(callee, key, at)
             if hk:
-                for tok in arg_tokens(args):
-                    helper[tok] = stronger(helper.get(tok), hk)
-            self._collect_marks(callee, key, direct, helper, mentioned, depth - 1)
+                # Round 7: only the arguments the callee actually marks. Crediting the
+                # whole list cleared a field passed alongside a marked one, or passed to
+                # a helper that marks a global.
+                for i in marked:
+                    if i < len(args):
+                        for tok in arg_tokens([args[i]]):
+                            helper[tok] = stronger(helper.get(tok), hk)
+            self._collect_marks(callee, key, direct, helper, mentioned, at, depth - 1)
 
-    def mark_index(self, dtype):
+    def mark_index(self, dkey):
         """Per-key marking evidence, in three tiers. {key: (direct, helper, mentioned)}
 
         direct    token named inside a marking PRIMITIVE's own argument list
@@ -1220,10 +1381,10 @@ class Tree:
         """
         idx = {}
         for key in ("dmark", "dcompact"):
-            fn = self.dtypes.get(dtype, {}).get(key)
+            fn = self.dtype_entry(dkey).get(key)
             direct, helper, mentioned = {}, {}, set()
             if fn and fn not in ("NULL", "0", "RUBY_DEFAULT_FREE"):
-                self._collect_marks(fn, key, direct, helper, mentioned)
+                self._collect_marks(fn, key, direct, helper, mentioned, dkey[0])
             idx[key] = (direct, helper, mentioned)
         return idx
 
@@ -1232,6 +1393,49 @@ class Tree:
 
 FIELD = re.compile(
     r"^[ \t]*(?:const\s+|volatile\s+)*VALUE\s+([^;{}()=]+);", re.M)
+
+
+METHOD_HEAD = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+METHOD_TAIL = re.compile(r"(?:(?:const|volatile|noexcept|override|final)\s*)*")
+
+
+def blank_method_bodies(body):
+    """Blank the `{...}` of any function defined inside a struct/class body.
+
+    Length and newlines are preserved, so the brace split below still reaches an
+    ANONYMOUS struct/union member -- which is a `{` with no `name(...)` in front of it and
+    is therefore never blanked. A method body is a `{` that follows a parameter list,
+    optional cv/ref qualifiers and, for a constructor, a `:` member-initialiser list;
+    `VALUE (*cb)(VALUE)` is not, because what follows ITS parameter list is another `(`.
+    """
+    i = 0
+    while True:
+        m = METHOD_HEAD.search(body, i)
+        if not m:
+            return body
+        if m.group(1) in NOT_CALLS:
+            i = m.end()
+            continue
+        args, j = call_args(body, m.end() - 1)
+        if args is None:
+            i = m.end()
+            continue
+        k = j
+        while k < len(body) and body[k] in " \t\r\n":
+            k += 1
+        k += METHOD_TAIL.match(body, k).end() - k
+        while k < len(body) and body[k] in " \t\r\n":
+            k += 1
+        if k < len(body) and body[k] == ":":
+            brace = body.find("{", k)
+            k = brace if brace >= 0 else k
+        if k < len(body) and body[k] == "{":
+            close = match_brace(body, k)
+            if close > 0:
+                body = body[:k + 1] + blank(body[k + 1:close]) + body[close:]
+                i = close + 1
+                continue
+        i = m.end()
 
 
 def value_fields(body):
@@ -1253,6 +1457,14 @@ def value_fields(body):
     whitespace and missed `VALUE* items;` entirely.
     """
     fields = []
+    # A C++ class body contains its METHOD BODIES, and their locals are not fields.
+    # Blanking them is what the old `if "=" in rest` test was doing by accident: it threw
+    # away every `VALUE x = ...;` in the class, which suppressed nine of vernier 1.10.1's
+    # locals along with the real members it was also losing. Measured with the `=` test
+    # removed and this pass absent: `HeapTracker::compact`'s `VALUE reloc_obj` and
+    # `BaseCollector::build_collector_result`'s `VALUE result` reported as UNMARKED FIELDS
+    # of the wrapped struct. A local is not a field in any language this parses.
+    body = blank_method_bodies(body)
     # C++ access specifiers are labels, not statements, so no `;` separates them from the
     # member that follows. `class C { public: VALUE held; }` put `public:` and `VALUE held`
     # in ONE fragment and lost the field -- i.e. the FIRST member after any access
@@ -1264,12 +1476,24 @@ def value_fields(body):
         if not m:
             continue
         rest = m.group(1)
-        # `VALUE (*cb)(...)` is a function pointer, not a reference the GC can mark; `=`
-        # only appears here in a C++ default member initialiser.
-        if "(" in rest or "=" in rest:
-            continue
         for decl in split_args(rest):
-            d = decl.strip()
+            # ROUND 7: A C++ DEFAULT MEMBER INITIALISER IS STILL A FIELD.
+            #
+            # The test used to be `if "(" in rest or "=" in rest: continue`, which threw
+            # away the whole declaration on sight of an `=`. So `struct wrapper { VALUE
+            # held = Qnil; };` enumerated ZERO fields and, with a null dmark, the sweep
+            # printed one wrap site and no suspects -- the RED_COMPACT_DECL failure
+            # family exactly: a struct reading as "holds no VALUE, structurally out of
+            # scope" while holding a genuinely unmarked one. `= Qnil` is where a C++
+            # wrapper STARTS; what it holds later is what dmark has to mark.
+            #
+            # Unlike a wrong severity grade, this dropped the ROW. Splitting the
+            # initialiser off the declarator keeps the function-pointer exclusion intact,
+            # because `VALUE (*cb)(...)` puts its parens in the DECLARATOR, before any
+            # `=`, while `VALUE held = f(x)` puts them after it.
+            d = decl.split("=", 1)[0].strip()
+            if "(" in d:
+                continue
             ptr = "*" in d or "[" in d
             nm = d.replace("*", " ").split("[")[0].strip()
             if nm.isidentifier():
@@ -1285,7 +1509,7 @@ TYPED_GET = re.compile(
     r"TypedData_Get_Struct\s*\(\s*[^,]+,\s*(?:struct|union|class)\s+(\w+)\s*,")
 
 
-def struct_types_for(tree, dtype, primary):
+def struct_types_for(tree, dkey, primary):
     """EVERY struct type this dtype is used with, not just the first one resolved.
 
     Round 6's residual again, and the diagnosis is not the one it looked like. date's
@@ -1305,14 +1529,14 @@ def struct_types_for(tree, dtype, primary):
     out = []
     if primary:
         out.append(primary)
-    for name in tree.get_struct_types.get(dtype, ()):
-        r = tree.resolve(name)
-        if r in tree.structs and r not in out:
+    for name in tree.get_struct_types.get(dkey, ()):
+        r = tree.resolve(name, dkey[0])
+        if tree.struct_body(r, dkey[0]) is not None and r not in out:
             out.append(r)
     return out
 
 
-def value_fields_deep(tree, struct_name, _seen=None):
+def value_fields_deep(tree, struct_name, at=None, _seen=None):
     """value_fields(), plus the VALUE fields of NAMED aggregate members, recursively.
 
     Round 6's residual, found by breadth rather than by the self-test: date wraps
@@ -1327,14 +1551,14 @@ def value_fields_deep(tree, struct_name, _seen=None):
     value_fields()'s brace split, and going through them again would double-count.
     """
     _seen = _seen or set()
-    if struct_name in _seen or struct_name not in tree.structs:
+    body = tree.struct_body(struct_name, at)
+    if struct_name in _seen or body is None:
         return []
     _seen.add(struct_name)
-    body = tree.structs[struct_name]
     out = list(value_fields(body))
     for m in NAMED_AGGREGATE_MEMBER.finditer(body):
         inner, member = m.group(1), m.group(2)
-        for nm, ptr in value_fields_deep(tree, inner, _seen):
+        for nm, ptr in value_fields_deep(tree, inner, at, _seen):
             out.append(("%s.%s" % (member, nm), ptr))
     return out
 
@@ -1346,24 +1570,30 @@ def sweep(tree, verbose=False):
     # and never the other way round.
     sites = sorted(tree.wrap_sites, key=lambda s: s[1].startswith("<inline:"))
     for path, dtype, _st, macro in sites:
-        st = tree.struct_type_for(dtype)
-        if not st or st not in tree.structs:
-            if (dtype, st) not in seen:
-                seen.add((dtype, st))
+        # Round 7: the DESCRIPTOR, not its bare name. Two translation units each
+        # declaring `static const rb_data_type_t data_type` are two descriptors; keyed by
+        # name they collapsed into one and the second wrap site was skipped as already
+        # seen -- a whole struct dropped without so much as a cleared line.
+        dkey = tree.dtype_key(dtype, path)
+        at = dkey[0]
+        st = tree.struct_type_for(dkey)
+        if not st or tree.struct_body(st, at) is None:
+            if (dkey, st) not in seen:
+                seen.add((dkey, st))
                 clears.append((dtype, st or "?", "-",
                                "struct type unresolved (%s in %s)" % (macro, path.name)))
             continue
-        if (dtype, st) in seen:
+        if (dkey, st) in seen:
             continue
-        seen.add((dtype, st))
+        seen.add((dkey, st))
         inline = dtype.startswith("<inline:")
-        idx = tree.mark_index(dtype)
+        idx = tree.mark_index(dkey)
         m_direct, m_helper, m_named = idx["dmark"]
         c_direct, c_helper, _ = idx["dcompact"]
-        decl_in = tree.struct_file.get(st, path)
+        decl_in = at if (at, st) in tree.structs_at else tree.struct_file.get(st, path)
         fields, seen_field = [], set()
-        for sub in struct_types_for(tree, dtype, st):
-            for f in value_fields_deep(tree, sub):
+        for sub in struct_types_for(tree, dkey, st):
+            for f in value_fields_deep(tree, sub, at):
                 if f[0] not in seen_field:
                     seen_field.add(f[0])
                     fields.append(f)
@@ -1372,7 +1602,7 @@ def sweep(tree, verbose=False):
             # msgpack's marking `buffer_data_type` clear `msgpack_buffer_t` on behalf of
             # `buffer_view_data_type`, whose .dmark is NULL. Two wrappers of one struct
             # are two verdicts, and the safe one must not speak for the unsafe one.
-            if (dtype, st, field) in reported:
+            if (dkey, st, field) in reported:
                 continue
             # The ONE case the de-dupe was added for: a gem under an #ifdef carrying both
             # TypedData_Make_Struct and legacy Data_Make_Struct wraps the same struct
@@ -1380,7 +1610,7 @@ def sweep(tree, verbose=False):
             # would double every line and invent a NO-COMPACT on a gem that has one.
             if inline and (st, field) in typed_seen:
                 continue
-            reported.add((dtype, st, field))
+            reported.add((dkey, st, field))
             if not inline:
                 typed_seen.add((st, field))
 
@@ -1413,7 +1643,7 @@ def sweep(tree, verbose=False):
                 cat = "NO-COMPACT-UNKNOWN" if via_helper else "NO-COMPACT"
             if cat:
                 suspects.append((cat, decl_in, st, field, dtype,
-                                 tree.dtypes.get(dtype, {})))
+                                 tree.dtype_entry(dkey)))
             else:
                 how = "via helper" if via_helper else "direct"
                 clears.append((dtype, st, field, "marked %s (%s)%s"
@@ -1554,6 +1784,13 @@ class Grader:
         self._by_path = {}
         for fn, (path, a, b) in tree.func_spans.items():
             self._by_path.setdefault(path, []).append((a, b, fn))
+        # `func_spans` is keyed by bare name and holds the FIRST definition only, so in a
+        # tree where two files define `mark` the second file's body had no span at all and
+        # every tier-4 lookup inside it returned "no enclosing function". The per-file
+        # index has both.
+        for (path, fn), (a, b) in self.tree.func_spans_at.items():
+            if (a, b, fn) not in self._by_path.get(path, ()):
+                self._by_path.setdefault(path, []).append((a, b, fn))
         for v in self._by_path.values():
             v.sort()
 
@@ -1637,8 +1874,72 @@ class Grader:
                     out.append((m.group(1), path, m.start()))
         return out
 
+    def _chain_rejects(self, body, at):
+        """Does the if/else-if chain whose condition sits at `at` END in a raise?
+
+        ROUND 7: THE RAISE HAS TO BELONG TO THE CHAIN. The test used to be
+        `RAISES.search(body)` over the WHOLE function, so any unrelated argument check
+        elsewhere satisfied it:
+
+            if (input == Qnil) return Qfalse;      /* rejects nothing */
+            if (bad()) rb_raise(rb_eArgError, "");  /* nothing to do with `input` */
+            w->held = input;                        /* every heap object reaches here */
+
+        graded IMMEDIATE-ONLY on a field that holds an arbitrary caller object. A
+        comparison narrows only if the value that matched NO arm is rejected, which
+        textually means the chain's final `else` raises -- so walk the chain forward from
+        the `if` containing the comparison, through each `else if`, and require a terminal
+        `else` whose body raises. stackprof's `else rb_raise(...)` is exactly that shape
+        and still qualifies; the two-`if` sequence above no longer does.
+        """
+        # Back up to the `if (` whose condition contains the comparison.
+        head = body.rfind("if", 0, at)
+        while head >= 0:
+            args, past = call_args(body, head + 2)
+            if args is not None and head + 2 <= at < past:
+                break
+            head = body.rfind("if", 0, head)
+        if head < 0:
+            return False
+        i = past
+        while True:
+            # Step over the arm: a braced block, or a single statement to its `;`.
+            while i < len(body) and body[i] in " \t\r\n":
+                i += 1
+            if i < len(body) and body[i] == "{":
+                close = match_brace(body, i)
+                if close < 0:
+                    return False
+                i = close + 1
+            else:
+                semi = body.find(";", i)
+                if semi < 0:
+                    return False
+                i = semi + 1
+            m = re.match(r"\s*else\b", body[i:])
+            if not m:
+                return False                  # chain ends with no else: nothing rejected
+            i += m.end()
+            nxt = re.match(r"\s*if\b", body[i:])
+            if not nxt:
+                # The terminal `else`. Its arm is the path where no comparison matched.
+                j = i
+                while j < len(body) and body[j] in " \t\r\n":
+                    j += 1
+                if j < len(body) and body[j] == "{":
+                    close = match_brace(body, j)
+                    arm = body[j:close + 1] if close > 0 else body[j:]
+                else:
+                    semi = body.find(";", j)
+                    arm = body[j:semi + 1] if semi > 0 else body[j:]
+                return bool(RAISES.search(arm))
+            i += nxt.end()
+            args, past = call_args(body, i)
+            if args is None:
+                return False
+
     def narrowed(self, path, a, b, name):
-        """Is local `name` constrained to immediates by an equality chain that can raise?
+        """Is local `name` constrained to immediates by an equality chain that rejects?
 
         stackprof's `mode` starts as `rb_hash_aref(opts, sym_mode)` -- arbitrary -- and is
         then run through `if (mode == sym_object) ... else if (mode == sym_wall || mode ==
@@ -1647,7 +1948,9 @@ class Grader:
 
         All three conditions are load-bearing. A comparison with no rejection path narrows
         nothing, so the raise is required; one comparison against a non-immediate means
-        the chain admits a heap object, so ALL of them must be immediate.
+        the chain admits a heap object, so ALL of them must be immediate. Round 7 added
+        the fourth: the raise must terminate the chain the comparison is IN -- see
+        _chain_rejects.
         """
         src = self.tree.files[path]
         body = src[a:b]
@@ -1657,13 +1960,15 @@ class Grader:
                          r"|([A-Za-z_]\w*)\s*[=!]=\s*%s\b)"
                          % (re.escape(name), re.escape(name)))
         hits, first = [], None
+        rejected = False
         for m in pat.finditer(body):
             tok = m.group(1) or m.group(2)
             if not is_immediate(self.tree, tok):
                 return None
             hits.append(tok)
             first = first if first is not None else a + m.start()
-        return (sorted(set(hits)), first) if hits else None
+            rejected = rejected or self._chain_rejects(body, m.start())
+        return (sorted(set(hits)), first) if hits and rejected else None
 
     def grade(self, field):
         """(grade, [evidence], n_stores). grade is None when nothing applies."""
@@ -1709,6 +2014,26 @@ class Grader:
         # symbol in one function and from an arbitrary object in another is not
         # IMMEDIATE-ONLY, and a first-match loop calls it one -- the downgrade direction,
         # which is the only direction that can make a broken field read as safe.
+        #
+        # ROUND 7, TWO WAYS THE LOCAL-SOURCES ROUTE READ THE WRONG ASSIGNMENTS.
+        #
+        # It scanned the WHOLE function body for `r = ...` and asked whether every hit was
+        # immediate, with no regard for where the store sits among them. So
+        #
+        #     w->held = input;    /* the arbitrary incoming object */
+        #     input = Qnil;       /* ...reused AFTERWARDS */
+        #
+        # graded the field IMMEDIATE-ONLY on an assignment that cannot reach the store.
+        # Only assignments BEFORE the store are sources of it.
+        #
+        # And a PARAMETER's real source is the caller, which no scan of this body can see.
+        # `srcs` came back empty for a parameter, which the `srcs and` guard already
+        # handled -- but a parameter that is also reassigned before the store looked
+        # fully-sourced while the incoming value remained arbitrary. A parameter is
+        # therefore never discharged by this route; the narrowing route below still
+        # applies to it, because an equality chain constrains a parameter as well as a
+        # local. stackprof's `mode` is a LOCAL assigned from rb_hash_aref, so the grade
+        # that motivated the tier is unaffected.
         why = []
         for path, off, _owner, rhs in st:
             r = unwrap(rhs)
@@ -1720,8 +2045,10 @@ class Grader:
                 return None, [], len(st)
             body = self.tree.files[path][a:b]
             srcs = [rhs_after(body, m.end() - 1) for m in
-                    re.finditer(r"(?<![\w.>])%s\s*=(?![=])" % re.escape(r), body)]
-            if srcs and all(is_immediate(self.tree, s) for s in srcs):
+                    re.finditer(r"(?<![\w.>])%s\s*=(?![=])" % re.escape(r), body)
+                    if m.end() - 1 < off - a]
+            if srcs and r not in self.tree.params_of(fn, path) \
+                    and all(is_immediate(self.tree, s) for s in srcs):
                 why.append("all local sources immediate in %s" % fn)
                 continue
             nar = self.narrowed(path, a, b, r)
@@ -1802,6 +2129,15 @@ def report(name, tree, suspects, clears, verbose, grades=None):
     picks = sum(tree.ambiguous.values())
     amb += (", %d first-wins pick(s) over %d name(s)"
             % (picks, len(tree.ambiguous))) if picks else ""
+    # Names two translation units both define. Since round 7 these RESOLVE per file rather
+    # than first-wins, so this is a hazard tally like the overload count and not a verdict
+    # tally -- but it is the number that says a tree contains the shape at all, and
+    # nokogiri (two `static void mark`s) is the corpus instance that made it worth
+    # printing. A tree with a non-zero count and a surprising verdict is worth a second
+    # look at WHICH file the sweep resolved in.
+    shadow = {k: sum(1 for n in v.values() if n > 1) for k, v in tree.shadowed.items()}
+    amb += "".join(", %d shadowed %s name(s)" % (n, k)
+                   for k, n in sorted(shadow.items()) if n)
     print("%s: %d suspect(s), %d field(s) cleared "
           "[%d wrap site(s), %d dtype(s), %d unresolved%s]%s"
           % (name, len(suspects), len([c for c in clears if c[2] != "-"]),
@@ -2125,6 +2461,144 @@ void n_syms(void) { sym_a = ID2SYM(rb_intern("a")); sym_b = ID2SYM(rb_intern("b"
 """
 
 
+# -- round 7: three first-wins indexes that bound a name to the wrong file --------------
+#
+# Each is TWO files, because one file cannot express the defect: the whole shape is that a
+# name defined in both resolves to whichever `rglob` returned first. In each, `a.c` is the
+# innocent file whose definition was winning and `b.c` holds the field that must report.
+# All three measured "0 suspect(s)" before the fix, two of them with no cleared line at
+# all -- an over-clear with nothing printed to audit.
+#
+# nokogiri 1.19.4 is the corpus instance of the callback one, in the mirror direction: two
+# `static void mark`s, `xml_document.c` first in file order, so `func_instances` reported
+# UNMARKED while xslt_stylesheet.c's own `mark` marks it. Swap the file order and it is
+# the unmarked field that gets cleared instead.
+
+RED_TU_STRUCT = {"a.c": """
+#include <ruby.h>
+typedef struct wrapper { int n; } wrapper_t;
+static void a_mark(void *p) { }
+static void a_free(void *p) { xfree(p); }
+static const rb_data_type_t a_type = { "a", { a_mark, a_free, }, };
+static VALUE a_alloc(VALUE k) { wrapper_t *w; return TypedData_Make_Struct(k, wrapper_t, &a_type, w); }
+""", "b.c": """
+#include <ruby.h>
+/* The SAME tag and typedef names, a different payload, and nothing marks it. Bound to
+   a.c's `{ int n; }`, this struct enumerated zero VALUE fields. */
+typedef struct wrapper { VALUE held; } wrapper_t;
+static void b_mark(void *p) { }
+static void b_free(void *p) { xfree(p); }
+static const rb_data_type_t b_type = { "b", { b_mark, b_free, }, };
+static VALUE b_alloc(VALUE k) { wrapper_t *w; return TypedData_Make_Struct(k, wrapper_t, &b_type, w); }
+"""}
+
+RED_TU_CALLBACK = {"a.c": """
+#include <ruby.h>
+typedef struct { VALUE held; } abox_t;
+static void mark(void *p) { abox_t *b = (abox_t *)p; rb_gc_mark(b->held); }
+static void a_free(void *p) { xfree(p); }
+static const rb_data_type_t a_type = { "a", { mark, a_free, }, };
+static VALUE a_alloc(VALUE k) { abox_t *b; return TypedData_Make_Struct(k, abox_t, &a_type, b); }
+""", "b.c": """
+#include <ruby.h>
+typedef struct { VALUE held; } bbox_t;
+/* A file-local callback of the same name that forgets `held` entirely. `.dmark = mark`
+   resolved to a.c's body, so this wrapper cleared on the strength of an unrelated file. */
+static void mark(void *p) { }
+static void b_free(void *p) { xfree(p); }
+static const rb_data_type_t b_type = { "b", { mark, b_free, }, };
+static VALUE b_alloc(VALUE k) { bbox_t *b; return TypedData_Make_Struct(k, bbox_t, &b_type, b); }
+"""}
+
+RED_TU_DTYPE = {"a.c": """
+#include <ruby.h>
+typedef struct { VALUE held; } abox_t;
+static void a_mark(void *p) { abox_t *b = (abox_t *)p; rb_gc_mark(b->held); }
+static void a_free(void *p) { xfree(p); }
+static const rb_data_type_t data_type = { "a", { a_mark, a_free, }, };
+static VALUE a_alloc(VALUE k) { abox_t *b; return TypedData_Make_Struct(k, abox_t, &data_type, b); }
+""", "b.c": """
+#include <ruby.h>
+typedef struct { VALUE held; } bbox_t;
+/* A second file-local descriptor of the same name, with a NULL dmark. Keyed by bare
+   name the two collapsed into one, so this wrap site was skipped as already seen and
+   `bbox_t` was never enumerated at all -- no row, and no cleared line either. */
+static void b_free(void *p) { xfree(p); }
+static const rb_data_type_t data_type = { "b", { NULL, b_free, }, };
+static VALUE b_alloc(VALUE k) { bbox_t *b; return TypedData_Make_Struct(k, bbox_t, &data_type, b); }
+"""}
+
+# A C++ default member initialiser is where a wrapper STARTS, not what it holds. Dropping
+# the declaration on sight of `=` enumerated zero fields and printed one wrap site, zero
+# suspects -- RED_COMPACT_DECL's failure family, and this one drops the ROW rather than
+# mis-grading it. The class carries the green half too: `local` and `ctor_local` are
+# LOCALS inside method bodies, and the `=` test had been suppressing them by accident.
+RED_CXX_INIT = """
+#include <ruby.h>
+class Box {
+    public:
+        VALUE held = Qnil;      /* a member, unmarked: MUST report */
+        VALUE marked = Qnil;    /* a member, marked: must clear */
+        Box(VALUE v) : held(v) { VALUE ctor_local = Qnil; rb_gc_mark(ctor_local); }
+        VALUE build() const {
+            VALUE local = rb_hash_new();
+            return local;
+        }
+        void mark() { rb_gc_mark(marked); }
+};
+static void b_mark(void *p) { Box *b = static_cast<Box *>(p); b->mark(); }
+static void b_free(void *p) { delete (Box *)p; }
+static const rb_data_type_t b_type = { "box", { b_mark, b_free, }, };
+static VALUE b_wrap(VALUE k, Box *b) { return TypedData_Wrap_Struct(k, &b_type, b); }
+"""
+
+# The helper tier credited EVERY token in a call to a callee that marks ANYTHING. `note`
+# marks a global and touches its parameter not at all, and `cb` cleared as
+# "marked pin (via helper)" -- an over-clear reached through the one tier still crediting
+# by association. `other` is the green half: a direct mark in the same body must survive.
+RED_HELPER_PARAM = """
+#include <ruby.h>
+static VALUE g_root;
+typedef struct { VALUE cb; VALUE other; } wbox_t;
+static void note(VALUE v) { rb_gc_mark(g_root); }
+static void w_free(void *p) { xfree(p); }
+static void w_mark(void *p) { wbox_t *w = (wbox_t *)p; note(w->cb); rb_gc_mark(w->other); }
+static const rb_data_type_t w_type = { "wbox", { w_mark, w_free, }, };
+static VALUE w_alloc(VALUE k) { wbox_t *w; return TypedData_Make_Struct(k, wbox_t, &w_type, w); }
+"""
+
+# Two grader defects in one function, both of which downgraded a field that holds an
+# arbitrary caller object. `held` takes a PARAMETER whose only assignment comes AFTER the
+# store; the whole-function source scan saw `input = Qnil` and graded IMMEDIATE-ONLY.
+# `guard` is compared with an immediate in a chain that rejects nothing, while an
+# unrelated `rb_raise` sits elsewhere in the body -- which the function-wide raise test
+# accepted as a narrowing.
+RED_STORE_FLOW = """
+#include <ruby.h>
+static int bad(void);
+typedef struct { VALUE held; VALUE guard; } sbox_t;
+static void s_mark(void *p) { }
+static void s_free(void *p) { xfree(p); }
+static const rb_data_type_t s_type = { "sbox", { s_mark, s_free, }, };
+static VALUE s_set(VALUE self, VALUE input) {
+    sbox_t *w;
+    TypedData_Get_Struct(self, sbox_t, &s_type, w);
+    w->held = input;      /* the arbitrary incoming object */
+    input = Qnil;         /* ...reused AFTERWARDS. Not a source of the store above. */
+    return self;
+}
+static VALUE s_guard(VALUE self, VALUE arg) {
+    sbox_t *w;
+    TypedData_Get_Struct(self, sbox_t, &s_type, w);
+    if (arg == Qnil) { return Qfalse; }        /* rejects nothing */
+    if (bad()) rb_raise(rb_eArgError, "unrelated");
+    w->guard = arg;       /* every non-nil heap object reaches here */
+    return self;
+}
+static VALUE s_alloc(VALUE k) { sbox_t *w; return TypedData_Make_Struct(k, sbox_t, &s_type, w); }
+"""
+
+
 def _first_dir(*candidates):
     """The first candidate that exists, or the first one, so SKIP names a real path."""
     for c in candidates:
@@ -2200,14 +2674,32 @@ def self_test(base, siblings=()):
             (ext / "t.c").write_text(src)
             return graded(ext)
 
-    def flagged_from_source(src):
+    def flagged_from_source(src, suffix=".c"):
         """(categories, fields) for a tree generated from one C file."""
+        return flagged_from_sources({"t" + suffix: src})
+
+    def flagged_from_sources(files):
+        """(categories, fields) for a tree generated from SEVERAL files.
+
+        Round 7's three cross-translation-unit reds need two files by construction: the
+        defect is that a name defined in both binds to whichever one came first.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             ext = pathlib.Path(tmp) / "ext"
             ext.mkdir()
-            (ext / "t.c").write_text(src)
+            for name, text in files.items():
+                (ext / name).write_text(text)
             s, _ = sweep(Tree(ext))
             return {c for c, _, _, _, _, _ in s}, {f for _, _, _, f, _, _ in s}
+
+    def cleared_from_source(src, suffix=".c"):
+        """{field: why} for everything a one-file tree CLEARED."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ext = pathlib.Path(tmp) / "ext"
+            ext.mkdir()
+            (ext / ("t" + suffix)).write_text(src)
+            _, c = sweep(Tree(ext))
+            return {f: why for _d, _st, f, why in c}
 
     # mysql2: the known instance. Declared in result.h -- the file v1 never opened.
     red = fields_flagged(base / "m2-red" / "ext")
@@ -2285,6 +2777,47 @@ def self_test(base, siblings=()):
           "red (B1) the genuinely unmarked field of that same class still reports",
           sorted(fields))
 
+    # -- round 7: resolution is per FILE, then tree-wide ---------------------------
+    #
+    # Three indexes, three two-file reds. Each asserts the same two things: the shadowed
+    # field REPORTS, and the innocent same-named one in the other file still CLEARS. A fix
+    # that simply stopped resolving through a shadowed name would pass the first half and
+    # fail the second, and would have turned nokogiri's 13 shadowed callbacks into rows.
+    for label, files, want_field, want_cleared in (
+        ("(tu-struct) a second file's same-named struct is its own body",
+         RED_TU_STRUCT, "held", None),
+        ("(tu-callback) a file-local callback resolves in its own file",
+         RED_TU_CALLBACK, "held", "held"),
+        ("(tu-dtype) two file-local descriptors of one name are two verdicts",
+         RED_TU_DTYPE, "held", "held"),
+    ):
+        cats, fields = flagged_from_sources(files)
+        check("UNMARKED" in cats and want_field in fields, "red " + label,
+              "%s %s" % (sorted(cats), sorted(fields)))
+    for label, files in (("(tu-callback)", RED_TU_CALLBACK), ("(tu-dtype)", RED_TU_DTYPE)):
+        _c, fields = flagged_from_sources(files)
+        check(len(fields) == 1, "green %s the marking file's own field still clears" % label,
+              sorted(fields))
+
+    # C++ default member initialisers: the member reports, the method-body locals do not.
+    cats, fields = flagged_from_source(RED_CXX_INIT, ".cc")
+    cleared = cleared_from_source(RED_CXX_INIT, ".cc")
+    check("held" in fields, "red (c++ init) `VALUE held = Qnil;` is still a field",
+          sorted(fields))
+    check("marked" in cleared, "green (c++ init) a marked member with an initialiser clears",
+          cleared)
+    check(not ({"local", "ctor_local"} & (fields | set(cleared))),
+          "green (c++ init) a local inside a method body is not a field",
+          sorted(fields | set(cleared)))
+
+    # The helper tier credits only the arguments the callee actually marks.
+    cats, fields = flagged_from_source(RED_HELPER_PARAM)
+    cleared = cleared_from_source(RED_HELPER_PARAM)
+    check("cb" in fields, "red (helper-param) a helper that marks a GLOBAL clears nothing",
+          sorted(fields))
+    check("other" in cleared, "green (helper-param) a direct mark beside it still clears",
+          cleared)
+
     # -- predicate A: a severity COLUMN on the rows above --------------------------
     #
     # Grades are asserted with their evidence, not just their names: "HEAP-IF-COERCED"
@@ -2319,6 +2852,20 @@ def self_test(base, siblings=()):
     check(not [k for k, v in gg.items() if v[1] == "HEAP-IF-COERCED"],
           "A green: the upstream fix (field stops being a VALUE) leaves no HEAP-IF-COERCED",
           sorted(gg))
+
+    # Round 7, tier 4's two source-analysis defects. Both graded a field IMMEDIATE-ONLY
+    # while it held an arbitrary caller object -- the downgrade direction. The green half
+    # is the RED_COERCE `mode` item above: stackprof's real else-raise chain must still
+    # earn the grade, and a fix that merely demanded the raise be nearer the store would
+    # accept `s_guard` too, because its unrelated raise sits between the comparison and
+    # the store as well. Only "the chain's own else rejects" separates them.
+    gs = graded_from_source(RED_STORE_FLOW)
+    check(gs.get(("sbox_t", "held"), (None, "?", None))[1] is None,
+          "A red: an assignment AFTER the store is not a source of it",
+          gs.get(("sbox_t", "held")))
+    check(gs.get(("sbox_t", "guard"), (None, "?", None))[1] is None,
+          "A red: an unrelated rb_raise does not make a comparison chain rejecting",
+          gs.get(("sbox_t", "guard")))
 
     gn = graded_from_source(RED_NOT_IMMEDIATE)
     bad = {f: v[1] for (st, f), v in gn.items() if v[1]}
