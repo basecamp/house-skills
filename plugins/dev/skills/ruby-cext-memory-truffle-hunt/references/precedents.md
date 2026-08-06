@@ -1,6 +1,6 @@
 # Precedents
 
-Real findings from four hunt rounds against the native gems pinned by the production
+Real findings from six hunt rounds against the native gems pinned by the production
 `Gemfile.lock`s of five Rails applications.
 
 **Sanitised on purpose.** A scent library is a skill, and skills ship — this file is
@@ -156,6 +156,52 @@ ed25519 1.4.0 (both *stack-liveness-by-accident*, not by design), json `rvalue_s
 `rmdraw.cpp:479` (600 in-window compactions, 0 relocations — safe because
 `rb_vm_save_machine_context` pins the C stack frame for the whole nogvl window), all 13 ruby-core
 bundled gems.
+
+## Rounds 5–6 — the file-scope `VALUE`, and a defect with nowhere to file it
+
+Predicate C's class: a `VALUE` that lives at file scope rather than inside a wrapped struct, so
+the wrap-site walk cannot see it by construction. Three instances in three unrelated gems is what
+made it a class rather than a curiosity.
+
+| Gem | Site | Mechanism | Outcome |
+|---|---|---|---|
+| rbtrace | `rbtrace.c:94-95` `rbtracer.list[].self` / `.klass` | Caller-supplied objects stored in fields of a **file-static struct**, two levels down. The gc_hook at `:1154` wraps `NULL`, so `rbtrace_gc_mark` at `:1083` has no pointer to walk and marks **nothing at all** — the mark function exists and is dead | [tmm1/rbtrace#112](https://github.com/tmm1/rbtrace/issues/112) — 0.5.4 |
+| kgio | `accept.c:10` `cClientSocket` | A file-scope `VALUE` nothing registers, while its three siblings *are* registered with `rb_gc_register_mark_object` at `:500-506`. `Kgio.accept_class=` (`:50`) stores an **arbitrary caller-supplied class** into it; read back at `:120`/`:124`/`:128` and consumed by `sock_for_fd` at `:213` | **Not filed — no tracker exists.** 2.11.4 is the latest release; the project is mailing-list based and effectively unmaintained. One-line fix: `rb_gc_register_address(&cClientSocket)` after `:504` |
+| trilogy | `cext.c:27` `_global_buffer_pool` | **Not a defect, and the reason is stronger than the one first given.** Not merely self-healing — the whole static is guarded on `#ifndef HAVE_RB_RACTOR_LOCAL_STORAGE_VALUE_NEWKEY`, and the extconf probe succeeds on every Ruby the gemspec allows (`>= 3.0`) | Cleared. Preprocessing with the generated flags yields **0** occurrences; without the flag, 4 — so the check discriminates |
+
+### kgio is the round's best-evidenced finding and it still should not be filed
+
+Reproduced 3/3 with a clean control on ruby 4.0.6 arm64-darwin23 and ruby 3.4.7, including through
+the **real `UNIXServer#kgio_accept` path**; fault addresses included `0x2f62696c2f362e48`, ASCII
+`H.6/lib/`, i.e. the slot recycled into a String. Adding `rb_gc_register_address` takes it green
+3/3, and the precondition flips to `moved: false` — the expected signature of the correct fix.
+
+**The correction that matters: the anonymous-class case is not the only exposure.** The default is
+incidentally *pinned*, because `cClientSocket = cKgio_Socket` and that sibling is
+`rb_gc_register_mark_object`'d. But the **relocation** path fires with *any* class, including a
+permanently-rooted named constant — `class MySocket < Kgio::Socket; end` plus one `GC.compact` is
+sufficient, and a named subclass is what the gem's own `test/test_accept_class.rb` does. A first
+analysis that stops at "only an anonymous class can be collected" understates it.
+
+Routing, per §7: untrusted input cannot reach this. Triggering needs the *application author* to
+call `Kgio.accept_class=` **and** enable compaction, so it is a latent defect wanting a
+maintainer's judgement rather than a private disclosure — and there is no maintainer to want it.
+Filing to a dead mailing list buys nothing; the real remediation is dropping kgio with the server.
+Recorded here so the next round does not re-derive it.
+
+Two harness false negatives paid for on the way, both of which reported a **broken** gem clean:
+`ObjectSpace.define_finalizer(k, proc { ... })` with the proc created in the same method as `k`
+captures `k` in its binding and **roots the subject**; and `object_id` is a monotonic counter in
+modern Ruby, not an address, so a "did it move?" check built on it always answers false — use
+`ObjectSpace.dump(o)["address"]`.
+
+### One finding is held out of this file
+
+A memory-safety defect found this round was routed through a **private** disclosure channel and is
+still untriaged. Per §8, anything routed privately either goes in sanitised or stays internal with
+a pointer from here — and for an unfixed defect in an untrusted-input parser, naming the gem and
+the mechanism in a file that ships *is* the exploit path. It stays internal. The transferable part
+is already above: the predicate that found it is predicate C, and the shape is in the table.
 
 ## The pass-1 sweep
 
