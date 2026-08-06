@@ -659,6 +659,9 @@ TYPE_KW = {"const", "volatile", "register", "struct", "union", "enum", "unsigned
 # Storage/type qualifiers that may sit between `static` and `VALUE` in a function-local
 # declaration -- `static volatile VALUE cache;` is one slot, not zero.
 LOCAL_QUAL = r"(?:(?:const|volatile|_Atomic|register|thread_local|_Thread_local|__thread)\s+)*"
+# The storage-class specifiers that give a BLOCK-scope declaration a lifetime longer than
+# its call. `thread_local` alone is one of them -- see the fourth note in _index_slots.
+STATIC_DURATION = r"(?:static|thread_local|_Thread_local|__thread)"
 
 
 def unwrap(expr):
@@ -1048,7 +1051,16 @@ class Tree:
         # a function pointer and not a slot, while `static VALUE c = rb_str_new_cstr("x");`
         # is a slot whose initialiser happens to call something. The old character class
         # rejected both by refusing to cross a `(` at all.
-        pat = re.compile(r"\b" + LOCAL_QUAL + r"static\s+" + LOCAL_QUAL + r"VALUE\b")
+        #   AND THE FOURTH: `static` WAS REQUIRED LITERALLY. `thread_local VALUE cache;`
+        #   in a block has THREAD storage duration -- it outlives the call exactly as a
+        #   `static` does, which is the whole property this predicate is about -- and the
+        #   pattern could not see it, so a file whose only slot is spelled that way
+        #   reported `slots 0/0, HITS 0`. Round 8 accepted `thread_local` as a QUALIFIER
+        #   alongside `static` (it is in LOCAL_QUAL); this is the case where it appears
+        #   alone. `register` deliberately stays out of STATIC_DURATION: it is the one
+        #   storage-class specifier here that means automatic.
+        pat = re.compile(r"\b" + LOCAL_QUAL + STATIC_DURATION + r"\s+"
+                         + LOCAL_QUAL + r"VALUE\b")
         for a, b in self.func_spans.get(path, ()):
             for m in pat.finditer(src, a, b):
                 # An INDENTED class member matches this pattern too -- which is how the
@@ -3434,6 +3446,32 @@ void Init_probe(void) { rb_define_method(rb_cObject, "e", entry, 1); }
           "does not reach another (slots 2/2, one discharged one hit)",
           "named %d/%d, static %d/%d %s" % (nm.slots, nm.decls, st.slots, st.decls,
                                             [(h[0], h[3]) for h in st.hits]))
+
+    # 5. `thread_local VALUE cache;` WITH NO `static`. Thread storage duration: it persists
+    #    across calls, which is the whole property. The pattern required the literal
+    #    `static`, so the declaration was never indexed -- `slots 0/0, HITS 0`, a file with
+    #    a live slot reading exactly like a file with none.
+    tl_c = """#include <ruby.h>
+
+static VALUE
+entry(VALUE self)
+{
+    %s VALUE cache;
+    cache = rb_str_new_cstr("x");
+    return cache;
+}
+
+void Init_probe(void) { rb_define_method(rb_cObject, "e", entry, 0); }
+"""
+    tl = {q: _sweep_sources({"probe.c": tl_c % q})
+          for q in ("thread_local", "_Thread_local", "__thread", "static", "register")}
+    check(all((tl[q].slots, sorted(h[0] for h in tl[q].hits)) == (1, ["ALLOCATES"])
+              for q in ("thread_local", "_Thread_local", "__thread", "static"))
+          and (tl["register"].slots, tl["register"].hits) == (0, []),
+          "#29 item 5 RED and GREEN: a block-local `thread_local` (and `_Thread_local`, "
+          "and `__thread`) is indexed on its own, exactly as `static` is -- and `register`, "
+          "the one storage-class specifier here that means AUTOMATIC, still is not",
+          {q: (tl[q].slots, [h[0] for h in tl[q].hits]) for q in tl})
 
     def _index_names(src):
         return set(Tree(_write_sources({"probe.cpp": src})).funcs)
