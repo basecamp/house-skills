@@ -14,8 +14,10 @@ unconverted original. Nothing roots the converted object once the callee returns
 
 Two sub-shapes, both confirmed, in two unrelated gems:
 
-  RETURNS-INTERIOR  the helper returns (or stores through an out-param) `RSTRING_PTR` of
-                    its own converted local.  rmagick `rm_str2cstr` -- rmagick/rmagick#1846
+  RETURNS-INTERIOR  the helper returns `RSTRING_PTR` of its own converted local.
+                    rmagick `rm_str2cstr` -- rmagick/rmagick#1846
+  STORES-INTERIOR   it writes that interior somewhere the frame does not own: through an
+                    out-parameter, or into a file-scope slot. Same defect, later read.
   CALLER-DEREFS     the *callers* dereference their own unconverted copy after the call.
                     bootsnap `bs_cache_path` (1.24.x, still at HEAD). Worse than a UAF:
                     with a `Pathname` argument the caller `RSTRING_PTR`s a `T_OBJECT`, and
@@ -123,10 +125,37 @@ numbers into the stripped text both match the original file. Predicate B prints 
 for every hit, so `--self-test` asserts that round-trip on a real corpus file rather than
 taking it on trust.
 
+SIX RECALL GAPS, AND WHY THE CORPUS CANNOT VOUCH FOR THE FIXES
+--------------------------------------------------------------
+Review of #28 found six ways a real instance stayed invisible. Sweeping all 99 corpus
+trees before and after fixing them adds **no row and removes none**; the only corpus-
+visible change at all is that two rmagick discharges now cite the rule that actually
+reaches the call. So the corpus is neutral, which is exactly the condition under which a
+green suite proves nothing -- this predicate's own history has a green fixture that passed
+on an empty index. Each fix therefore ships with a GENERATED RED synthetic in self_test()
+(items 10a-10f), red before and green after, and each asserts the FUNNEL COUNTERS rather
+than only the hit count, because the failure being guarded against prints `0 fn(s),
+0 conversions` and reads as clean:
+
+  10a  an ALIAS of the interior stored through an out-param   `p = RSTRING_PTR(s); *out = p`
+  10b  definitions inside `namespace` / `extern "C"`          indexed 0 fn(s) before
+  10c  `RSTRING_GETMEM(s, p, len)` as an alias SOURCE         the macro's output argument
+  10d  cfunc exclusion scoped to the registered definition    a `static` namesake in another TU
+  10e  the interior stored into a file-scope slot             `g_saved = RSTRING_PTR(s)`
+  10f  a caller conversion an assignment overwrote            `StringValue(x); x = y; f(x)`
+
+All six keep this predicate keyed on a BY-VALUE PARAMETER (`converted_params` ->
+`value_params` -> a bare `VALUE` in the parameter list) and change only what counts as an
+*escape*. None of them introduces a window, a GC-triggering call, or a pointer held across
+one -- that is predicate D's charter and widening B into it is how a gem gets cleared by
+both. 10c in particular is the escape-analysis half of `RSTRING_GETMEM`: D covers the same
+macro's argument taking part in WINDOW analysis, separately.
+
 ACCEPTANCE (--self-test): see self_test(). Run it before trusting any result from this
 script -- silence is a property of the query until the counts say otherwise.
 """
 import argparse
+import bisect
 import pathlib
 import re
 import shutil
@@ -210,6 +239,67 @@ def match_brace(src, open_idx):
             if depth == 0:
                 return i
     return -1
+
+
+# C++ SCOPE HEADS, and the walk that treats them as transparent. Ported from
+# sweep_static_values.py, where the same three brace dispositions were forced by vernier:
+# a depth-0 `{` belongs to the CURRENT statement when it opens an aggregate or an
+# initialiser, ENDS it when it opens a function body, and -- the disposition C++ adds --
+# opens a scope with no storage duration of its own when it follows `namespace X` or
+# `extern "C"`. Predicate B only ever had the first two, so every definition in a
+# namespaced or `extern "C"`-wrapped tree sat at nonzero depth and _index_funcs skipped it:
+# `0 fn(s)`, which reads as a clean gem.
+#
+# `extern "C"` reaches here AFTER strip_noise, which blanks string BODIES and keeps the
+# quotes -- the text is `extern " " {`, so the pattern has to allow a blanked literal.
+NAMESPACE_HEAD = re.compile(r"\bnamespace(?:\s+\w+(?:\s*::\s*\w+)*)?\s*$")
+LINKAGE_HEAD = re.compile(r"\bextern\s*\"[^\"]*\"\s*$")
+
+
+def top_level_units(src, base=0, transparent=None):
+    """[(offset, text)] -- one entry per declaration or definition at static-storage scope.
+
+    `transparent`, when a set is passed, also collects the offsets of the `{` and `}` of
+    every namespace and linkage block the walk descends through. The walk that knows which
+    braces are scopes is the walk that knows which braces are not, so both callers read it
+    from here: _index_funcs subtracts those offsets from its depth count, and
+    file_scope_objects reads the units.
+    """
+    n, i, start = len(src), 0, 0
+    while i < n:
+        c = src[i]
+        if c == "{":
+            close = match_brace(src, i)
+            if close < 0:
+                return
+            pre = src[start:i].rstrip()
+            if NAMESPACE_HEAD.search(pre) or LINKAGE_HEAD.search(pre):
+                if transparent is not None:
+                    transparent.add(i)
+                    transparent.add(close)
+                for u in top_level_units(src[i + 1:close], base + i + 1, transparent):
+                    yield u
+                i = start = close + 1
+                continue
+            if re.search(r"\b(struct|union|enum)\b\s*\w*$", pre) or pre.endswith("="):
+                i = close + 1          # an aggregate or an initialiser: same statement
+                continue
+            yield base + start, src[start:close + 1]
+            i = start = close + 1
+            continue
+        if c == ";":
+            yield base + start, src[start:i + 1]
+            i = start = i + 1
+            continue
+        i += 1
+
+
+def scope_zero_braces(src):
+    """Offsets of the `{`/`}` that open and close a namespace or linkage block."""
+    transparent = set()
+    for _u in top_level_units(src, 0, transparent):
+        pass
+    return transparent
 
 
 def split_args(text):
@@ -319,10 +409,47 @@ def param_name(decl):
     return ids[-1] if ids else ""
 
 
-class Func:
-    __slots__ = ("name", "path", "src", "params", "hdr", "bstart", "bend")
+# `typedef` and `using` name types, `template` heads a definition with no object of its
+# own. `extern VALUE x;` is NOT skipped: it names a persistent slot defined elsewhere,
+# which is the sink we are looking for.
+DECL_NOT_OBJECT = re.compile(r"^(?:typedef|using|template|namespace)\b")
 
-    def __init__(self, name, path, src, params, hdr, bstart, bend):
+
+def file_scope_objects(src):
+    """Names declared at file or namespace scope -- file statics and globals.
+
+    A slot at this scope outlives every frame in the file, so an interior pointer stored
+    into one escapes the converting frame exactly as a return value does. Recognising the
+    sink POSITIVELY, by name, is what keeps `char *p = RSTRING_PTR(str);` -- a plain local,
+    and the alias case escapes_by_return already handles -- from reading as an escape. The
+    inverted form ("any store to something that is not provably frame-local") is the
+    recall-biased one and is the wrong trade here: this predicate's whole value is a funnel
+    narrow enough to read, and every unparsed local declaration would widen it.
+    """
+    names = set()
+    for _off, unit in top_level_units(src):
+        u = unit.strip()
+        if not u.endswith(";"):
+            continue                    # a function body or a class body, not a slot
+        u = u[:-1].strip()
+        if not u or DECL_NOT_OBJECT.match(u):
+            continue
+        for d in split_args(u):
+            d = d.split("=")[0]
+            # a prototype declares no object; a function POINTER does, and is spelled
+            # `(*fp)(...)`, so only the un-parenthesised declarator is dropped
+            if "(" in d and not re.search(r"\(\s*\*", d):
+                continue
+            nm = param_name(d)
+            if nm:
+                names.add(nm)
+    return names
+
+
+class Func:
+    __slots__ = ("name", "path", "src", "params", "hdr", "bstart", "bend", "is_static")
+
+    def __init__(self, name, path, src, params, hdr, bstart, bend, is_static=False):
         self.name = name
         self.path = path
         self.src = src            # the whole stripped file text
@@ -330,6 +457,7 @@ class Func:
         self.hdr = hdr            # offset of the function name
         self.bstart = bstart      # offset just past `{`
         self.bend = bend          # offset of the matching `}`
+        self.is_static = is_static  # internal linkage: this name is this file's alone
 
     @property
     def body(self):
@@ -363,10 +491,13 @@ class Tree:
                     continue
         self.funcs = []
         self.by_name = {}
-        self.cfuncs = set()
+        self.cfuncs = set()             # bare names registered anywhere in the tree
+        self.cfunc_regs = set()         # (path, name) -- registered IN that file
+        self.statics = {}               # path -> names at file/namespace scope
         for path, src in self.files.items():
             self._index_funcs(path, src)
-            self._index_cfuncs(src)
+            self._index_cfuncs(path, src)
+            self.statics[path] = file_scope_objects(src)
         for f in self.funcs:
             self.by_name.setdefault(f.name, []).append(f)
         # per-file (bstart, bend, Func), innermost-last, for offset -> enclosing frame
@@ -384,12 +515,27 @@ class Tree:
         function, and the innermost-frame lookup would then bound a caller scan by the
         macro's block instead of the function's body. That is a false NEGATIVE generator,
         which is the failure mode that matters.
+
+        Depth is counted over STORAGE scopes, not braces. `namespace X {` and
+        `extern "C" {` nest their contents without giving them a new storage duration, so
+        scope_zero_braces marks that pair and the count skips it -- otherwise a C++ tree
+        that wraps its helpers in either one indexes zero functions and every later stage
+        reports a clean sheet on an empty index. sweep_static_values.py needed the same
+        three dispositions for the same reason; this is the port.
         """
-        depth, cursor = 0, 0
+        transparent = scope_zero_braces(src)
+        # brace offsets and the storage depth after each, so a name's depth is a bisect
+        # rather than a re-count of the file
+        bpos, bdepth, depth = [], [], 0
+        for m in re.finditer(r"[{}]", src):
+            if m.start() in transparent:
+                continue
+            depth += 1 if m.group() == "{" else -1
+            bpos.append(m.start())
+            bdepth.append(depth)
         for m in re.finditer(r"\b([A-Za-z_]\w*)\s*(?=\()", src):
-            depth += src.count("{", cursor, m.start()) - src.count("}", cursor, m.start())
-            cursor = m.start()
-            if depth != 0 or m.group(1) in NOT_CALLS:
+            k = bisect.bisect_left(bpos, m.start())
+            if (bdepth[k - 1] if k else 0) != 0 or m.group(1) in NOT_CALLS:
                 continue
             args, past = call_args(src, m.end())
             if args is None:
@@ -404,12 +550,36 @@ class Tree:
                 continue
             params = [(a, param_name(a)) for a in args
                       if a.strip() and a.strip() not in ("void", "...")]
-            self.funcs.append(Func(m.group(1), path, src, params, m.start(), k + 1, close))
+            # the declaration specifiers, back to the previous statement boundary
+            head = src[max(0, m.start() - 300):m.start()]
+            head = head[max(head.rfind(";"), head.rfind("}"), head.rfind("{")) + 1:]
+            self.funcs.append(Func(m.group(1), path, src, params, m.start(), k + 1, close,
+                                   bool(re.search(r"\bstatic\b", head))))
 
-    def _index_cfuncs(self, src):
+    def _index_cfuncs(self, path, src):
         for name, args, _s, _e in find_calls(src):
             if DEFINE_RE.match(name):
-                self.cfuncs.update(re.findall(r"[A-Za-z_]\w*", " ".join(args)))
+                names = re.findall(r"[A-Za-z_]\w*", " ".join(args))
+                self.cfuncs.update(names)
+                self.cfunc_regs.update((path, n) for n in names)
+
+    def is_cfunc(self, fn):
+        """Is `fn` THE definition registered as a Ruby cfunc -- not merely a namesake?
+
+        Keying the exclusion on the bare name is a whole-tree over-clear: two translation
+        units may each define a `static` function called `collide`, and registering one of
+        them deleted the other from the funnel. `static` means the name belongs to its own
+        file, so the registration has to be in that file to reach it. A name with external
+        linkage can be registered from anywhere, so for those the tree-wide set still
+        applies.
+
+        Not covered, and in the over-REPORTING direction: a `static` or `inline` definition
+        in a header, registered from the .c that includes it. The registration is in a
+        different file, so the exclusion misses and the helper stays in the funnel.
+        """
+        if (fn.path, fn.name) in self.cfunc_regs:
+            return True
+        return not fn.is_static and fn.name in self.cfuncs
 
     def enclosing(self, path, off):
         """The innermost top-level function whose body contains `off`, or None."""
@@ -460,23 +630,44 @@ def converted_params(fn):
 # ------------------------------------------------------- stage 3a: escape by return/store
 
 
-def escapes_by_return(fn, param):
-    """[(kind, offset, text)] -- the converted local's interior leaving the frame."""
-    out, body = fn.body, fn.body
+def escapes_by_return(fn, param, statics=()):
+    """[(kind, offset, text, sink)] -- the converted local's interior leaving the frame.
+
+    `statics` is the set of names declared at file or namespace scope in `fn`'s own file
+    (Tree.statics). A store into one of those is an escape for the same reason a store
+    through an out-parameter is: the slot outlives every frame in the translation unit,
+    while nothing roots the String the conversion produced.
+    """
+    body = fn.body
     found = []
     ptr_params = {nm for decl, nm in fn.params
                   if nm and ("*" in decl or "[" in decl) and nm != param}
+    statics = set(statics)
 
-    # Locals that ALIAS the interior before the return:
+    # Locals that ALIAS the interior before it escapes:
     #
     #     const char *p = RSTRING_PTR(str);
-    #     return p;
+    #     return p;                          /* or:  *out = p;  or:  g_saved = p; */
     #
     # Matching only `return RSTRING_PTR(str);` misses this, and it is a completely
     # ordinary way to spell the very defect this predicate targets -- rm_str2cstr with one
     # more line. Recall gap, so it fails silent: the funnel reports the conversion, finds
     # no escape, and prints a clean sheet.
+    #
+    # Two alias SOURCES, not one. The assignment form is the obvious one; the other is
+    # RSTRING_GETMEM(str, p, len), which hands the interior back through an OUTPUT
+    # ARGUMENT and so never passes under an `=` at all. It is in INTERIOR already, so
+    # `return RSTRING_PTR(str)` and `return p` after a GETMEM are the same defect -- but
+    # only the first was ever found. (Predicate D has a sibling gap on the same macro; its
+    # half is about the argument taking part in WINDOW analysis. This half is escape
+    # analysis only and does not reach into D.)
     aliases = set()
+    for name, args, _s, _e in find_calls(body):
+        if name in ("RSTRING_GETMEM", "rb_str_getmem") and len(args) >= 2 \
+                and args[0].strip() == param:
+            nm = re.fullmatch(r"\*?\s*([A-Za-z_]\w*)", args[1].strip())
+            if nm:
+                aliases.add(nm.group(1))
     for m in re.finditer(r"(?<![=!<>])=(?!=)", body):
         semi = body.find(";", m.end())
         if semi < 0:
@@ -488,46 +679,58 @@ def escapes_by_return(fn, param):
         lhs = body[max(0, m.start() - 200):m.start()]
         stmt = lhs[lhs.rfind(";") + 1:]
         stmt = stmt[stmt.rfind("{") + 1:].strip()
-        # `p`, `char *p`, `const char *p` -- a plain local, not `*out` or `o->f`, which
-        # are the STORES-INTERIOR case handled below.
+        # `p`, `char *p`, `const char *p` -- a plain local, not `*out`, `o->f` or a
+        # file-scope slot, which are the STORES-INTERIOR case handled below.
         nm = re.match(r"^(?:[A-Za-z_]\w*\s+)*\*?\s*([A-Za-z_]\w*)$", stmt)
-        if nm and nm.group(1) not in ptr_params:
+        if nm and nm.group(1) not in ptr_params and nm.group(1) not in statics:
             aliases.add(nm.group(1))
+
+    def derives(expr):
+        """Does `expr` evaluate to the converted String's interior?"""
+        if any(name in INTERIOR
+               and param in re.findall(r"[A-Za-z_]\w*", " ".join(args))
+               for name, args, _s, _e in find_calls(expr)):
+            return True
+        return bool(aliases & set(re.findall(r"[A-Za-z_]\w*", expr)))
 
     for m in re.finditer(r"\breturn\b", body):
         semi = body.find(";", m.end())
         if semi < 0:
             continue
-        expr = body[m.end():semi]
-        hit = any(name in INTERIOR
-                  and param in re.findall(r"[A-Za-z_]\w*", " ".join(args))
-                  for name, args, _s, _e in find_calls(expr))
-        if not hit:
-            hit = bool(aliases & set(re.findall(r"[A-Za-z_]\w*", expr)))
-        if hit:
+        if derives(body[m.end():semi]):
             found.append(("RETURNS-INTERIOR", fn.bstart + m.start(),
-                          body[m.start():semi + 1].strip()))
-    # store through an out-parameter: `*out = RSTRING_PTR(str)`, `out->f = ...`,
-    # `out[i] = ...`. The caller owns that memory, so the pointer outlives this frame
-    # exactly as a return value would.
+                          body[m.start():semi + 1].strip(), "the return value"))
+    # Stores into memory the frame does not own. Two sinks, one shape:
+    #
+    #   an OUT-PARAMETER      `*out = RSTRING_PTR(str)`, `out->f = ...`, `out[i] = ...`
+    #                         -- the caller owns that memory, so the pointer outlives this
+    #                         frame exactly as a return value would. A bare `out = ...`
+    #                         is NOT one: it rebinds the callee's private copy.
+    #   a PERSISTENT SLOT     `g_saved = RSTRING_PTR(str)`, `g_state.p = ...` -- a name at
+    #                         file or namespace scope. Here the bare form IS the escape,
+    #                         which is why the two sinks need different lvalue rules.
     for m in re.finditer(r"(?<![=!<>])=(?!=)", body):
         lhs = body[max(0, m.start() - 200):m.start()]
         stmt = lhs[lhs.rfind(";") + 1:].strip()
         stmt = stmt[stmt.rfind("{") + 1:].strip()
         base = re.match(r"^\*?\s*([A-Za-z_]\w*)\s*(->|\[|\.|$)", stmt)
-        if not base or base.group(1) not in ptr_params:
+        if not base:
             continue
-        if not (stmt.startswith("*") or base.group(2) in ("->", "[")):
+        if base.group(1) in ptr_params:
+            if not (stmt.startswith("*") or base.group(2) in ("->", "[")):
+                continue
+            sink = "out-param %s" % base.group(1)
+        elif base.group(1) in statics:
+            sink = "file-scope slot %s" % base.group(1)
+        else:
             continue
         semi = body.find(";", m.end())
         if semi < 0:
             continue
         rhs = body[m.end():semi]
-        for name, args, _s, _e in find_calls(rhs):
-            if name in INTERIOR and param in re.findall(r"[A-Za-z_]\w*", " ".join(args)):
-                found.append(("STORES-INTERIOR", fn.bstart + m.start(),
-                              (stmt + " =" + rhs).strip()))
-                break
+        if derives(rhs):
+            found.append(("STORES-INTERIOR", fn.bstart + m.start(),
+                          (stmt + " =" + rhs).strip(), sink))
     return found
 
 
@@ -565,12 +768,22 @@ def caller_holds_string(caller, arg, upto):
 
     NOT a discharge: `argv[i]`. The VM stack pins what argv[i] holds, which is the
     ORIGINAL object; rmagick#1846 is filed on exactly that call shape.
+
+    Every one of the three is gated on REACHING the call. An assignment to `arg` kills
+    whatever was established about `arg` before it: `StringValue(x); x = y; helper(x);`
+    discharged on a conversion that no longer describes the value being passed, and `y`
+    may be any object at all. So the scan below starts at the LAST assignment to `arg`,
+    and that same assignment is then judged on its own RHS by rule 2 -- which is the only
+    rule that was already reaching-correct, because it always took the last one.
     """
     if not re.fullmatch(r"[A-Za-z_]\w*", arg):
         return None
     before = caller.body[:upto]
-    for name, args, _s, _e in find_calls(before):
-        if not args:
+    last, reassign = None, -1
+    for m in re.finditer(r"\b%s\s*=(?!=)" % re.escape(arg), before):
+        last, reassign = m, m.start()
+    for name, args, s, _e in find_calls(before):
+        if s < reassign or not args:
             continue
         a0 = args[0].strip()
         if (name in LVALUE_CONV and a0 == arg) or \
@@ -579,9 +792,6 @@ def caller_holds_string(caller, arg, upto):
         if name in ("Check_Type", "rb_check_type") and a0 == arg and \
                 len(args) > 1 and "T_STRING" in args[1]:
             return "caller Check_Type'd its own copy"
-    last = None
-    for m in re.finditer(r"\b%s\s*=(?!=)" % re.escape(arg), before):
-        last = m
     if last is not None:
         semi = before.find(";", last.end())
         rhs = before[last.end():semi if semi > 0 else len(before)]
@@ -700,14 +910,18 @@ def sweep(tree, name, window=None, discharge=True):
     for fn in tree.funcs:
         for idx, param, macro, off in converted_params(fn):
             r.conversions.append((fn, idx, param, macro, off))
-            if fn.name in tree.cfuncs:
+            # Scoped to the registered DEFINITION, not to the bare name: two translation
+            # units may each define a `static` helper called `collide`, and a name-keyed
+            # exclusion deletes both from the funnel when only one is a cfunc.
+            if tree.is_cfunc(fn):
                 continue
             r.non_cfunc.append((fn, idx, param, macro, off))
 
     for fn, idx, param, macro, off in r.non_cfunc:
         rel = str(fn.path.relative_to(tree.root))
-        # -- 3a: the interior leaves the frame by return or out-param
-        for kind, eoff, text in escapes_by_return(fn, param):
+        # -- 3a: the interior leaves the frame by return, out-param or file-scope slot
+        for kind, eoff, text, sink in escapes_by_return(fn, param,
+                                                        tree.statics.get(fn.path, ())):
             sites = call_sites(tree, fn)
             reaching, cleared = [], []
             for caller, args, coff, _past in sites:
@@ -725,7 +939,7 @@ def sweep(tree, name, window=None, discharge=True):
                 "%s(%s %s) converts in place with %s, then %s"
                 % (fn.name, "VALUE", param, macro,
                    "returns its interior" if kind == "RETURNS-INTERIOR"
-                   else "stores its interior through an out-param"),
+                   else "stores its interior into %s" % sink),
                 ["def %s:%d" % (rel, fn.line()),
                  "escape: %s" % re.sub(r"\s+", " ", text)[:120]]
                 + ["reaching call site: " + s for s in reaching]
@@ -801,6 +1015,23 @@ def _mutate(src_tree, edits):
         assert old in txt, "mutation anchor absent: %r in %s" % (old[:60], rel)
         p.write_text(txt.replace(old, new))
     return dst
+
+
+def _synth(name, files):
+    """Write a synthetic tree from the test itself; return its path.
+
+    Generated at test time and never checked in, for the same reason _mutate is: a fixture
+    that lives on disk drifts away from the assertion that reads it, and the pair is the
+    artifact. These exist because the corpus is NEUTRAL on the recall fixes below -- zero
+    added rows, zero removed -- so a corpus run cannot tell a working fix from an absent
+    one, and a green suite would prove nothing.
+    """
+    root = pathlib.Path(tempfile.mkdtemp()) / name
+    for rel, text in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    return root
 
 
 def self_test(pool):
@@ -1001,6 +1232,184 @@ def self_test(pool):
     check(any("holder_.p" in str(h[4]) for h in mh) or len(mh) >= 2,
           "a re-readable struct MEMBER argument is scanned, not discharged as a temporary",
           [(h[0], h[1], h[2]) for h in _hits(member_tree)])
+
+    # 10. GENERATED REDS for the six recall gaps found reviewing #28. Every one of them
+    #     is corpus-NEUTRAL -- sweeping all 99 trees before and after adds no row and
+    #     removes none -- so these synthetics are the only thing standing between a
+    #     working fix and a silently reverted one.
+    #
+    #     Each check asserts the FUNNEL, not just the hit count. The failure mode being
+    #     guarded against is green-for-the-wrong-reason: 10b's tree indexed `0 fn(s),
+    #     0 conversions` before the fix and read as clean, which is the same clean sheet a
+    #     parser regression would print. A row count alone cannot tell those apart.
+
+    def synth(label, files, funcs, conv, noncf):
+        """(hits, ok_funnel) after sweeping a synthetic tree with the expected counters."""
+        r = sweep(Tree(_synth(label, files)), label)
+        return r, (r.funcs == funcs and len(r.conversions) == conv
+                   and len(r.non_cfunc) == noncf)
+
+    # 10a. The interior aliased into a local, then stored through an OUT-PARAM. The alias
+    #      set was consulted for `return p` and not for `*out = p`, so the out-param
+    #      branch looked for an INTERIOR call in the RHS, found `p`, and reported nothing.
+    r, fok = synth("t_alias_outparam", {"ext/t.c": """#include <ruby.h>
+static VALUE grab(VALUE str, const char **out)
+{
+    StringValue(str);
+    const char *p = RSTRING_PTR(str);
+    *out = p;
+    return Qnil;
+}
+static VALUE go(VALUE self, VALUE arg)
+{
+    const char *sink = 0;
+    grab(arg, &sink);
+    return rb_str_new2(sink);
+}
+void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
+"""}, funcs=3, conv=1, noncf=1)
+    check(fok and [h for h in r.hits if h[0] == "STORES-INTERIOR"],
+          "10a RED: an ALIAS of the interior stored through an out-param is an escape",
+          "funnel fn=%d conv=%d non-cfunc=%d hits=%s"
+          % (r.funcs, len(r.conversions), len(r.non_cfunc),
+             [(h[0], h[2]) for h in r.hits]))
+
+    # 10b. C++ scope heads. `namespace` and `extern "C"` put every definition at nonzero
+    #      brace depth, so _index_funcs skipped the lot: `0 fn(s)` on a tree whose whole
+    #      point is one defect. The funnel assertion is the check here -- the hit count
+    #      going from 0 to 1 is the smaller half of it.
+    r, fok = synth("t_namespace", {"ext/t.cpp": """#include <ruby.h>
+namespace tt {
+    static const char *grab(VALUE str)
+    {
+        StringValue(str);
+        return RSTRING_PTR(str);
+    }
+}
+extern "C" {
+static VALUE go(VALUE self, VALUE arg)
+{
+    return rb_str_new2(tt::grab(arg));
+}
+void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
+}
+"""}, funcs=3, conv=1, noncf=1)
+    check(fok and [h for h in r.hits if h[0] == "RETURNS-INTERIOR"],
+          "10b RED: definitions inside `namespace` / `extern \"C\"` are INDEXED "
+          "(3 fn, not 0) and their escape found",
+          "funnel fn=%d conv=%d non-cfunc=%d hits=%s"
+          % (r.funcs, len(r.conversions), len(r.non_cfunc),
+             [(h[0], h[2]) for h in r.hits]))
+
+    # 10c. RSTRING_GETMEM hands the interior back through an OUTPUT ARGUMENT, so the
+    #      assignment-keyed alias pass never saw `p` at all and `return p` read as clean.
+    r, fok = synth("t_getmem", {"ext/t.c": """#include <ruby.h>
+static const char *grab(VALUE str)
+{
+    const char *p;
+    long len;
+    StringValue(str);
+    RSTRING_GETMEM(str, p, len);
+    return p;
+}
+static VALUE go(VALUE self, VALUE arg) { return rb_str_new2(grab(arg)); }
+void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
+"""}, funcs=3, conv=1, noncf=1)
+    check(fok and [h for h in r.hits if h[0] == "RETURNS-INTERIOR"],
+          "10c RED: RSTRING_GETMEM's output argument is an alias of the interior",
+          "funnel fn=%d conv=%d non-cfunc=%d hits=%s"
+          % (r.funcs, len(r.conversions), len(r.non_cfunc),
+             [(h[0], h[2]) for h in r.hits]))
+
+    # 10d. Two TUs, two unrelated `static` functions called `collide`. Registering one as
+    #      a cfunc added the BARE NAME to a tree-wide set and deleted the other from the
+    #      funnel: 1 conversion, 0 non-cfuncs, 0 hits. The green half matters as much --
+    #      registering the helper itself must still exclude it, or the fix is just the
+    #      exclusion turned off.
+    collide_a = """#include <ruby.h>
+static VALUE collide(VALUE self, VALUE arg) { return arg; }
+void Init_a(void) { rb_define_method(rb_cObject, "collide", collide, 1); }
+"""
+    collide_b = """#include <ruby.h>
+static const char *collide(VALUE str)
+{
+    StringValue(str);
+    return RSTRING_PTR(str);
+}
+static VALUE go(VALUE self, VALUE arg) { return rb_str_new2(collide(arg)); }
+void Init_b(void) { rb_define_method(rb_cObject, "go", go, 1); }
+"""
+    r, fok = synth("t_collide", {"ext/a.c": collide_a, "ext/b.c": collide_b},
+                   funcs=5, conv=1, noncf=1)
+    check(fok and [h for h in r.hits if h[0] == "RETURNS-INTERIOR"],
+          "10d RED: a same-named `static` helper in another TU is not excluded by the "
+          "cfunc registration of its namesake",
+          "funnel fn=%d conv=%d non-cfunc=%d hits=%s"
+          % (r.funcs, len(r.conversions), len(r.non_cfunc),
+             [(h[0], h[2]) for h in r.hits]))
+    rg, _ = synth("t_collide_green",
+                  {"ext/a.c": collide_a,
+                   "ext/b.c": collide_b.replace(
+                       'rb_define_method(rb_cObject, "go", go, 1);',
+                       'rb_define_method(rb_cObject, "go", go, 1);\n'
+                       '  rb_define_method(rb_cObject, "c", collide, 1); ')},
+                  funcs=5, conv=1, noncf=0)
+    check(not rg.hits and len(rg.conversions) == 1 and not rg.non_cfunc,
+          "...and GREEN when THAT definition's own file registers it (exclusion intact)",
+          "funnel conv=%d non-cfunc=%d hits=%s"
+          % (len(rg.conversions), len(rg.non_cfunc), [(h[0], h[2]) for h in rg.hits]))
+
+    # 10e. The interior stored into PERSISTENT storage -- a file-scope slot and a field of
+    #      a file-scope object. Neither lvalue is in ptr_params, so the out-param branch
+    #      skipped both and the frame looked like it kept its pointer to itself.
+    r, fok = synth("t_static_sink", {"ext/t.c": """#include <ruby.h>
+static const char *saved_path;
+static struct { const char *p; } g_slot;
+static VALUE stash(VALUE str)
+{
+    StringValue(str);
+    saved_path = RSTRING_PTR(str);
+    g_slot.p = RSTRING_PTR(str);
+    return Qnil;
+}
+static VALUE go(VALUE self, VALUE arg) { stash(arg); return rb_str_new2(saved_path); }
+void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
+"""}, funcs=3, conv=1, noncf=1)
+    sinks = {h[3].split("into ")[-1] for h in r.hits if h[0] == "STORES-INTERIOR"}
+    check(fok and sinks == {"file-scope slot saved_path", "file-scope slot g_slot"},
+          "10e RED: a store into a file-scope slot, or a field of one, is an escape",
+          "funnel fn=%d conv=%d non-cfunc=%d sinks=%s"
+          % (r.funcs, len(r.conversions), len(r.non_cfunc), sorted(sinks)))
+
+    # 10f. A caller conversion that an assignment overwrote before the call. `x = y`
+    #      makes everything established about `x` stale, and `y` may be any object; the
+    #      discharge fired anyway. The green half pins that rule 1 still works when
+    #      nothing intervenes -- otherwise the fix is indistinguishable from deleting it.
+    stale = """#include <ruby.h>
+static VALUE helper(VALUE x) { StringValue(x); return Qnil; }
+static VALUE go(VALUE self, VALUE x, VALUE y)
+{
+    StringValue(x);
+%s    helper(x);
+    return rb_str_new2(RSTRING_PTR(x));
+}
+void Init_t(void) { rb_define_method(rb_cObject, "go", go, 2); }
+"""
+    r, fok = synth("t_stale_conv", {"ext/t.c": stale % "    x = y;\n"},
+                   funcs=3, conv=2, noncf=1)
+    check(fok and [h for h in r.hits if h[0] == "CALLER-DEREFS"] and not r.discharges,
+          "10f RED: a caller conversion that a later assignment overwrote no longer "
+          "discharges",
+          "funnel fn=%d conv=%d non-cfunc=%d hits=%s discharges=%s"
+          % (r.funcs, len(r.conversions), len(r.non_cfunc),
+             [(h[0], h[2]) for h in r.hits], [d[3] for d in r.discharges]))
+    rg, _ = synth("t_stale_conv_green", {"ext/t.c": stale % ""}, 3, 2, 1)
+    check(not rg.hits and len(rg.discharges) == 1
+          and "converted its own copy" in rg.discharges[0][3]
+          and len(rg.conversions) == 2,
+          "...and GREEN with the assignment removed: the conversion REACHES the call",
+          "hits=%s discharges=%s" % ([(h[0], h[2]) for h in rg.hits],
+                                     [d[3] for d in rg.discharges]))
 
     print("\n".join(log))
     print("\nself-test: %s" % ("PASS" if ok else "FAIL"))
