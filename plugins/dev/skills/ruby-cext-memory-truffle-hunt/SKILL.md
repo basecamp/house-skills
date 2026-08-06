@@ -433,10 +433,13 @@ per-slot: round 4 measured stackprof's registered `empty_string` pinned while it
 sibling `objtracer` was not.
 
 **Run `--self-test` before trusting any silence** — A is 48/48 (1 skipped), B 23/23, C 53/53,
-D 21/21. Note the pool argument differs: A and C take the corpus **parent**, B and D take the gem
-directories (`$CORPUS/*/`). Given the wrong one, B and D print `fixture missing` and **exit 0** —
-a self-test that passes because its fixtures were absent. A aborts with exit 2 instead; the other
-two should. A suite of
+D 32/32. Note the pool argument differs: A and C take the corpus **parent**, B and D take the gem
+directories (`$CORPUS/*/`); given the wrong one, B and D print `fixture missing` and exit non-zero.
+
+**The failure that does not announce itself is a PARTIAL pool, not an empty one.** Fixtures were
+looked up with `if d is None: continue`, so a pool missing some named trees ran a *smaller suite*
+and still printed `PASS` — the count moves, and nothing else says so. Read the count, not the
+word. A and D now fail on any missing named fixture. A suite of
 greens passes just as well when the parser has resolved nothing at all, so the controls that matter
 are **generated reds**: a de-marked copy of a tree with a known finding, and a `--disable-rule`
 mutation for each discharge rule. Round 5 shipped four over-clears in A that a green-only suite had

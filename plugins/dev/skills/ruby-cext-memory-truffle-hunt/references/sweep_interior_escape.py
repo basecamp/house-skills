@@ -112,10 +112,15 @@ Discharges REMOVE the row. Each is named in the output and each has a `--disable
 mutation in the self-test, because a discharge rule with no generated red is a rule
 nobody has tested.
 
-    guarded            RB_GC_GUARD(src) at or after the last deref
+    guarded            RB_GC_GUARD(src) at or after the last deref, naming the SOURCE or a
+                       copy of it -- and only while that name still holds what it held at
+                       the derivation. `guard = str; guard = other; RB_GC_GUARD(guard)`
+                       guards `other`; the row stands.
     no-window          nothing between derive and last deref that can trigger GC,
                        and the pointer does not leave the frame
-    last-use-after     the source VALUE is used again at or after the last deref.
+    last-use-after     the source VALUE is READ again at or after the last deref. A write is
+                       not a read: `str = other;` after the last deref neither loads the old
+                       VALUE nor keeps it anywhere the GC scans.
                        RECALL-BIASED BY CONSTRUCTION: the compiler may drop the VALUE
                        *before* its last syntactic use -- that is RB_GC_GUARD's own
                        documented rationale (include/ruby/internal/memory.h). This rule
@@ -152,14 +157,19 @@ so its zero is `0 derivations`, not `0 hits after 40 discharges`, and the counte
 the only thing that tells those two apart.
 
 ACCEPTANCE (--self-test): see self_test(). Twelve positive controls, four clean negative
-controls, eleven pinned-residue trees, a per-rule mutation table, and generated reds
-rather than a green-only suite. Two of the reds are SYNTHETIC TREES WRITTEN BY THE TEST,
-because the corpus is neutral on both shapes and a corpus-neutral fix is exactly the one a
-green suite cannot tell from no fix at all: `RSTRING_GETMEM`'s output pointer, and a
-definition at namespace or `extern "C"` scope. Each pins the FUNNEL COUNTERS and not only
-the hit count -- an untracked pointer and an empty index both end in `hit 0`, and they are
-different failures. Run it before trusting any result: silence is a property of the query
-until the counts say otherwise.
+controls, twelve pinned-residue trees, a per-rule mutation table, and generated reds rather
+than a green-only suite. Seven of the reds are SYNTHETIC TREES WRITTEN BY THE TEST, because
+the corpus is neutral on those shapes and a corpus-neutral fix is exactly the one a green
+suite cannot tell from no fix at all: `RSTRING_GETMEM`'s output pointer; a definition at
+namespace or `extern "C"` scope; a definition carrying a trailing `__attribute__((...))` or
+`noexcept`; a read through a second pointer local; a rebound guard variable; a store into a
+file-scope scalar; and a trailing write to the source mistaken for a use of it. Each pins
+the FUNNEL COUNTERS and not only the hit count -- an untracked pointer and an empty index
+both end in `hit 0`, and they are different failures. The three that narrow a DISCHARGE ship
+with a green as well: a rule that stops clearing has to be shown still clearing the case it
+was written for, or the fix is indistinguishable from a deletion. Run it before trusting any
+result: silence is a property of the query until the counts say otherwise, and a missing
+fixture is a FAIL rather than a quietly smaller suite.
 """
 import argparse
 import bisect
@@ -248,6 +258,69 @@ def match_brace(src, open_idx):
             if depth == 0:
                 return i
     return -1
+
+
+def match_paren(src, open_idx):
+    """Index of the `)` matching the `(` at open_idx, or -1."""
+    depth = 0
+    for i in range(open_idx, len(src)):
+        if src[i] == "(":
+            depth += 1
+        elif src[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+# POST-DECLARATOR ATTRIBUTES AND SPECIFIERS. A definition may put tokens between the
+# parameter list's `)` and the body's `{`, and both C and C++ have them:
+#
+#     static VALUE bad(VALUE str) __attribute__((noinline)) { ... }   /* C   */
+#     static VALUE bad(VALUE str) noexcept { ... }                    /* C++ */
+#
+# _index_funcs used to skip WHITESPACE ONLY and then require `{`, so it never reached the
+# brace and dropped the whole function -- derivations, windows and escapes with it. A tree
+# whose extension is written that way reported `0 fn(s) | derive 0/0 -> hit 0`: the empty
+# index again, the shape of zero this file's ZERO MUST BE READABLE section exists to make
+# impossible, and the same failure the namespace port fixed from the other direction.
+#
+# CLOSED LIST, DELIBERATELY. Anything unrecognised stops the walk and the definition is
+# skipped exactly as before, which is the recall-losing direction but the only one that
+# cannot invent a function body out of a K&R parameter declaration (`f(str) VALUE str; {`)
+# or a macro followed by a block. Adding a spelling here is a one-line change with a
+# fixture; guessing at arbitrary tokens is not.
+POST_DECL_WORD = {"noexcept", "const", "volatile", "override", "final", "_Noreturn",
+                  "__restrict", "__restrict__", "__cdecl", "__stdcall"}
+POST_DECL_PAREN = {"__attribute__", "__asm__", "asm", "__declspec", "throw", "noexcept",
+                   "alignas", "_Alignas"}
+
+
+def skip_post_declarator(src, k):
+    """Advance past supported attributes/specifiers sitting between `)` and `{`."""
+    n = len(src)
+    while True:
+        while k < n and src[k] in " \t\r\n":
+            k += 1
+        m = re.compile(r"[A-Za-z_]\w*").match(src, k)
+        if not m:
+            return k
+        word, j = m.group(), m.end()
+        if word not in POST_DECL_WORD and word not in POST_DECL_PAREN:
+            return k
+        t = j
+        while t < n and src[t] in " \t\r\n":
+            t += 1
+        if word in POST_DECL_PAREN and t < n and src[t] == "(":
+            close = match_paren(src, t)
+            if close < 0:
+                return k
+            k = close + 1
+            continue
+        if word in POST_DECL_WORD:      # a bare specifier: `noexcept`, `const`, ...
+            k = j
+            continue
+        return k
 
 
 # C++ SCOPE HEADS, and the walk that treats them as transparent. Ported from
@@ -513,6 +586,76 @@ def base_name(expr):
     return m.group(1) if m else ""
 
 
+def writes(body, name):
+    """Offsets of every plain assignment `name = ...` -- the WRITES, not the reads.
+
+    ONE ROOT CAUSE, TWO SYMPTOMS. Both of the discharge defects found in review were the
+    same mistake: a rule took a bare token occurrence as evidence that the variable held
+    the object, without asking what the occurrence DID.
+
+      `guarded`         `guard = str; guard = other; ... RB_GC_GUARD(guard)` -- the write
+                        rebound the name, so the guard names a different object.
+      `last-use-after`  `p = RSTRING_PTR(str); rb_funcall(...); consume(p); str = other;`
+                        -- the trailing `str =` was counted as the source's last use, but an
+                        assignment's left-hand side neither reads the old VALUE nor keeps it
+                        anywhere the GC scans. The frame is free to drop it at `consume`.
+
+    Both discharge, so both LOSE FINDINGS rather than adding noise. liveness() calls this
+    once and uses the answer for both.
+
+    A COMPOUND assignment is a read: `x += y` loads `x` first, so `\\s*=` deliberately does
+    not match `+=`. `&x` is a read too, and a load-bearing one -- taking the address forces
+    a stack slot, which is the second pin this skill measured on `StringValueCStr` -- and it
+    cannot be the left-hand side of an assignment, so it is never matched here.
+    """
+    return [m.start() for m in
+            re.finditer(r"(?<![=!<>+\-*/%%&|^])\b%s\s*=(?!=)" % re.escape(name), body)]
+
+
+# PERSISTENT-STORAGE SINKS. Ported from sweep_escaped_conversion.py's file_scope_objects,
+# and the ports are not redundant: B keys on a by-value `VALUE` PARAMETER being converted in
+# place and asks where the result goes, so it can only see this sink when a conversion
+# happened. D keys on the DERIVATION and sees it whether or not anything was converted --
+# `static const char *saved; ... saved = RSTRING_PTR(str);` in a function that converts
+# nothing is outside B's walk by construction, exactly as cgi's converted local is.
+#
+# `typedef`/`using`/`template`/`namespace` declare no slot of their own. `extern VALUE x;` is
+# NOT skipped: it names a persistent slot defined elsewhere, which is the sink we want.
+DECL_NOT_OBJECT = re.compile(r"^(?:typedef|using|template|namespace)\b")
+# A function-local `static` has the same storage duration as a file-scope one and the same
+# consequence for an interior pointer, so it is collected too -- by declaration, in the body.
+LOCAL_STATIC_RE = re.compile(r"\bstatic\b[^;{}()]*?\*\s*([A-Za-z_]\w*)\s*(?==|;|\[)")
+
+
+def file_scope_objects(src):
+    """Names declared at file or namespace scope -- file statics and globals.
+
+    A slot at this scope outlives every frame in the file, so an interior pointer stored
+    into one escapes the deriving frame exactly as a return value does. The sink is
+    recognised POSITIVELY, by name: the inverted form ("any store to something not provably
+    frame-local") would read `char *p = RSTRING_PTR(str);` as an escape, and that is the
+    single commonest local declaration in the corpus.
+    """
+    names = set()
+    for _off, unit in top_level_units(src):
+        u = unit.strip()
+        if not u.endswith(";"):
+            continue                    # a function body or a class body, not a slot
+        u = u[:-1].strip()
+        if not u or DECL_NOT_OBJECT.match(u):
+            continue
+        for d in split_args(u):
+            d = d.split("=")[0]
+            # a prototype declares no object; a function POINTER does, and is spelled
+            # `(*fp)(...)`, so only the un-parenthesised declarator is dropped
+            if "(" in d and not re.search(r"\(\s*\*", d):
+                continue
+            nm = param_name(d)
+            if nm:
+                names.add(nm)
+    return names
+
+
 class Func:
     __slots__ = ("name", "path", "src", "params", "hdr", "bstart", "bend")
 
@@ -566,9 +709,11 @@ class Tree:
         self.funcs = []
         self.by_name = {}
         self.cfuncs = set()
+        self.statics = {}               # path -> names at file/namespace scope
         for path, src in self.files.items():
             self._index_funcs(path, src)
             self._index_cfuncs(src)
+            self.statics[path] = file_scope_objects(src)
         for f in self.funcs:
             self.by_name.setdefault(f.name, []).append(f)
         self.ranges = {}
@@ -612,9 +757,7 @@ class Tree:
             args, past = call_args(src, m.end())
             if args is None:
                 continue
-            k = past
-            while k < len(src) and src[k] in " \t\r\n":
-                k += 1
+            k = skip_post_declarator(src, past)
             if k >= len(src) or src[k] != "{":
                 continue
             close = match_brace(src, k)
@@ -788,6 +931,82 @@ def pointer_alias(fn, deriv_off, macro):
     return None
 
 
+def _pointer_typed(fn, lhs, upto):
+    """Was `lhs` declared a pointer at or before `upto`? Same test pointer_alias uses."""
+    stmt = statement_before(fn.body, upto)
+    return "*" in stmt or bool(re.search(r"\*\s*%s\b" % re.escape(lhs), fn.body[:upto]))
+
+
+def _local_copies(fn, rel):
+    """[(off, lhs, rhs)] for every `lhs = rhs;` after `rel` whose rhs is one bare name.
+
+    Casts and redundant parentheses are stripped from the right-hand side for the same
+    reason pointer_alias strips them from the left: `q = (const char *)p;` is the same
+    copy as `q = p;` and matching only the bare spelling loses it.
+    """
+    body, out = fn.body, []
+    for m in re.finditer(r"(?<![=!<>+\-*/%&|^])=(?!=)", body):
+        if m.start() < rel:
+            continue
+        stmt = statement_before(body, m.start())
+        d = re.search(r"(?:^|[\s*(])([A-Za-z_]\w*)\s*$", stmt)
+        semi = body.find(";", m.end())
+        if not d or semi < 0:
+            continue
+        rhs = body[m.end():semi].strip()
+        while True:
+            stripped = re.sub(r"^\(\s*[A-Za-z_][\w\s*]*\)\s*", "", rhs).strip()
+            if stripped == rhs:
+                break
+            rhs = stripped
+        if re.fullmatch(r"[A-Za-z_]\w*", rhs) and _pointer_typed(fn, d.group(1), m.start()):
+            out.append((m.start(), d.group(1), rhs))
+    return out
+
+
+def alias_names(fn, deriv_off, alias):
+    """Every local that carries the derived pointer, following local-to-local copies.
+
+        p = RSTRING_PTR(str);
+        q = p;                    /* q IS the interior pointer */
+        rb_funcall(...);          /* the window */
+        return q;                 /* the escape */
+
+    Tracking only `p` reads `q = p` as `p`'s final use, so the window scan stops before the
+    `rb_funcall` and the row discharges `no-window` -- a clean sheet on a live derivation,
+    which is the failure mode this predicate is most biased against. Pointer identity
+    therefore propagates through plain copies, transitively and in offset order: a copy only
+    extends the set if it runs AFTER the name it copies became an alias, so `r = q; ...;
+    q = p;` does not make `r` an alias of the buffer.
+
+    The right-hand side must be exactly one name and the left-hand side must be
+    pointer-typed, for the reason pointer_alias states: without the type check
+    `c = RSTRING_PTR(s)[i]` makes an `int` look like the buffer. Anything with arithmetic in
+    it -- `q = p + n`, and above all `off = e - p`, which is an offset and not a pointer --
+    is not a copy and does not extend the set.
+    """
+    if not alias:
+        return []
+    rel = deriv_off - fn.bstart
+    copies = _local_copies(fn, rel)
+    seen = {alias: rel}
+    frontier = [(alias, rel)]
+    while frontier:
+        cur, since = frontier.pop()
+        for off, lhs, rhs in copies:
+            if rhs == cur and off > since and lhs not in seen:
+                seen[lhs] = off
+                frontier.append((lhs, off))
+    return sorted(seen, key=lambda n: seen[n])
+
+
+def _names_re(names):
+    """A word-boundary alternation over an alias set, or None when the set is empty."""
+    if not names:
+        return None
+    return re.compile(r"\b(?:%s)\b" % "|".join(re.escape(n) for n in names))
+
+
 def consumer(fn, deriv_off, macro):
     """(name, args, start) of the innermost call that immediately receives the pointer.
 
@@ -822,11 +1041,18 @@ def carrier_sites(fn, deriv_off, alias):
     return sorted(set(sites))
 
 
-def escapes(fn, deriv_off, expr, alias, cons, tree=None):
-    """[(kind, off, text, extra)] -- ways the pointer outlives or leaves this frame."""
+def escapes(fn, deriv_off, expr, names, cons, tree=None):
+    """[(kind, off, text, extra)] -- ways the pointer outlives or leaves this frame.
+
+    `names` is the whole alias set from alias_names(), not one name: `q = p; return q;`
+    escapes through `q`, and a scan that knows only `p` sees no escape at all.
+    """
     body, found = fn.body, []
     rel = deriv_off - fn.bstart
     ptrp = fn.ptr_params()
+    alias_re = _names_re(names)
+    statics = set(tree.statics.get(fn.path, ()) if tree is not None else ())
+    statics.update(LOCAL_STATIC_RE.findall(body))
 
     def carries(text):
         # Pointer DIFFERENCE is an offset, not a pointer. stringio's
@@ -835,7 +1061,7 @@ def escapes(fn, deriv_off, expr, alias, cons, tree=None):
         stripped = text.replace("->", "")
         if "-" in stripped:
             return False
-        if alias and re.search(r"\b%s\b" % re.escape(alias), text):
+        if alias_re and alias_re.search(text):
             return True
         return any(nm in INTERIOR for nm, _a, _s, _e in find_calls(text))
 
@@ -868,8 +1094,21 @@ def escapes(fn, deriv_off, expr, alias, cons, tree=None):
         rhs = body[m.end():semi]
         if not carries(rhs):
             continue
-        if b.group(1) == alias:
-            continue                      # the aliasing assignment itself
+        if not b.group(2) and b.group(1) in statics:
+            # A BARE SCALAR AT STATIC-STORAGE SCOPE IS A SINK, AND IT HAD NO BRANCH.
+            # `saved = RSTRING_PTR(str);` where `saved` is a file static or a global has no
+            # pointer-parameter base and no `->`/`[`/`.`, so the STORES-INTERIOR test and the
+            # ESCAPES-INTO-CONTAINER test both declined it and the row went on to discharge
+            # `no-window`: one derivation, zero windowed sites, zero hits, on a pointer any
+            # later call can read. The slot outlives every frame in the file, so the store is
+            # an escape for the same reason a return is. Checked BEFORE the alias skip below,
+            # because a function-local `static char *saved` is pointer-typed and therefore
+            # also reads as an alias -- and being an alias must not excuse being a sink.
+            found.append(("ESCAPES-INTO-STATIC", fn.bstart + m.start(),
+                          (stmt + " =" + rhs).strip(), "static-storage lifetime"))
+            continue
+        if b.group(1) in names:
+            continue                      # an aliasing assignment, not an escape
         if b.group(1) in ptrp and (stmt.startswith("*") or b.group(2) in ("->", "[")):
             found.append(("STORES-INTERIOR", fn.bstart + m.start(),
                           (stmt + " =" + rhs).strip(), ""))
@@ -891,7 +1130,7 @@ def escapes(fn, deriv_off, expr, alias, cons, tree=None):
         if name not in NONCOPYING:
             return None
         joined = " ".join(args)
-        if (alias and re.search(r"\b%s\b" % re.escape(alias), joined)) or \
+        if (alias_re and alias_re.search(joined)) or \
                 any(d + "(" in re.sub(r"\s+", "", joined) for d in INTERIOR):
             return ("ESCAPES-INTO-LIBRARY", fn.bstart + s,
                     re.sub(r"\s+", " ", "%s(%s)" % (name, joined))[:110],
@@ -912,7 +1151,7 @@ def escapes(fn, deriv_off, expr, alias, cons, tree=None):
             # Which argument slot carries the pointer.
             idx = next((i for i, a in enumerate(cons[1])
                         if any(d + "(" in re.sub(r"\s+", "", a) for d in INTERIOR)
-                        or (alias and re.search(r"\b%s\b" % re.escape(alias), a))), None)
+                        or (alias_re and alias_re.search(a))), None)
             for callee in tree.by_name[cons[0]]:
                 if callee is fn or idx is None or idx >= len(callee.params):
                     continue
@@ -940,7 +1179,7 @@ def escapes(fn, deriv_off, expr, alias, cons, tree=None):
                                      callee.path.name,
                                      line_of(callee.src, callee.bstart + w[0][2]))))
                     break
-    if alias:
+    if names:
         for nm, a, s, _e in find_calls(body):
             if s <= rel:
                 continue
@@ -1026,9 +1265,17 @@ CARRIER_DEPTH = 4
 
 
 def _carrier_re(base, field):
+    """`base` is one name or a tuple of them -- the whole alias set at the top frame.
+
+    The DOMINANCE test in copied_in_callee() is what needs the set. `p = RSTRING_PTR(s);
+    q = p; memcpy(d, p, n); rb_funcall(...); use(q);` has a copy that dominates `p` and does
+    NOT dominate the pointer, so a regex over `p` alone discharges a live row.
+    """
+    names = (base,) if isinstance(base, str) else tuple(base)
+    alt = "|".join(re.escape(n) for n in names)
     if field:
-        return re.compile(r"\b%s\b\s*(?:->|\.)\s*%s\b" % (re.escape(base), re.escape(field)))
-    return re.compile(r"\b%s\b" % re.escape(base))
+        return re.compile(r"\b(?:%s)\b\s*(?:->|\.)\s*%s\b" % (alt, re.escape(field)))
+    return re.compile(r"\b(?:%s)\b" % alt)
 
 
 def _map_carrier(args, base, field, callee):
@@ -1133,7 +1380,7 @@ def copied_in_callee(fn, start_off, base, field, tree, depth=0, seen=None):
 CONTAINER_LVALUE_RE = re.compile(r"^\*?\s*([A-Za-z_]\w*)\s*(?:->|\.|\[)\s*([A-Za-z_]\w*)?")
 
 
-def carrier_copy_chain(fn, deriv_end, alias, esc, tree):
+def carrier_copy_chain(fn, deriv_end, names, esc, tree):
     """Name what holds the pointer after the derive statement, then look for the copy.
 
     Two carriers, and nothing else is allowed to reach the descent:
@@ -1161,27 +1408,32 @@ def carrier_copy_chain(fn, deriv_end, alias, esc, tree):
             elif m.group(1) != base:
                 return None          # the pointer went into two different containers
         field = CONTAINER_LVALUE_RE.match(esc[0][2]).group(2)
-    elif alias:
-        base, field = alias, None
+    elif names:
+        base, field = tuple(names), None
     else:
         return None
     return copied_in_callee(fn, deriv_end, base, field, tree)
 
 
-def last_use(fn, deriv_off, alias):
+def last_use(fn, deriv_off, names):
     """Offset of the last use of the derived pointer in this frame, or None.
 
-    Only the ALIAS is tracked. A bare `foo(RSTRING_PTR(s))` has no name for the pointer,
-    so it cannot be used a second time: its only use is the consumer, in the same
+    Only NAMED carriers are tracked. A bare `foo(RSTRING_PTR(s))` has no name for the
+    pointer, so it cannot be used a second time: its only use is the consumer, in the same
     statement, with no room for a window. That is the difference between the two shapes
     and it is why this returns None rather than scanning forward.
+
+    The whole alias set counts, not just the first name. `q = p;` is a use of `p` AND the
+    birth of another carrier, so stopping at it puts the last use before the window and
+    discharges `no-window` on a pointer that is still live -- see alias_names().
     """
-    if not alias:
+    rx = _names_re(names)
+    if rx is None:
         return None
     body = fn.body
     rel = deriv_off - fn.bstart
     last = None
-    for m in re.finditer(r"\b%s\b" % re.escape(alias), body):
+    for m in rx.finditer(body):
         if m.start() > rel:
             last = fn.bstart + m.start()
     return last
@@ -1215,13 +1467,26 @@ def liveness(fn, deriv_off, expr, tree, last_use_off=None):
     # DERIVATION. `p = RSTRING_PTR(val); val = other; guard = val; ... RB_GC_GUARD(guard)`
     # guards `other` and leaves the String behind `p` movable -- so the copy is rejected
     # when `var` is reassigned anywhere between the copy and the derive, in either order.
-    reassigned = [m.start() for m in
-                  re.finditer(r"\b%s\s*=(?!=)" % re.escape(var), body)]
-    guardable = {var}
+    # A GUARD VARIABLE THAT IS OVERWRITTEN GUARDS THE WRONG OBJECT -- and this rule DISCHARGES,
+    # so getting it wrong loses a real finding rather than adding a row to triage:
+    #
+    #     guard = str;  p = RSTRING_PTR(str);  guard = other;  ...  RB_GC_GUARD(guard);
+    #
+    # The check used to look only at reassignments of the SOURCE, so `guard` stayed in the
+    # set, the row discharged `guarded`, and a String whose bytes nothing roots read as
+    # protected. `RB_GC_GUARD(x)` establishes liveness for whatever `x` HOLDS AT THE GUARD,
+    # so a name only stands in for the source while it still carries the object that was
+    # live at the derivation. `guardable` therefore records, per name, the offset from which
+    # it provably does -- and the scan below rejects the guard if the name is rebound after
+    # that. `var` itself is in the table under the same rule with the derivation as its
+    # offset, which closes the sibling hole `str = other; RB_GC_GUARD(str);`.
+    reassigned = writes(body, var)
+    guardable = {var: rel}
     for m in re.finditer(r"\b([A-Za-z_]\w*)\s*=(?!=)\s*%s\s*;" % re.escape(var), body):
         lo, hi = min(m.start(), rel), max(m.start(), rel)
         if not any(lo < r < hi for r in reassigned):
-            guardable.add(m.group(1))
+            nm = m.group(1)
+            guardable[nm] = max(guardable.get(nm, -1), m.start())
 
     # THE GUARD HAS TO OUTLIVE THE POINTER, NOT THE DERIVATION. RB_GC_GUARD establishes
     # liveness only up to its own position, so a guard placed after the derive but BEFORE
@@ -1232,10 +1497,14 @@ def liveness(fn, deriv_off, expr, tree, last_use_off=None):
     # offset is the last use.
     floor = rel if last_use_off is None else max(rel, last_use_off - fn.bstart)
     for m in re.finditer(r"\bRB_GC_GUARD\s*\(\s*([A-Za-z_]\w*)\s*\)", body):
-        if m.group(1) in guardable and m.start() >= floor:
-            return "GUARDED", ("RB_GC_GUARD(%s) at or after the last use" % m.group(1)
-                               + ("" if m.group(1) == var
-                                  else " (a copy of %s)" % var))
+        nm = m.group(1)
+        since = guardable.get(nm)
+        if since is None or m.start() < floor:
+            continue
+        if any(since < a < m.start() for a in writes(body, nm)):
+            continue          # rebound between here and there: it guards a different object
+        return "GUARDED", ("RB_GC_GUARD(%s) at or after the last use" % nm
+                           + ("" if nm == var else " (a copy of %s)" % var))
 
     # struct field on the stack: `w->path` where w is a local struct, not a pointer param
     if "->" in expr or "." in expr:
@@ -1280,12 +1549,23 @@ def liveness(fn, deriv_off, expr, tree, last_use_off=None):
                                 % replaced)
         return "ARGV-PINNED", "argv[] pins the un-coerced original and no coercion ran"
 
-    # last syntactic use of the VALUE at or after the last deref
+    # Last syntactic READ of the VALUE at or after the last deref.
+    #
+    # A WRITE IS NOT A USE. `p = RSTRING_PTR(str); rb_funcall(...); consume(p); str = other;`
+    # was discharged `last-use-after` on the strength of that trailing `str =`, but assigning
+    # to `str` neither reads the old VALUE nor leaves it anywhere conservative scanning can
+    # find it -- the frame is entitled to drop it at `consume`, and the String can move
+    # during the `rb_funcall`. This rule is already the most recall-biased thing in the file
+    # (see the docstring: the compiler may drop the VALUE before its last syntactic use even
+    # when that use is a genuine read), so accepting a write as well made it clear rows on no
+    # evidence at all. Same root cause as the guard-alias defect above; see writes().
     ld = last_use_off
     if ld is not None:
-        uses = [m.start() for m in re.finditer(r"\b%s\b" % re.escape(var), body)]
+        skip = set(writes(body, var))
+        uses = [m.start() for m in re.finditer(r"\b%s\b" % re.escape(var), body)
+                if m.start() not in skip]
         if uses and fn.bstart + max(uses) >= ld:
-            return "LAST-USE-AFTER", "%s is used again at or after the last deref" % var
+            return "LAST-USE-AFTER", "%s is read again at or after the last deref" % var
     return "UNROOTED", "nothing roots %s across the window" % var
 
 
@@ -1386,9 +1666,10 @@ def sweep(tree, name, disabled=(), discharge=True):
         for off, macro, expr, var in derivations(fn):
             r.derivations.append((fn, off, macro, expr))
             alias = pointer_alias(fn, off, macro)
+            names = alias_names(fn, off, alias)
             cons = consumer(fn, off, macro)
-            esc = escapes(fn, off, expr, alias, cons, tree)
-            lu = last_use(fn, off, alias)
+            esc = escapes(fn, off, expr, names, cons, tree)
+            lu = last_use(fn, off, names)
             dend = derive_extent(fn, off, macro)
 
             # AN ALLOCATING COPIER IS A WINDOW, NOT A DISCHARGE.
@@ -1413,7 +1694,7 @@ def sweep(tree, name, disabled=(), discharge=True):
             # the copy has to DOMINATE, so a copy that runs after an allocation does not
             # discharge, which is why this refuses to clear trilogy.
             if "copies-in-callee" not in off_rule:
-                chain = carrier_copy_chain(fn, dend, alias, esc, tree)
+                chain = carrier_copy_chain(fn, dend, names, esc, tree)
                 if chain:
                     r.discharges.append(("copies-in-callee", rel, line_of(fn.src, off),
                                          "%s(%s) in %s -- copied by %s, with no window "
@@ -1675,9 +1956,47 @@ NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-"]
 #                  blind spot -- no CFG, so a window on a branch the deref cannot reach
 #                  still counts -- and it is noise under a limit that is written down
 #                  rather than a new one.
-TRIAGED = {"mysql2-0.5.6": 11, "zlib-basecamp-patch-": 20, "iconv-": 14, "zstd-": 6,
+#
+# ROUND 9, SECOND REVIEW PASS: +18 rows over the 99-tree corpus (436 -> 454), 0 removed,
+# 1 column change. Every added row triaged, by cause:
+#
+#   mysql2 11 -> 14   `_mysql_client_options` (client.c:985/990/995 on 0.5.6, and the same
+#   in all 5 trees      three cases in the other four mysql2 trees). Alias propagation
+#                       follows `charval = StringValueCStr(value); retval = charval;` to the
+#                       `mysql_options(wrapper->client, opt, retval)` at the bottom of the
+#                       function -- and the only windows in between are the sibling
+#                       `StringValueCStr(value)` calls in the OTHER arms of the same switch.
+#                       Mutually exclusive branches: this file's stated ORDERING blind spot,
+#                       the same disposition as puma's row, and NOISE. It is also safe for a
+#                       second, independent reason -- `StringValueCStr(x)` expands to
+#                       `rb_string_value_cstr(&x)`, and taking the address forces `value` a
+#                       conservatively scanned stack slot (the round-8 measurement). Pinned
+#                       here so it cannot grow, not accepted as a finding.
+#   date 16 -> 17     date_parse.c:229, `s = RSTRING_PTR(d); ... bp = s; ... ALLOCV_N(...);
+#                       memcpy(buf, bp, ...)`. The last of SIX identical blocks in `s3e`; the
+#                       other five were already hits and this one was invisible only because
+#                       `bp = s` was `s`'s final textual mention. A recall recovery, and the
+#                       five accepted siblings are the argument that it is the same row.
+#   unicorn 5 -> 6    httpdate.c:75, `static char *buf_ptr; ... buf_ptr = RSTRING_PTR(buf);`
+#   (4.9.0 and 6.1.0)   at Init time, written through by every later `httpdate` call. The
+#                       predicate's shape exactly, found by the new static-storage sink.
+#                       Cleared in TRIAGE by `rb_gc_register_mark_object(buf)` on the line
+#                       above, which pins: fourth corpus witness for the deferred
+#                       pinning-mark discharge, and the first that pins by registration
+#                       rather than by a dmark. Predicate B reports 0 hits on both trees --
+#                       `init_unicorn_httpdate(void)` converts no by-value parameter, so the
+#                       row has exactly one home and this is it.
+#   prism             api_pack.c:197 keeps its row and gains RAISE beside RUBY-ALLOC in the
+#                       window column: the alias set moved the last use later. A column
+#                       change on an existing row, not a new row.
+#
+# `last-use-after` refusing a WRITE as evidence (thread 5) moved ZERO corpus rows. All 13 of
+# its clears are genuine reads at or after the last deref. Recorded as corpus-neutral rather
+# than left to look like coverage -- the generated red is the only thing testing it.
+TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 20, "iconv-": 14, "zstd-": 6,
            "sqlite3-2.9.5": 3, "websocket-driver-": 2, "stringio-": 1,
-           "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 2, "puma-": 6}
+           "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 2, "puma-": 6,
+           "unicorn-6.1.0": 6}
 
 
 def self_test(pool):
@@ -1800,6 +2119,18 @@ def self_test(pool):
             grew.append("%s %d != %d" % (prefix, n, expected))
     check(not grew, "the triaged residue is unchanged: "
           + ", ".join("%s %d" % (k, v) for k, v in sorted(TRIAGED.items())), grew)
+
+    # 5d. EVERY NAMED FIXTURE HAS TO RESOLVE. The negative controls, the triaged pins and the
+    #     paired red/green trees are all reached through `if d is None: continue`, so a pool
+    #     missing one of them ran a SMALLER suite and still printed PASS. The 12 positives
+    #     were already asserted present and the rmagick probe already aborts; these were the
+    #     silent half. A missing fixture is now a FAIL, as it is in predicate A.
+    PAIRED = ["bootsnap-1.23.0", "trilogy-bc", "trilogy-green", "trilogy-2.12.6",
+              "cgi-", "okra-", "mysql2-0.5.6", "racc-"]
+    absent_fx = [p for p in list(NEGATIVES) + list(TRIAGED) + PAIRED
+                 if _find(pool, p) is None]
+    check(not absent_fx, "every named fixture resolved (%d negative, %d triaged, %d paired)"
+          % (len(NEGATIVES), len(TRIAGED), len(PAIRED)), absent_fx)
 
     # 5c. mysql2's rows are the round-7 finding, not noise, and the assertion says which
     #     ones: the five connect-args stores that sit across rb_thread_call_without_gvl
@@ -1986,6 +2317,226 @@ def self_test(pool):
           % (nsw.funcs, len(nsw.derivations), len(nsw.hits),
              nsf.funcs, len(nsf.derivations), len(nsf.hits)))
 
+    # 8f/8g. GENERATED RED: A TRAILING ATTRIBUTE IS NOT THE END OF THE DEFINITION.
+    #
+    #    `bad(VALUE str) __attribute__((noinline)) { ... }` is valid C and C++ may write
+    #    `noexcept` in the same place. The walk skipped whitespace only, never reached the
+    #    `{`, and dropped the whole function -- `0 fn(s) | derive 0/0 -> hit 0`, the empty
+    #    index again. So the counters are the assertion; the hit count is the corollary.
+    #    The attribute is the FLAG: the same source with and without it must give the same
+    #    funnel and the same row, which is the claim skip_post_declarator() makes.
+    def _attr_tree(kind):
+        tail = {"attr": " __attribute__((noinline))", "noexcept": " noexcept",
+                "flat": ""}[kind]
+        return _synth("fx-attr-%s" % kind, {"ext/probe.cpp":
+            "#include <ruby.h>\n\n"
+            "static VALUE\n"
+            "held_across_window(VALUE self, VALUE str)" + tail + "\n"
+            "{\n"
+            "    const char *p = RSTRING_PTR(str);\n"
+            "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+            "    return rb_str_new(p, RSTRING_LEN(str));\n"
+            "}\n\n"
+            "void Init_probe(void)\n"
+            "{\n"
+            "    rb_define_method(rb_cObject, \"held\", held_across_window, 1);\n"
+            "}\n"})
+    aa, an, af = (_sweep(_attr_tree(k)) for k in ("attr", "noexcept", "flat"))
+    check(aa.funcs == 2 and len(aa.derivations) == 1 and len(aa.hits) == 1
+          and aa.hits[0][0] == "ESCAPES-BY-RETURN",
+          "trailing-attribute red: a definition carrying `__attribute__((...))` between the "
+          "parameter list and the body is indexed -- the unfixed walk reports 0 fn(s), "
+          "0 derivations, a clean sheet on an empty index",
+          "funcs %d, derive %d, hits %s" % (aa.funcs, len(aa.derivations),
+                                            [(h[0], h[2]) for h in aa.hits]))
+    check(all((s.funcs, len(s.derivations), len(s.with_window),
+               [(h[0], h[1]) for h in s.hits])
+              == (af.funcs, len(af.derivations), len(af.with_window),
+                  [(h[0], h[1]) for h in af.hits]) for s in (aa, an)),
+          "post-declarator transparency: `__attribute__((noinline))` and C++ `noexcept` give "
+          "the same funnel and the same row as the bare declarator",
+          "attr %d/%d/%d, noexcept %d/%d/%d, flat %d/%d/%d"
+          % (aa.funcs, len(aa.derivations), len(aa.hits),
+             an.funcs, len(an.derivations), len(an.hits),
+             af.funcs, len(af.derivations), len(af.hits)))
+
+    # 8h/8i. GENERATED RED: POINTER IDENTITY SURVIVES A LOCAL-TO-LOCAL COPY.
+    #
+    #    `p = RSTRING_PTR(str); q = p; <window>; read q;` -- tracking only `p` reads `q = p`
+    #    as `p`'s final use, so the window scan stops short of the window and the row
+    #    discharges `no-window`. A clean sheet on a live derivation, which is the direction
+    #    this predicate is most biased against. THE WINDOW IS THE FLAG, not the copy: the
+    #    control keeps the copy and the read through it and drops only the `rb_funcall`, so
+    #    the check measures window participation and cannot pass on the copy alone.
+    alias_c = ("#include <ruby.h>\n\n"
+               "static VALUE\n"
+               "second_hand(VALUE self, VALUE str)\n"
+               "{\n"
+               "    const char *p = RSTRING_PTR(str);\n"
+               "    const char *q = p;\n"
+               "    int n;\n"
+               "%s"
+               "    n = q[0];\n"
+               "    return INT2FIX(n);\n"
+               "}\n\n"
+               "void Init_probe(void)\n"
+               "{\n"
+               "    rb_define_method(rb_cObject, \"sh\", second_hand, 1);\n"
+               "}\n")
+    ared = _sweep(_synth("fx-alias-red", {"ext/probe.c": alias_c % window_line}))
+    actl = _sweep(_synth("fx-alias-control", {"ext/probe.c": alias_c % ""}))
+    check(ared.funcs == 2 and len(ared.derivations) == 1 and len(ared.with_window) == 1
+          and len(ared.hits) == 1 and ared.hits[0][0] == "HELD-ACROSS-WINDOW",
+          "alias-chain red: a read through a SECOND pointer local is still a read of the "
+          "buffer, so the window between the copy and it counts",
+          "funcs %d, derive %d, win %d, hits %s"
+          % (ared.funcs, len(ared.derivations), len(ared.with_window),
+             [(h[0], h[2]) for h in ared.hits]))
+    check(actl.funcs == 2 and len(actl.derivations) == 1 and len(actl.with_window) == 0
+          and not actl.hits and any(d[0] == "no-window" for d in actl.discharges),
+          "alias-chain control: with the window flag off the same copy-and-read discharges "
+          "no-window -- the row is produced by the window, not by the alias set",
+          "funcs %d, derive %d, win %d, hits %s, discharges %s"
+          % (actl.funcs, len(actl.derivations), len(actl.with_window),
+             [(h[0], h[2]) for h in actl.hits], [d[0] for d in actl.discharges]))
+
+    # 8j/8k. GENERATED RED AND GREEN: A REBOUND GUARD VARIABLE GUARDS THE WRONG OBJECT.
+    #
+    #    `guarded` DISCHARGES, so this is the direction that loses findings rather than the
+    #    one that adds noise, and a rule that stops clearing needs the green as much as the
+    #    red: a genuine RB_GC_GUARD must still discharge, or the fix is just a deletion.
+    #    Two rebind shapes, because they were one defect with two spellings -- the guard COPY
+    #    overwritten, and the SOURCE itself rebound under a guard on its own name.
+    guard_c = ("#include <ruby.h>\n\n"
+               "static VALUE\n"
+               "guarded_probe(VALUE self, VALUE str, VALUE other)\n"
+               "{\n"
+               "    VALUE %s = str;\n"
+               "    VALUE out;\n"
+               "    const char *p = RSTRING_PTR(str);\n"
+               "%s"
+               "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+               "    out = rb_str_new(p, 4);\n"
+               "    RB_GC_GUARD(%s);\n"
+               "    return out;\n"
+               "}\n\n"
+               "void Init_probe(void)\n"
+               "{\n"
+               "    rb_define_method(rb_cObject, \"g\", guarded_probe, 2);\n"
+               "}\n")
+    # (guard-variable name, what gets rebound, the name RB_GC_GUARD is given)
+    guard_arms = [("copy-red", "guard", "    guard = other;\n", "guard"),
+                  ("copy-green", "guard", "", "guard"),
+                  ("src-red", "spare", "    str = other;\n", "str"),
+                  ("src-green", "spare", "", "str")]
+    gv = {tag: _sweep(_synth("fx-guard-%s" % tag,
+                             {"ext/probe.c": guard_c % (nm, rebind, guarded)}))
+          for tag, nm, rebind, guarded in guard_arms}
+    reds = [gv["copy-red"], gv["src-red"]]
+    greens = [gv["copy-green"], gv["src-green"]]
+    check(all(len(s.hits) == 1 and not any(d[0] == "guarded" for d in s.discharges)
+              and len(s.derivations) == 1 for s in reds),
+          "guard-rebind red: `guard = str; guard = other; RB_GC_GUARD(guard)` and "
+          "`str = other; RB_GC_GUARD(str)` both STAND -- the guard names a different object "
+          "than the derive did",
+          [(len(s.hits), [d[0] for d in s.discharges]) for s in reds])
+    check(all(not s.hits and any(d[0] == "guarded" for d in s.discharges)
+              and len(s.derivations) == 1 for s in greens),
+          "guard-rebind green: with nothing rebound, a genuine RB_GC_GUARD after the last "
+          "read still discharges -- the rule was narrowed, not deleted",
+          [(len(s.hits), [d[0] for d in s.discharges]) for s in greens])
+
+    # 8l/8m. GENERATED RED: A BARE STORE INTO STATIC STORAGE IS AN ESCAPE.
+    #
+    #    `static const char *saved; saved = RSTRING_PTR(str);` has no pointer-parameter base
+    #    and no `->`/`[`/`.`, so both escape branches declined it and the row discharged
+    #    no-window: `derive 1/1 -> windowed 0/0 -> hit 0` on a pointer any later call reads.
+    #    THE SINK IS THE FLAG: the control stores the same derivation into a plain local, and
+    #    must still discharge -- otherwise the rule is "every assignment is an escape", which
+    #    would fire on the commonest local declaration in the corpus.
+    static_c = ("#include <ruby.h>\n\n"
+                "static const char *saved;\n\n"
+                "static VALUE\n"
+                "store(VALUE self, VALUE str)\n"
+                "{\n"
+                "    Check_Type(str, T_STRING);\n"
+                "%s\n"
+                "    return Qnil;\n"
+                "}\n\n"
+                "static VALUE\n"
+                "later(VALUE self)\n"
+                "{\n"
+                "    return rb_str_new_cstr(saved);\n"
+                "}\n\n"
+                "void Init_probe(void)\n"
+                "{\n"
+                "    rb_define_method(rb_cObject, \"store\", store, 1);\n"
+                "    rb_define_method(rb_cObject, \"later\", later, 0);\n"
+                "}\n")
+    sred = _sweep(_synth("fx-static-red",
+                         {"ext/probe.c": static_c % "    saved = RSTRING_PTR(str);"}))
+    sctl = _sweep(_synth("fx-static-control",
+                         {"ext/probe.c": static_c %
+                          "    const char *local = RSTRING_PTR(str);\n    (void)local;"}))
+    check(sred.funcs == 3 and len(sred.derivations) == 1 and len(sred.with_window) == 1
+          and len(sred.hits) == 1 and sred.hits[0][0] == "ESCAPES-INTO-STATIC",
+          "static-sink red: a derivation stored into a file-scope scalar escapes the frame "
+          "-- neither existing escape branch had a shape for it",
+          "funcs %d, derive %d, win %d, hits %s"
+          % (sred.funcs, len(sred.derivations), len(sred.with_window),
+             [(h[0], h[2]) for h in sred.hits]))
+    check(sctl.funcs == 3 and len(sctl.derivations) == 1 and not sctl.hits
+          and any(d[0] == "no-window" for d in sctl.discharges),
+          "static-sink control: the same derivation into a plain LOCAL still discharges -- "
+          "the sink is recognised by name, not by 'anything assigned to'",
+          "funcs %d, derive %d, hits %s, discharges %s"
+          % (sctl.funcs, len(sctl.derivations), [(h[0], h[2]) for h in sctl.hits],
+             [d[0] for d in sctl.discharges]))
+
+    # 8n/8o. GENERATED RED AND GREEN: A WRITE TO THE SOURCE IS NOT A USE OF IT.
+    #
+    #    `last-use-after` DISCHARGES and is the most recall-biased rule in the file, so a
+    #    trailing `str = other;` counted as the source's last use cleared a row on no
+    #    evidence at all. Corpus-neutral -- all 13 of the rule's clears are genuine reads --
+    #    which is exactly why the red has to be generated here. The green proves the rule
+    #    still fires on a real post-read READ; a non-cfunc helper, because in a cfunc entry
+    #    point the argv rule grades the row first and the discharge never runs.
+    write_c = ("#include <ruby.h>\n\n"
+               "static void\n"
+               "helper(VALUE str, VALUE other)\n"
+               "{\n"
+               "    const char *p = RSTRING_PTR(str);\n"
+               "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+               "    consume(p);\n"
+               "%s}\n\n"
+               "static VALUE\n"
+               "entry(VALUE self, VALUE a, VALUE b)\n"
+               "{\n"
+               "    helper(a, b);\n"
+               "    return Qnil;\n"
+               "}\n\n"
+               "void Init_probe(void)\n"
+               "{\n"
+               "    rb_define_method(rb_cObject, \"e\", entry, 2);\n"
+               "}\n")
+    wred = _sweep(_synth("fx-write-red", {"ext/probe.c": write_c % "    str = other;\n"}))
+    wgrn = _sweep(_synth("fx-write-green", {"ext/probe.c": write_c % "    keep(str);\n"}))
+    check(wred.funcs == 3 and len(wred.derivations) == 1 and len(wred.with_window) == 1
+          and len(wred.hits) == 1
+          and not any(d[0] == "last-use-after" for d in wred.discharges),
+          "write-not-use red: a trailing `str = other;` no longer discharges "
+          "last-use-after -- an assignment neither reads the old VALUE nor keeps it",
+          "funcs %d, derive %d, win %d, hits %s, discharges %s"
+          % (wred.funcs, len(wred.derivations), len(wred.with_window),
+             [(h[0], h[2]) for h in wred.hits], [d[0] for d in wred.discharges]))
+    check(wgrn.funcs == 3 and len(wgrn.derivations) == 1 and not wgrn.hits
+          and any(d[0] == "last-use-after" for d in wgrn.discharges),
+          "write-not-use green: a real post-read READ of the source still discharges "
+          "last-use-after -- the rule was narrowed to reads, not deleted",
+          "funcs %d, derive %d, hits %s, discharges %s"
+          % (wgrn.funcs, len(wgrn.derivations), [(h[0], h[2]) for h in wgrn.hits],
+             [d[0] for d in wgrn.discharges]))
+
     # 9. PER-RULE MUTATION TABLE. A discharge rule with no generated red is a rule nobody
     #    has tested; round 5 shipped four over-clears in predicate A that a green-only
     #    suite did not catch.
@@ -2077,8 +2628,9 @@ def main():
           "  with a window before the last read ........... %3d site(s) in %3d fn(s)\n"
           "  surviving every discharge rule (HITS) ........ %3d site(s)"
           % (len(a.dirs), f[0], f[1], f[2], f[3], f[4], f[5], f[6]))
-    for sub in ("ESCAPES-BY-RETURN", "STORES-INTERIOR", "ESCAPES-INTO-CONTAINER",
-                "ESCAPES-INTO-LIBRARY", "ESCAPES-INTO-CALLEE", "HELD-ACROSS-WINDOW"):
+    for sub in ("ESCAPES-BY-RETURN", "STORES-INTERIOR", "ESCAPES-INTO-STATIC",
+                "ESCAPES-INTO-CONTAINER", "ESCAPES-INTO-LIBRARY", "ESCAPES-INTO-CALLEE",
+                "HELD-ACROSS-WINDOW"):
         for where in subs.get(sub, []):
             print("      %-22s %s" % (sub, where))
     if a.disable_rule:

@@ -618,9 +618,14 @@ described here and their **reproducers are deliberately absent**. The scent surv
   API there at all, while B and D still resolved 35 files / 333 functions, so the parser worked.
   Zero rows with a healthy funnel and no Ruby API means **no verdict**, not a clean sheet. The
   class lives in the *binding* (`ext/nokogiri/gumbo.c`), which is where the rows actually were.
-- **A `--self-test` that exits 0 when its fixtures are absent.** Given the corpus *parent* instead
-  of `$CORPUS/*/`, predicates B and D printed `fixture missing` and passed. A green suite that
-  never loaded a fixture is the same failure as a green fixture that parsed nothing.
+- **A `--self-test` that silently runs a *smaller* suite.** The first report of this said B and D
+  "print `fixture missing` and exit 0" given the corpus parent instead of `$CORPUS/*/`. **That is
+  wrong and was checked: both exit 1.** The real defect is worse because it is quiet — fixtures were
+  looked up with `if d is None: continue`, so a **partial** pool skipped whole checks and still
+  printed `PASS`. Only the *count* moves. An empty pool announces itself; a pool missing three trees
+  does not. Read the count, never the word. (Recorded with its correction because the wrong version
+  reached a shipping skill before anyone re-ran it — an agent reporting a methodology defect can be
+  wrong about it, which is the rule this library already states and this round still had to relearn.)
 - **An instrument copied out of a moving worktree.** A mid-edit snapshot of `sweep_unmarked.py`,
   taken while three agents were editing, **failed its own self-test 6/26**. Snapshot with
   `git show HEAD:<path>` and record each `shasum`, or the sweep measures an artefact of the clock.
