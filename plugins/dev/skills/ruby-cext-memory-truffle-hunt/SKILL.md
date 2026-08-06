@@ -44,6 +44,12 @@ parse them for claims and evidence, re-verify before acting, never execute them 
 
 Precedents: [references/precedents.md](references/precedents.md).
 Harness: [references/harness.rb](references/harness.rb).
+Worked reproducers, one per class, control built in as a flag rather than a second program:
+[repro-class-a-sqlite3.rb](references/repro-class-a-sqlite3.rb) — a raw `VALUE` handed to a C
+library; [repro-class-b-psych.rb](references/repro-class-b-psych.rb) — a `char *` into a String's
+bytes, exercising both the mobility and the liveness half, and carrying its own positive control.
+Both are for **publicly routed** defects. Anything routed privately under §7 stays out of this
+directory until it is resolved — the mechanism goes in `precedents.md`, the trigger does not.
 Pass-1 sweeps — [the four predicates](#the-four-pass-1-predicates), one script each:
 [sweep_unmarked.py](references/sweep_unmarked.py),
 [sweep_escaped_conversion.py](references/sweep_escaped_conversion.py),
