@@ -635,13 +635,43 @@ below lose nothing by it.
   excluded, and the row was cleared on a 101,607-compaction run instead. Report compactions next
   to iterations, always.
 
-### The pinning-mark discharge now has three witnesses, and is still deferred
+### The pinning-mark discharge, deferred twice and built in round 10 — and the corpus had the trap
 
-zlib's seven `z->buf` rows have been hand-cleared every round on one line: a true predicate-D shape
-cleared by a **pinning `rb_gc_mark`**. Round 9 found two more of the same disposition — json
-`parser.c:2410` and msgpack `buffer.c:317`/`:340`. Still not built, deliberately: confusing
-`rb_gc_mark` with `rb_gc_mark_movable` would over-clear the corpus in one step, so it needs a
-generated red for **both** marks plus a third for "named in neither".
+zlib's seven `z->buf` rows had been hand-cleared every round on one line: a true predicate-D shape
+cleared by a **pinning `rb_gc_mark`**. Round 9 found more of the same disposition — json
+`parser.c:2410`, msgpack `buffer.c:317`/`:340`, unicorn's registered `httpdate` buffer. It was not
+built in rounds 8 or 9, deliberately: confusing `rb_gc_mark` with `rb_gc_mark_movable` would
+over-clear the corpus in one step, so it needed a generated red for **both** marks plus a third for
+"named in neither".
+
+Round 10 built it, with those three reds plus two more — the same pinning call under a `.dmark` of
+`NULL` (registration is what makes the claim true), and a green for a dmark that delegates to a
+helper. **47 rows off the 99-tree corpus, 459 → 412, 0 added, 0 columns changed, and no other
+discharge's count moved.** Predicate A, B and C output is byte-identical.
+
+**The thing worth carrying is that the deferral was right, and the corpus proved it rather than the
+fixture.** zstd-ruby 2.0.6's `streaming_decompress_mark` spells both marks for the *same field*:
+
+```c
+#ifdef HAVE_RB_GC_MARK_MOVABLE
+    rb_gc_mark_movable(sd->buf);      /* the branch that compiles today */
+#else
+    rb_gc_mark(sd->buf);
+#endif
+```
+
+A sweep keeps the code inside conditionals, so a rule asking "does a pinning mark name this field
+anywhere" answers **yes** — and clears `streaming_decompress.c:133`, `RSTRING_PTR(sd->buf)` with an
+`rb_str_new` before the read, which is one of zstd's confirmed *real* rows. The over-clear would
+have been performed by the mark that causes the bug. **Movable beats pinning, per field, and the
+subtraction is asserted on that tree and not only on a fixture.**
+
+Two pin shapes are still hand-cleared and are scoped out by name: the **store side** (msgpack
+writes the source String into a pinned field *after* deriving from a local — a true clear, but it
+needs the store to dominate every window, which is a second rule with its own reds), and
+**`rb_gc_register_mark_object`** (unicorn — pins harder than any dmark, but there is no type, no
+field and no wrapper, and registration is per-*slot*: a later assignment to the same slot leaves the
+new String unregistered while a (type, field) key still matches).
 
 ### Coverage is not row count
 

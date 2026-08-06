@@ -348,6 +348,17 @@ Relocate is where it goes wrong: openssl `master` made SSLContext movable and ad
 `dcompact` updating **one** of the **four** places it stashes the same `VALUE`. If a gem is
 movable, enumerate every stored copy.
 
+**Pin is a discharge for Class B, and predicate D now reads it** — an interior pointer into
+a field the owning type's *registered* `dmark` pins is neither collected nor relocated for
+as long as the wrapper is reachable, which outlasts any window a sweep can classify. That
+rule was written down in round 8 and deliberately not built until round 10, because it turns
+on one token and a version that reads `rb_gc_mark_movable` as pinning clears the mobility
+bug along with the safe case. **The corpus has that trap in it:** zstd-ruby's
+`streaming_decompress_mark` spells *both* marks for `sd->buf` across an `#ifdef
+HAVE_RB_GC_MARK_MOVABLE`, and the `#else` branch is the pinning one. Treating "a pinning
+mark names this field somewhere" as the test would clear a confirmed mobility finding using
+the mark that causes it. Movable beats pinning, per-field, always.
+
 ---
 
 ## The Scent
@@ -468,8 +479,8 @@ existing suspects, and `REGISTERED` is a **downgrade, not a clear**, because reg
 per-slot: round 4 measured stackprof's registered `empty_string` pinned while its unregistered
 sibling `objtracer` was not.
 
-**Run `--self-test` before trusting any silence** — A is 56/56 (1 skipped), B 34/34, C 71/71,
-D 54/54. Read the count, not the word: **nineteen** of those checks arrived with #29's five
+**Run `--self-test` before trusting any silence** — A is 60/60 (1 skipped), B 34/34, C 73/73,
+D 58/58. Read the count, not the word: **nineteen** of those checks arrived with #29's five
 follow-ups, and only one of the five moved a corpus row in the end. Four of them are pure
 over-clears — a merged slot, a deduped slot, an unindexed declaration — and every one of those
 reads as a clean sheet, so the self-test count is the only place the fix is visible at all.

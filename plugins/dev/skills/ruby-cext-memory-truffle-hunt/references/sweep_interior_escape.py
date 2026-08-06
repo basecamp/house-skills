@@ -135,6 +135,17 @@ nobody has tested.
                        finding is the proof it can be wrong: `x19` held the VALUE up to
                        the pointer load and was then overwritten by the GumboOutput*.
     copies-immediately the derive feeds a copying call with no window in between
+    pinning-mark       the source is a struct field that the owning type's REGISTERED dmark
+                       marks with a PINNING mark -- `rb_gc_mark`, never
+                       `rb_gc_mark_movable`. The only rule here that is a fact about
+                       another function entirely, and the only one that clears an ESCAPE:
+                       a pinned String is neither collected nor relocated for as long as
+                       the wrapper is reachable, which outlasts any window this file can
+                       classify. Written down in round 8, built in round 10, and the two
+                       rounds in between are the deferral: the discharge turns on ONE
+                       token, and a version that reads `rb_gc_mark_movable` as pinning
+                       clears the mobility bug along with the safe case. Three of the five
+                       arms of its fixture are reds for exactly that.
 
 Columns, which never remove a row:
 
@@ -177,16 +188,19 @@ carry the pointer a derivation produced -- predicate B needed the same closure o
 alias set and neither file states it now. That module is a sibling file and these scripts
 will not run without it; references/ is the unit that ships.
 
-ACCEPTANCE (--self-test): see self_test(). Twelve positive controls, four clean negative
-controls, twelve pinned-residue trees, a per-rule mutation table, and generated reds rather
-than a green-only suite. Nine of the reds are SYNTHETIC TREES WRITTEN BY THE TEST, because
+ACCEPTANCE (--self-test): see self_test(). Twelve positive controls, five clean negative
+controls, sixteen pinned-residue trees, a per-rule mutation table, and generated reds rather
+than a green-only suite. Ten of the reds are SYNTHETIC TREES WRITTEN BY THE TEST, because
 the corpus is neutral on those shapes and a corpus-neutral fix is exactly the one a green
 suite cannot tell from no fix at all: `RSTRING_GETMEM`'s output pointer; a definition at
 namespace or `extern "C"` scope; a definition carrying a trailing `__attribute__((...))` or
 `noexcept`; a read through a second pointer local; a rebound guard variable; a store into a
 file-scope scalar; a store into a slot declared in a HEADER and defined in another
 translation unit; an adjusted pointer (`RSTRING_END(str) - 1`) stored into a file static;
-and a trailing write to the source mistaken for a use of it. Each pins
+a trailing write to the source mistaken for a use of it; and a `dmark` that marks the
+derivation's own field with the MOVABLE mark instead of the pinning one -- the corpus has
+no such tree, which is precisely why the discharge that reads that token was deferred for
+two rounds rather than shipped against a green corpus. Each pins
 the FUNNEL COUNTERS and not only the hit count -- an untracked pointer and an empty index
 both end in `hit 0`, and they are different failures. The three that narrow a DISCHARGE ship
 with a green as well: a rule that stops clearing has to be shown still clearing the case it
@@ -696,6 +710,312 @@ def file_scope_objects(src):
     return names
 
 
+# ------------------------------------- the pinning-mark index (round 10)
+#
+# THE DISCHARGE THIS SECTION EXISTS FOR: an interior pointer into a String that the owning
+# type's `dmark` marks with a PINNING mark cannot be invalidated by either leg of this
+# predicate. `rb_gc_mark` marks *and pins*, so the String is neither collected (liveness)
+# nor relocated (mobility) for as long as the wrapper is reachable -- and the wrapper is
+# what the pointer is stored in, so it is reachable for exactly as long as the pointer is.
+# That is the skill's first safe idiom, and until round 10 this predicate could not read it:
+# every one of the rows below was cleared by hand, every round, from a note in TRIAGED.
+#
+# THE WHOLE RULE TURNS ON ONE TOKEN, AND GETTING IT BACKWARDS OVER-CLEARS A CLASS IN ONE
+# STEP. `rb_gc_mark(x)` pins. `rb_gc_mark_movable(x)` does NOT -- it is half of the
+# *relocate* idiom, and it is safe only when a `dcompact` calls `rb_gc_location` on every
+# stored copy, which is a property of a function this predicate never looks at. A movable
+# mark keeps the String alive and lets compaction move its bytes out from under the raw
+# `char *`, which is the mobility bug this predicate was built to find. So a movable mark
+# must leave the row STANDING, and the two spellings differ by one suffix. That is why the
+# rule was deferred through rounds 8 and 9 rather than written, and why it ships with a
+# generated red for the movable arm (self-test 8q) that is byte-identical to the pinning
+# one except for that suffix.
+#
+# THE TABLE IS PREDICATE A's, RESTATED RATHER THAN IMPORTED, AND THE SELF-TEST ASSERTS THE
+# TWO AGREE. A grades pinning versus movable for its own UNMARKED verdict and has done since
+# round 5b; importing it here would drag in a second whole-tree index (macro expansion, wrap
+# sites, dtype-to-struct resolution) for three regexes. The established pattern in this
+# family is a third copy of the LEXING with the semantics stated once -- so the semantics are
+# stated once, in A, and 8s drives A's `prim_kind` and this file's over the same table. A
+# divergence between the two is a FAIL here, not a silent disagreement about what pins.
+MARK_PRIM = re.compile(
+    r"^(?:rb_gc_mark|rb_gc_mark_maybe|rb_gc_mark_locations"
+    r"|rb_gc_mark_movable|rb_gc_mark_and_move|RB_GC_MARK\w*)$")
+MOVABLE_PRIM = re.compile(
+    r"^(?:rb_gc_mark_movable|rb_gc_mark_and_move|RB_GC_MARK_MOVABLE\w*)$")
+
+
+def prim_kind(name):
+    """None | "pin" | "movable" -- how a marking primitive treats its argument.
+
+    Verbatim from sweep_unmarked.prim_kind, and asserted equal to it in the self-test.
+    The order matters: `RB_GC_MARK\\w*` matches `RB_GC_MARK_MOVABLE` too, so the movable
+    test has to run second and win.
+    """
+    if not MARK_PRIM.match(name):
+        return None
+    return "movable" if MOVABLE_PRIM.match(name) else "pin"
+
+
+def callback_name(text):
+    """The function a dtype callback slot names, with casts and parentheses removed.
+
+    Ported from sweep_unmarked, for the reason recorded there: `.dmark =
+    (RUBY_DATA_FUNC)mark_wrap` is a cast on a callback field, and a pattern demanding an
+    identifier immediately after the `=` reads the slot as ABSENT. Here that failure has the
+    opposite sign to A's -- an unread `.dmark` means the mark index is empty and the rows
+    stand -- but a rule that silently stops firing is still a rule nobody is testing.
+    """
+    t = (text or "").strip()
+    for _ in range(4):
+        if not t.startswith("("):
+            break
+        close = match_paren(t, 0)
+        if close < 0:
+            return None
+        rest = t[close + 1:].strip()
+        t = rest if rest else t[1:close].strip()
+    t = t.lstrip("&").strip()
+    return t if re.fullmatch(r"[\w:]+", t) else None
+
+
+# (macro, index of the argument naming the mark callback). The legacy untyped forms name
+# the function inline and no `rb_data_type_t` exists for them at all.
+UNTYPED_MARK = {"Data_Wrap_Struct": 1, "Data_Make_Struct": 2, "rb_data_object_wrap": 2,
+                "rb_data_object_make": 1}
+
+
+def mark_callbacks(src):
+    """[(name, offset)] -- every function this file registers as a GC mark callback.
+
+    A NAME IS NOT A MARK FUNCTION BECAUSE IT CONTAINS `rb_gc_mark`. The discharge below
+    claims that every GC-managed instance of a struct type has the named field pinned, and
+    the only thing that makes that true is REGISTRATION: a `.dmark` slot, or the mark
+    argument of one of the legacy wrap macros. A helper that calls `rb_gc_mark` and is never
+    registered marks nothing, and reading it as evidence would clear rows against a mark
+    that never runs. 8q's `unregistered` arm is the red for exactly that: the same pinning
+    call under a `.dmark` of NULL must leave the row standing.
+
+    Both `rb_data_type_t` initialiser forms, because zlib uses one and json the other:
+
+        static const rb_data_type_t zstream_data_type = {
+            "zstream", { zstream_mark, zstream_free, zstream_memsize, }, ... };  positional
+        static const rb_data_type_t JSON_ResumableParser_type = {
+            .wrap_struct_name = "...", .function = { .dmark = ..., ... }, ... };  designated
+
+    The designated scan runs over the WHOLE initialiser rather than over its top-level
+    parts, so `.function = { .dmark = X }` is reached without unwrapping the group first;
+    the positional fallback runs only when that found nothing, which is A's disposition and
+    for A's reason -- a designated `.function` holding a POSITIONAL list matches neither.
+    """
+    out = []
+    for m in re.finditer(r"\brb_data_type_t\s+(\w+)\s*=\s*\{", src):
+        open_idx = src.index("{", m.end() - 1)
+        close = match_brace(src, open_idx)
+        if close < 0:
+            continue
+        body = src[open_idx + 1:close]
+        found = False
+        for f in re.finditer(r"\.dmark\s*=\s*([^,}]+)", body):
+            v = callback_name(f.group(1))
+            if v:
+                out.append((v, open_idx + 1 + f.start(1)))
+                found = True
+        if found:
+            continue
+        parts = split_args(body)
+        grp = next((p for p in parts if p.strip().startswith("{")), None)
+        if grp is None:
+            fnpart = next((p for p in parts if re.match(r"\.function\s*=", p.strip())),
+                          None)
+            if fnpart:
+                grp = fnpart.split("=", 1)[1].strip()
+        if grp and grp.startswith("{"):
+            fns = split_args(grp.strip()[1:-1])
+            if fns:
+                v = callback_name(fns[0])
+                if v:
+                    out.append((v, open_idx))
+    for macro, mi in UNTYPED_MARK.items():
+        for m in re.finditer(r"\b%s\s*(?=\()" % macro, src):
+            args, _ = call_args(src, m.end())
+            if not args or len(args) <= mi:
+                continue
+            v = callback_name(args[mi])
+            if v:
+                out.append((v, m.start()))
+    return out
+
+
+KEYWORD_TYPES = {"const", "volatile", "register", "static", "extern", "struct", "union",
+                 "enum", "class", "unsigned", "signed", "long", "short", "int", "char",
+                 "void", "float", "double", "inline", "typedef", "auto"}
+
+
+def type_tag(decl):
+    """The named type in a declaration, or None: `const struct zstream *z` -> "zstream".
+
+    The FIRST non-keyword identifier, not the last -- the last one is the declarator. A
+    declaration whose only identifier IS the declarator (`long ungetc`, `unsigned flags`)
+    names no type this index can join on and returns None rather than the variable's own
+    name, which would make every such member look like a struct of its own name.
+    """
+    text = decl.split("[")[0]
+    text = text.split("*")[0] if "*" in text else text
+    ids = [i for i in re.findall(r"[A-Za-z_]\w*", text) if i not in KEYWORD_TYPES]
+    return ids[0] if ids else None
+
+
+AGGREGATE_HEAD = re.compile(r"\b(typedef\s+)?(?:struct|union)\s+([A-Za-z_]\w*)?\s*(?=\{)")
+
+
+def _member_decls(body):
+    """{member name: named type or None} for one aggregate body.
+
+    Split on SEMICOLONS AT DEPTH ZERO, so a nested aggregate (`const struct zstream_funcs
+    { int (*run)(z_streamp, int); } *func;` inside `struct zstream`) is one member and not
+    three. The nested body is then cut away before the declarator is read, exactly as
+    file_scope_objects cuts one away: `struct S { ... } obj;` declares `obj`.
+    """
+    out, depth, start = {}, 0, 0
+    for i, ch in enumerate(body):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == ";" and depth == 0:
+            frag, start = body[start:i], i + 1
+            if "}" in frag:
+                frag = frag[frag.rfind("}") + 1:]
+            t = type_tag(frag)
+            for d in split_args(frag):
+                # a member function prototype declares no slot; a member function POINTER
+                # does, and is spelled `(*fp)(...)` -- the same cut file_scope_objects makes
+                if "(" in d and not re.search(r"\(\s*\*", d):
+                    continue
+                nm = param_name(d)
+                if nm and nm != t:
+                    out[nm] = t
+    return out
+
+
+def struct_index(files):
+    """{type name: {member: named type}} over a whole tree, tags and typedef aliases both.
+
+    Keyed TREE-WIDE, and that is a stated limit rather than an oversight: tu_scope's first
+    rule says a `static` FUNCTION in another translation unit is not a candidate, and the
+    same argument applies to a `struct` tag, which is also file-local in C. Two files each
+    defining a different `struct buf` would merge here. Predicate A carries the same limit
+    on the same index; the cost of getting it wrong is bounded by the join, since a member
+    name has to match as well as the tag, and it is written down so the next round can
+    measure it rather than re-derive it.
+
+    Both spellings of the name a variable is declared with are indexed to the same member
+    map -- the tag (`struct zstream`, zlib) and the typedef alias (`JSON_ResumableParser`,
+    json) -- because the deriving file and the marking file need not use the same one.
+    """
+    out = {}
+    for src in files.values():
+        for m in AGGREGATE_HEAD.finditer(src):
+            open_idx = m.end()                      # the lookahead ends ON the `{`
+            close = match_brace(src, open_idx)
+            if close < 0:
+                continue
+            members = _member_decls(src[open_idx + 1:close])
+            if not members:
+                continue
+            names = [m.group(2)] if m.group(2) else []
+            # ONLY A `typedef` PUTS A TYPE NAME AFTER THE `}`. `struct S { ... } obj;`
+            # declares an OBJECT, and zlib's nested `const struct zstream_funcs { ... }
+            # *func;` declares a member -- indexing either as a type name would put a
+            # variable's spelling into the type index, where a join could then find it.
+            if m.group(1):
+                semi = src.find(";", close)
+                for d in split_args(src[close + 1:semi] if semi > 0 else ""):
+                    nm = param_name(d)
+                    if nm and "(" not in d and "*" not in d:
+                        names.append(nm)          # `} JSON_ResumableParser;` -- the alias
+            for nm in names:
+                out.setdefault(nm, {}).update(members)
+    return out
+
+
+# A declaration is the first thing in its statement. Without that anchor `total = count *
+# size;` parses as a pointer declaration of `size` with type `count`, and a wrong entry in
+# this map is a wrong join key on the discharge side.
+STMT_START = ";{}(),"          # ...or the start of the body, which is `k < 0`
+PTR_DECL = re.compile(
+    r"((?:(?:const|volatile|struct|union|enum)\s+)*[A-Za-z_]\w*)\s*\*+\s*([A-Za-z_]\w*)"
+    r"\s*(?=[=;,)])")
+
+
+def var_types(fn):
+    """{local or parameter name: the struct type it points AT}, pointer declarations only.
+
+    Pointers only, because the discharge requires the member path to start with `->`; see
+    member_key for why. Parameters first, then body declarations in source order, and the
+    first binding for a name wins -- a declaration precedes its uses, and a later textual
+    match on the same name is more likely to be the multiplication this regex cannot tell
+    from a declaration than a second declaration of the same variable.
+    """
+    out = {}
+    for decl, nm in fn.params:
+        if nm and "*" in decl:
+            t = type_tag(decl)
+            if t and t != nm:
+                out[nm] = t
+    body = fn.body
+    for m in PTR_DECL.finditer(body):
+        k = m.start() - 1
+        while k >= 0 and body[k] in " \t\r\n":
+            k -= 1
+        if k >= 0 and body[k] not in STMT_START:
+            continue
+        t = type_tag(m.group(1))
+        if t and t != m.group(2):
+            out.setdefault(m.group(2), t)
+    return out
+
+
+# A PLAIN member path and nothing else -- no leading `*`, no cast, no subscript. `*w->buf`
+# dereferences the field rather than naming it, and a cast is an expression whose type this
+# index has not resolved; either one would build a key out of a spelling.
+MEMBER_PATH = re.compile(
+    r"\s*([A-Za-z_]\w*)((?:\s*(?:->|\.)\s*[A-Za-z_]\w*)+)\s*\Z")
+
+
+def member_key(structs, vtypes, expr):
+    """`gz->z.input` -> ("zstream", "input"), or None if the path does not resolve.
+
+    THE PATH MUST START AT A POINTER. `->` says the aggregate the field lives in is
+    somewhere other than this frame, which is the precondition the discharge needs: a
+    `struct zstream z;` on the stack has no wrapper, no dtype and no dmark, so its `buf`
+    field is marked by nothing and pinned by nothing. Requiring the first hop to be `->` is
+    the cheapest true statement of that, and it costs nothing in the corpus -- every witness
+    reaches its field through a pointer parameter or a pointer local.
+
+    EVERY HOP MUST RESOLVE, INCLUDING THE LAST. A member that is not in the indexed body of
+    its own type returns None rather than a key built out of a guess: the join is the whole
+    safety of this rule, and an unfounded key can only ever make it fire where it should not.
+    """
+    m = MEMBER_PATH.fullmatch(expr)
+    if not m:
+        return None
+    hops = re.findall(r"(->|\.)\s*([A-Za-z_]\w*)", m.group(2))
+    if not hops or hops[0][0] != "->":
+        return None
+    t = vtypes.get(m.group(1))
+    for _op, mem in hops[:-1]:
+        fields = structs.get(t)
+        if not fields or mem not in fields:
+            return None
+        t = fields[mem]
+    fields = structs.get(t)
+    if not fields or hops[-1][1] not in fields:
+        return None
+    return (t, hops[-1][1])
+
+
 class Func:
     __slots__ = ("name", "path", "src", "params", "hdr", "bstart", "bend", "is_static",
                  "scope")
@@ -772,6 +1092,66 @@ class Tree:
             self.ranges.setdefault(f.path, []).append(f)
         for v in self.ranges.values():
             v.sort(key=lambda f: (f.bstart, -f.bend))
+        # LAST, because both of these need the function index and the name table that the
+        # loops above build. See the pinning-mark section: `structs` is the join, `pinned`
+        # and `movable` are what the join is asked about.
+        self.structs = struct_index(self.files)
+        self.mark_fns = self._index_mark_fns()
+        self.pinned, self.movable = self._index_pins()
+
+    def _index_mark_fns(self):
+        """Every function a mark callback can reach, registration first then callees.
+
+        THE CLOSURE IS NOT DECORATION. zlib's `zstream_mark` is registered directly, but
+        `gzfile_mark` reaches the same fields a second way -- `zstream_mark(&gz->z)` -- and
+        json's `JSON_ResumableParser_mark` delegates three of its five marks to helpers. A
+        dmark that hands the work to a helper is the commonest shape there is, and stopping
+        at the registered function would make the discharge fire on whichever gems happen
+        not to use it. Bound through tu_scope.bind, so a call in b.c does not reach a.c's
+        `static` mark helper of the same name.
+        """
+        frontier, seen, out = [], set(), []
+        for path, src in self.files.items():
+            for name, off in mark_callbacks(src):
+                frontier += tu_scope.bind(self.by_name.get(name, ()), path, off)
+        while frontier:
+            fn = frontier.pop()
+            if id(fn) in seen:
+                continue
+            seen.add(id(fn))
+            out.append(fn)
+            for cname, _a, s, _e in find_calls(fn.body):
+                frontier += tu_scope.bind(self.by_name.get(cname, ()), fn.path,
+                                          fn.bstart + s)
+        return out
+
+    def _index_pins(self):
+        """({(type, field): where}, {(type, field): where}) -- pinned, then movable.
+
+        A FIELD NAMED BY BOTH IS NOT PINNED. `stronger()` in predicate A says movable beats
+        pinning for the same reason in the mirror direction: if any path marks the field
+        movable, compaction may relocate it, and the pinning call on the other path proves
+        nothing about that one. Subtracting `movable` from `pinned` is that rule, and it is
+        also what makes the movable red (8q) impossible to pass by accident -- a fixture
+        that spelled both would otherwise discharge on the pinning half.
+        """
+        pinned, movable = {}, {}
+        for fn in self.mark_fns:
+            vt = var_types(fn)
+            rel = str(fn.path.relative_to(self.root))
+            for name, args, s, _e in find_calls(fn.body):
+                kind = prim_kind(name)
+                if kind is None:
+                    continue
+                for a in args:
+                    key = member_key(self.structs, vt, a.strip())
+                    if key is None:
+                        continue
+                    (movable if kind == "movable" else pinned).setdefault(
+                        key, "%s(%s) in %s at %s:%d"
+                             % (name, a.strip(), fn.name, rel,
+                                line_of(fn.src, fn.bstart + s)))
+        return {k: v for k, v in pinned.items() if k not in movable}, movable
 
     def _index_funcs(self, path, src):
         """Top-level definitions only.
@@ -1734,6 +2114,42 @@ def liveness(fn, deriv_off, expr, tree, last_use_off=None):
     return "UNROOTED", "nothing roots %s across the window" % var
 
 
+def pinning_mark(tree, fn, expr):
+    """Where the owning type's dmark PINS this derivation's source String, or None.
+
+    The one discharge in this file that is a fact about another function entirely, and the
+    only one that clears an ESCAPE. Every other rule here asks what happens inside the
+    deriving frame; this one asks what the GC is told about the object the pointer points
+    into, and the answer holds for as long as the wrapper is reachable -- which is longer
+    than any window this predicate can classify, including an unbounded escape.
+
+    Deliberately NOT asked, and each of these is a row this rule leaves standing:
+
+      *  whether the SOURCE VALUE is stored into a pinned field, rather than read out of
+         one. msgpack's `_msgpack_buffer_append_reference` derives from a local and then
+         writes `b->tail.mapped_string = mapped_string`, which the buffer's dmark pins with
+         `rb_gc_mark(c->mapped_string)`. That is a true clear and a DIFFERENT rule: it needs
+         the store to dominate every window, which is the `copies-in-callee` argument again
+         and is a second decision. Two corpus rows, named in TRIAGED, still hand-cleared.
+      *  `rb_gc_register_mark_object`, which also pins, and pins harder -- the object is
+         rooted for the life of the process. unicorn's `init_unicorn_httpdate` registers a
+         file-scope `buf` and then derives `buf_ptr = RSTRING_PTR(buf)` from it. It is not a
+         dmark at all: there is no type, no field and no wrapper, so it shares no machinery
+         with this rule, and registration is per-SLOT -- a later `buf = rb_str_new(...)`
+         would leave the new String unregistered while every join key here still matched.
+         Two corpus rows, named in TRIAGED, still hand-cleared. Scoped out on purpose.
+      *  whether the instance the pointer came from is the one a dtype wraps. msgpack wraps
+         `msgpack_buffer_t` with TWO descriptors and one of them has `.dmark = NULL`
+         (buffer_class.c:137, and predicate A's round-5 iteration-order defect is the same
+         pair). The join here is (type, field), so a second wrapper with no dmark is
+         invisible to it. Reaching that needs A's wrap-site walk; it is a stated limit.
+    """
+    key = member_key(tree.structs, var_types(fn), expr)
+    if key is None:
+        return None
+    return tree.pinned.get(key)
+
+
 SIZE_HINT = re.compile(r"\b(\d{3,})\b")
 
 
@@ -1810,8 +2226,16 @@ class Result:
 # and a third arm for the case that decides whether it is worth building at all: the field
 # named in NEITHER call, which must hit. Predicate A already parses dmark bodies and grades
 # pinning versus movable; the work is reading that answer from here, not re-deriving it.
+#
+# ROUND 10: BUILT. `pinning-mark` is below, and the trap the deferral was written around is
+# the reason it ships with three arms of one generated fixture rather than with one: the
+# movable arm (8q) is byte-identical to the pinning arm except for the `_movable` suffix and
+# must stay a HIT, and a fourth arm (8r) puts the same pinning call in a function no dtype
+# registers, which must also stay a hit. The "named in neither" arm is the third. What the
+# rule does NOT cover -- the store-side pin (msgpack) and the registration pin (unicorn) --
+# is scoped out by name in pinning_mark()'s docstring, and both are still hand-cleared.
 RULES = ("guarded", "no-window", "last-use-after", "copies-immediately",
-         "copies-in-callee")
+         "copies-in-callee", "pinning-mark")
 
 
 def sweep(tree, name, disabled=(), discharge=True):
@@ -1911,6 +2335,19 @@ def sweep(tree, name, disabled=(), discharge=True):
                 r.discharges.append(("guarded", rel, line_of(fn.src, off),
                                      "%s(%s) in %s -- %s" % (macro, expr, fn.name,
                                                              why_live)))
+                continue
+            # AFTER `guarded`, BEFORE `last-use-after`, and the order is the strength of
+            # the evidence. A guard is a statement in this frame about this pointer; a
+            # pinning dmark is a statement about the object, made somewhere else and true
+            # for longer; a last use is the weakest of the three and this file's own
+            # docstring says so. Placing it here also keeps it out of `no-window`'s way --
+            # a pinned derivation with no window at all is still discharged by no-window,
+            # which is what the corpus diff has to be able to say.
+            pin = None if "pinning-mark" in off_rule else pinning_mark(tree, fn, expr)
+            if pin:
+                r.discharges.append(("pinning-mark", rel, line_of(fn.src, off),
+                                     "%s(%s) in %s -- pinned by %s"
+                                     % (macro, expr, fn.name, pin)))
                 continue
             if live == "LAST-USE-AFTER" and not esc and "last-use-after" not in off_rule:
                 r.discharges.append(("last-use-after", rel, line_of(fn.src, off),
@@ -2037,7 +2474,14 @@ POSITIVES = [
 # Negative controls that must come back with ZERO hits, each cleared by a named rule.
 # racc is the "zero for the right reason" control: no interior derivation exists in the
 # tree at all, so its zero has to show up as `derive 0/0`, not `hit 0 (discharged 40)`.
-NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-"]
+#
+# ROUND 10: stringio MOVES IN, the mirror of round 9's json moving out, and for the opposite
+# kind of reason. Its one row -- `strio_getline`'s `RSTRING_PTR(ptr->string)` -- was never
+# noise; `strio_mark` pins that exact field with `rb_gc_mark(ptr->string)` (stringio.c:96,
+# registered positionally at :114-120), so the row is discharged by `pinning-mark` rather
+# than merely small. A tree whose zero is produced by a named rule is a stronger control
+# than one whose zero is produced by finding nothing, which is what racc is here for.
+NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-", "stringio-"]
 
 # The rest of the round-6 negative set does NOT come back clean, and pinning the numbers
 # is more honest than widening a rule until they do. Each entry is the count triaged by
@@ -2260,9 +2704,44 @@ NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-"]
 # from itself names a new one. The rule is DOMINATING_WRITE only now, the row is back, and
 # `iconv-` is 15 again -- so this predicate's corpus output is byte-identical across the
 # whole review round.
-TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 21, "iconv-": 15, "zstd-": 6,
-           "sqlite3-2.9.5": 3, "websocket-driver-": 2, "stringio-": 1,
-           "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 3, "puma-": 6,
+#
+# ROUND 10: THE PINNING-MARK DISCHARGE IS BUILT, AND IT TAKES 47 ROWS OFF THE 99-TREE
+# CORPUS (459 -> 412), 0 ADDED, 0 COLUMNS CHANGED, AND NO OTHER DISCHARGE'S COUNT MOVED.
+# Every one of the 47 is a derivation whose source is a struct field that the owning type's
+# dmark marks with the PINNING `rb_gc_mark`. By tree, and each is a note above that this
+# table has been carrying by hand since round 7:
+#
+#   zlib 3.2.1     24 -> 9   the seven `z->buf` rows, `z->input` in zstream_sync, six
+#   zlib 3.2.3     24 -> 9     `gz->z.input` rows in gzfile_read_header, plus zstream_
+#                              shift_buffer's extra pair that only stock zlib has. 15 each.
+#   zlib fork      21 -> 7   the same rows, 14 of them: the fork's zstream_shift_buffer is
+#                              two derivations shorter. `zstream_mark` (zlib.c:1181-1186)
+#                              pins BOTH fields, and `gz->z.input` reaches `input` through
+#                              `struct gzfile`'s `struct zstream z` member.
+#   json            3 -> 1   parser.c:2410 is the row this rule was deferred for, and
+#                              parser.c:2710 moves WITH it -- `cResumableParser_rest` reads
+#                              the same pinned `parser->buffer`. :2710 was triaged as
+#                              `carries()` argument-position noise, which it also is; it is
+#                              now cleared for the stronger of the two reasons. The third
+#                              row (parser.c:140) stands: `rstring_cache_cmp` derives from a
+#                              plain `VALUE rstring` parameter and no field is involved.
+#   stringio        1 -> 0   moved to NEGATIVES; see there.
+#
+# WHAT DID NOT MOVE, AND IT IS FOUR ROWS THE ROUND-9 LOG COUNTED AS WITNESSES OF THIS RULE:
+#
+#   msgpack 1.8.3/1.8.4 buffer.c:317/:340. `_msgpack_buffer_append_reference` derives from a
+#     LOCAL `mapped_string` and then stores it into `b->tail.mapped_string`, which the
+#     buffer's dmark pins at buffer.c:119. The pin is real; the shape is the store side of
+#     it, and reading a store as evidence needs the store to dominate every window between
+#     it and the derive -- the `copies-in-callee` argument again, and a second decision with
+#     its own reds. Left standing, deliberately, and still hand-cleared.
+#   unicorn 4.9.0/6.1.0 httpdate.c:74/:75. `rb_gc_register_mark_object(buf)` pins, and pins
+#     harder than any dmark, but there is no type, no field and no wrapper -- it shares no
+#     machinery with this rule and registration is per-SLOT rather than per-object. Scoped
+#     out by name in pinning_mark()'s docstring. Still hand-cleared.
+TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 7, "iconv-": 15, "zstd-": 6,
+           "sqlite3-2.9.5": 3, "websocket-driver-": 2,
+           "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 1, "puma-": 6,
            "unicorn-6.1.0": 6, "date-": 18, "openssl-3.3.0": 5, "openssl-3.3.1": 5,
            "openssl-3.3.3": 5, "openssl-4.0.0": 5}
 
@@ -2945,6 +3424,162 @@ def self_test(pool):
           "guard-rebind green: with nothing rebound, a genuine RB_GC_GUARD after the last "
           "read still discharges -- the rule was narrowed, not deleted",
           [(len(s.hits), [d[0] for d in s.discharges]) for s in greens])
+
+    # 8q. GENERATED REDS AND GREENS: THE PINNING-MARK DISCHARGE, AND THE ONE TOKEN IT TURNS
+    #     ON. The rule this fixture exists for was WRITTEN DOWN in round 8 and deliberately
+    #     not built in rounds 8 or 9, on the argument recorded above RULES: it clears rows
+    #     on the strength of a single identifier, and a rule that cannot tell `rb_gc_mark`
+    #     from `rb_gc_mark_movable` over-clears a whole class in one step, silently, in the
+    #     unsafe direction. So the fixture is FIVE arms of one byte-identical tree, and
+    #     three of the five are reds:
+    #
+    #       pinning       `rb_gc_mark(w->buf)` in the registered dmark      -> DISCHARGES
+    #       helper        ...reached through `mark_fields(w)`               -> DISCHARGES
+    #       movable       `rb_gc_mark_movable(w->buf)`, one suffix apart    -> STILL A HIT
+    #       neither       the dmark pins `w->other` and never names `w->buf`-> STILL A HIT
+    #       unregistered  the same pinning call, `.dmark` slot is NULL      -> STILL A HIT
+    #
+    #     `movable` is the load-bearing one and the reason for the two-round deferral: it is
+    #     the *relocate* idiom, safe only with a `dcompact` calling rb_gc_location on every
+    #     stored copy, which is a function this predicate never reads. A movable mark keeps
+    #     the String alive and lets compaction move its bytes, which is the mobility half of
+    #     this predicate's own charter -- so discharging it would clear the bug with the bug.
+    #     `unregistered` is the second red and guards the other half of the claim: the
+    #     discharge asserts that every GC-managed instance of the type has the field pinned,
+    #     and only REGISTRATION makes that true. A helper full of `rb_gc_mark` that no dtype
+    #     names marks nothing at all. `helper` is the green for the callee closure, which no
+    #     corpus row needs today -- json's dmark delegates and zlib's `gzfile_mark` calls
+    #     `zstream_mark`, but both reach the pinned fields by a registered route as well, so
+    #     the closure fires nowhere in 99 trees and this is the only thing testing it.
+    pin_c = ("#include <ruby.h>\n\n"
+             "struct wrap { VALUE buf; VALUE other; };\n\n"
+             "%s"
+             "static void\n"
+             "wrap_mark(void *p)\n"
+             "{\n"
+             "    struct wrap *w = p;\n"
+             "%s"
+             "}\n\n"
+             "static const rb_data_type_t wrap_type = {\n"
+             "    \"wrap\",\n"
+             "    { %s, 0, 0, },\n"
+             "    0, 0, RUBY_TYPED_FREE_IMMEDIATELY\n"
+             "};\n\n"
+             "static VALUE\n"
+             "feed(VALUE self)\n"
+             "{\n"
+             "    struct wrap *w;\n"
+             "    const char *p;\n"
+             "    VALUE out;\n"
+             "    TypedData_Get_Struct(self, struct wrap, &wrap_type, w);\n"
+             "    p = RSTRING_PTR(w->buf);\n"
+             "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+             "    out = rb_str_new(p, 4);\n"
+             "    return out;\n"
+             "}\n\n"
+             "void Init_probe(void)\n"
+             "{\n"
+             "    rb_define_method(rb_cObject, \"f\", feed, 0);\n"
+             "}\n")
+    # (extra definitions before the dmark, the dmark's body, the dtype's mark slot)
+    pin_arms = {
+        "pinning":      ("", "    rb_gc_mark(w->buf);\n", "wrap_mark"),
+        "movable":      ("", "    rb_gc_mark_movable(w->buf);\n", "wrap_mark"),
+        "neither":      ("", "    rb_gc_mark(w->other);\n", "wrap_mark"),
+        "unregistered": ("", "    rb_gc_mark(w->buf);\n", "NULL"),
+        "helper":       ("static void\n"
+                         "mark_fields(struct wrap *w)\n"
+                         "{\n"
+                         "    rb_gc_mark(w->buf);\n"
+                         "}\n\n",
+                         "    mark_fields(w);\n", "wrap_mark"),
+    }
+    pn = {t: _sweep(_synth("fx-pin-%s" % t, {"ext/probe.c": pin_c % a}))
+          for t, a in pin_arms.items()}
+    pin_green, pin_red = ("pinning", "helper"), ("movable", "neither", "unregistered")
+
+    def _pinned(tag):
+        return [d for d in pn[tag].discharges if d[0] == "pinning-mark"]
+    # The FUNNEL is asserted on every arm and not only the hit count, for this file's
+    # standing reason: an unparsed struct, an unindexed function and an unresolved member
+    # path all end in `hit 0`, and only one of those is the rule firing. All five arms must
+    # produce the same one derivation and the same one window; only the verdict may differ.
+    check(all((pn[t].funcs, len(pn[t].derivations), len(pn[t].with_window))
+              == (4 if t == "helper" else 3, 1, 1) for t in pin_arms)
+          and all(not pn[t].hits and len(_pinned(t)) == 1 for t in pin_green)
+          and all(len(pn[t].hits) == 1 and not _pinned(t) for t in pin_red),
+          "pinning-mark red/green: `rb_gc_mark(w->buf)` in the type's REGISTERED dmark "
+          "discharges the derive from `w->buf`, directly and through a callee -- and the "
+          "byte-identical `rb_gc_mark_movable`, a dmark naming a DIFFERENT field, and the "
+          "same pinning call under a NULL `.dmark` all leave the row standing. One suffix "
+          "and one registration are the whole rule; a version that cannot see either "
+          "over-clears the class in one step",
+          [(t, pn[t].funcs, len(pn[t].derivations), len(pn[t].with_window),
+            [h[0] for h in pn[t].hits], sorted(d[0] for d in pn[t].discharges))
+           for t in sorted(pin_arms)])
+
+    # 8r. AND THE CORPUS HAS THE MOVABLE ARM AFTER ALL -- zstd, which nobody had looked at
+    #     for this. The synthetic arm above was written because no tree was believed to
+    #     carry the shape; building the index found one, and it is better than the fixture:
+    #
+    #         static void streaming_decompress_mark(void *p) {
+    #             struct streaming_decompress_t *sd = p;
+    #         #ifdef HAVE_RB_GC_MARK_MOVABLE
+    #             rb_gc_mark_movable(sd->buf);      /* the branch that compiles today */
+    #         #else
+    #             rb_gc_mark(sd->buf);              /* ...and the one that does not */
+    #         #endif
+    #         }
+    #
+    #     `strip_directives` keeps the code inside conditionals, so BOTH spellings name the
+    #     same field in the same function and the index sees a pin and a movable mark on one
+    #     key. Subtracting `movable` from `pinned` is the only thing that keeps
+    #     streaming_decompress.c:133 -- `RSTRING_PTR(sd->buf)` with an `rb_str_new` before
+    #     the read -- standing. That row is one of zstd's REAL ones, `only for sc->buf` in
+    #     round 9's Phase E table; a rule that let the `#else` branch answer would have
+    #     cleared a confirmed mobility finding using the mark that causes it. Asserted on
+    #     the tree rather than only on the fixture, because this is the one over-clear the
+    #     whole two-round deferral was about and the corpus can now speak to it directly.
+    zstd = _find(pool, "zstd-")
+    if zstd is not None:
+        zt = Tree(zstd)
+        zkey = ("streaming_decompress_t", "buf")
+        zrows = [h for h in _hits(zstd) if h[1].endswith("streaming_decompress.c")]
+        check(zkey in zt.movable and zkey not in zt.pinned and len(zrows) == 1,
+              "movable beats pinning ON THE CORPUS: zstd's streaming_decompress_mark spells "
+              "both marks for `sd->buf` across an #ifdef, and the row derived from that "
+              "field stands. The pinning spelling does not get to answer for the movable one",
+              "movable=%s pinned=%s rows=%s"
+              % (zkey in zt.movable, zkey in zt.pinned,
+                 ["%s:%d" % (h[1], h[2]) for h in zrows]))
+
+    # 8s. ...AND THE TABLE THAT DECIDES IT IS PREDICATE A's, ASSERTED EQUAL RATHER THAN
+    #     ASSUMED EQUAL. A has graded pinning versus movable since round 5b and this file
+    #     restates the two regexes rather than importing A's whole-tree index for them.
+    #     Two files carrying one semantic table is exactly the shape tu_scope was extracted
+    #     out of, so the copy is pinned by an assertion instead of by good intentions.
+    #
+    #     BOTH DIRECTIONS ARE ASSERTED, because agreement alone is satisfied by two files
+    #     being wrong together -- which is the failure that matters here, since `movable`
+    #     graded as `pin` is the over-clear the whole fixture above exists to prevent.
+    import sweep_unmarked as _pred_a
+    prim_table = ["rb_gc_mark", "rb_gc_mark_movable", "rb_gc_mark_maybe",
+                  "rb_gc_mark_and_move", "rb_gc_mark_locations", "RB_GC_MARK",
+                  "RB_GC_MARK_MOVABLE", "rb_gc_location", "rb_gc_register_mark_object",
+                  "rb_gc_mark_movable_ptr", "memcpy", "mark"]
+    disagree = [(n, prim_kind(n), _pred_a.prim_kind(n)) for n in prim_table
+                if prim_kind(n) != _pred_a.prim_kind(n)]
+    absolute = (prim_kind("rb_gc_mark") == "pin"
+                and prim_kind("rb_gc_mark_movable") == "movable"
+                and prim_kind("rb_gc_mark_and_move") == "movable"
+                and prim_kind("rb_gc_mark_maybe") == "pin"
+                and prim_kind("rb_gc_register_mark_object") is None
+                and prim_kind("memcpy") is None)
+    check(not disagree and absolute,
+          "the pinning/movable table agrees with predicate A's over %d spellings, AND "
+          "grades the two that matter absolutely -- rb_gc_mark pins, rb_gc_mark_movable "
+          "and rb_gc_mark_and_move do not" % len(prim_table),
+          disagree or "absolute grades wrong")
 
     # 8l/8m. GENERATED RED: A BARE STORE INTO STATIC STORAGE IS AN ESCAPE.
     #
