@@ -57,24 +57,35 @@ Pass-1 sweeps — [the four predicates](#the-four-pass-1-predicates), one script
 [sweep_interior_escape.py](references/sweep_interior_escape.py).
 All four share [tu_scope.py](references/tu_scope.py) — the translation-unit scoping rule, extracted
 after the same defect was patched **six separate times across four scripts**: an internal-linkage
-name resolved tree-wide instead of in the using file. It now carries **three** rules the same
+name resolved tree-wide instead of in the using file. It now carries **four** rules the same
 scripts kept re-deriving, each extracted after the same patch landed once too often:
 
-1. **Which name a use binds to** — C's linkage rule, six patches across four scripts.
+1. **Which name a use binds to** — C's linkage rule, six patches across four scripts. It answers
+   for **slots** as well as functions: predicate D asked it of a `static` in another translation
+   unit only after a store into a header-declared `extern` slot cleared on the strength of the
+   deriving file's own declarations.
 2. **Which braces open a storage scope** — ported four times, because `namespace X {` and
    `extern "C" {` are transparent and a walk that counts raw braces indexes *nothing* inside one.
 3. **Where a declarator ends and a body begins** — four appearances across three scripts, all of
    them a function index that skipped whitespace only between the `)` and the `{` and so dropped
    every definition carrying `__attribute__((...))`, `noexcept`, `EV_NOEXCEPT`, a C++ `const`
-   qualifier or a trailing return type. Its **rejection table** travels with it, and both callers
-   assert it: opening the crossing up is what once made a sweep *invent* four functions out of
-   X-macro lists and `__declspec(...)` before a `typedef enum {`.
+   qualifier or a trailing return type. Its **rejection table** travels with it, and all three
+   callers assert it: opening the crossing up is what once made a sweep *invent* four functions
+   out of X-macro lists and `__declspec(...)` before a `typedef enum {`.
+4. **Which locals carry the same pointer** — the one rule here that is dataflow rather than
+   lexing, and it is here for the same measured reason. `q = p;` copies a pointer; B and D each
+   tracked only the first name, so `p = RSTRING_PTR(str); q = p; return q;` reported one
+   converted non-cfunc and zero hits in B and `derive 1/1 -> windowed 0/0 -> hit 0` in D. Three
+   constraints travel with it: the left-hand side must be pointer-typed, arithmetic keeps the
+   pointer only when the base is the **left** operand (`q = p + 1` does, `off = e - p` does not),
+   and a copy joins the set only if it runs *after* the name it copies did.
 
-All three failures empty an index rather than drop a row, which is why they read as clean gems —
-and it is why a fix for one of them is a fix in one file now. It must travel with the sweeps; a
-sweep copied out of `references/` on its own no longer runs. `sweep_escaped_conversion.py` still
-carries its own pre-extraction copy of rules 2 and 3: measured, that is **23,120** indexed
-functions against the 23,318 predicate C and D now agree on, over the same 99 trees.
+The first three failures empty an index rather than drop a row and the fourth empties an alias
+set, which is why all four read as clean gems — and it is why a fix for one of them is a fix in
+one file now. It must travel with the sweeps; a sweep copied out of `references/` on its own no
+longer runs. All four sweeps now index the same **23,318** functions over the 99-tree corpus:
+`sweep_escaped_conversion.py` was the last file carrying a pre-extraction copy of rules 2 and 3,
+measured at 23,120, and collapsing it moved no row.
 Run each one's `--self-test` before trusting its silence.
 Detector self-check: [references/pipefail_false_negative.sh](references/pipefail_false_negative.sh)
 — demonstrates a grep-based verdict reporting a found defect as clean.
@@ -457,8 +468,8 @@ existing suspects, and `REGISTERED` is a **downgrade, not a clear**, because reg
 per-slot: round 4 measured stackprof's registered `empty_string` pinned while its unregistered
 sibling `objtracer` was not.
 
-**Run `--self-test` before trusting any silence** — A is 53/53 (1 skipped), B 25/25, C 64/64,
-D 42/42. The pool argument differs, and not symmetrically — measured, because a looser version of
+**Run `--self-test` before trusting any silence** — A is 53/53 (1 skipped), B 31/31, C 64/64,
+D 48/48. The pool argument differs, and not symmetrically — measured, because a looser version of
 this sentence shipped once and was wrong:
 
 | | `$CORPUS` (parent) | `$CORPUS/*/` (gem dirs) |

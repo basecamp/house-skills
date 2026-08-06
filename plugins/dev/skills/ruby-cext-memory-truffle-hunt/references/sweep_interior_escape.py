@@ -168,17 +168,25 @@ Every lookup that turns a NAME at a use site into a DEFINITION goes through
 `tu_scope.bind`, which states C's linkage rule once for all four predicates: a use binds
 to a definition in its own file first, a `static` definition in another .c/.cc/.cpp/.cxx
 is not a candidate at all, and everything else -- non-static definitions, and anything
-declared in a HEADER -- stays tree-wide. That module is a sibling file and these scripts
+declared in a HEADER -- stays tree-wide. THE SAME RULE ANSWERS FOR SLOTS: which persistent
+objects a store in this file can be naming is `declared_scope` applied to a declaration
+rather than to a definition, which is how a header-declared `extern const char *saved;`
+became visible here without another translation unit's `static` becoming visible with it.
+`tu_scope.alias_set` is the fourth rule and the one that is not lexing: which OTHER locals
+carry the pointer a derivation produced -- predicate B needed the same closure on its own
+alias set and neither file states it now. That module is a sibling file and these scripts
 will not run without it; references/ is the unit that ships.
 
 ACCEPTANCE (--self-test): see self_test(). Twelve positive controls, four clean negative
 controls, twelve pinned-residue trees, a per-rule mutation table, and generated reds rather
-than a green-only suite. Seven of the reds are SYNTHETIC TREES WRITTEN BY THE TEST, because
+than a green-only suite. Nine of the reds are SYNTHETIC TREES WRITTEN BY THE TEST, because
 the corpus is neutral on those shapes and a corpus-neutral fix is exactly the one a green
 suite cannot tell from no fix at all: `RSTRING_GETMEM`'s output pointer; a definition at
 namespace or `extern "C"` scope; a definition carrying a trailing `__attribute__((...))` or
 `noexcept`; a read through a second pointer local; a rebound guard variable; a store into a
-file-scope scalar; and a trailing write to the source mistaken for a use of it. Each pins
+file-scope scalar; a store into a slot declared in a HEADER and defined in another
+translation unit; an adjusted pointer (`RSTRING_END(str) - 1`) stored into a file static;
+and a trailing write to the source mistaken for a use of it. Each pins
 the FUNNEL COUNTERS and not only the hit count -- an untracked pointer and an empty index
 both end in `hit 0`, and they are different failures. The three that narrow a DISCHARGE ship
 with a green as well: a rule that stops clearing has to be shown still clearing the case it
@@ -675,6 +683,10 @@ def source_reads(body, name, since):
 # `typedef`/`using`/`template`/`namespace` declare no slot of their own. `extern VALUE x;` is
 # NOT skipped: it names a persistent slot defined elsewhere, which is the sink we want.
 DECL_NOT_OBJECT = re.compile(r"^(?:typedef|using|template|namespace)\b")
+# ...and neither does a bare elaborated type specifier. `struct zone;` -- date's zonetab.h
+# forward-declares the tag -- has no declarator at all, so param_name falls back to the TAG
+# and `zone` became a persistent slot matching every local of that name in the tree.
+TAG_ONLY = re.compile(r"\s*(?:struct|union|enum|class)\s+[A-Za-z_]\w*\s*\Z")
 # A function-local `static` has the same storage duration as a file-scope one and the same
 # consequence for an interior pointer, so it is collected too -- by declaration, in the body.
 # One declaration statement: from `static` to the `;` that ends it.
@@ -725,15 +737,36 @@ def local_statics(body):
 
 
 def file_scope_objects(src):
-    """Names declared at file or namespace scope -- file statics and globals.
+    """{name: is_static} for every object declared at file or namespace scope.
 
-    A slot at this scope outlives every frame in the file, so an interior pointer stored
-    into one escapes the deriving frame exactly as a return value does. The sink is
+    A slot at this scope outlives every frame that can reach it, so an interior pointer
+    stored into one escapes the deriving frame exactly as a return value does. The sink is
     recognised POSITIVELY, by name: the inverted form ("any store to something not provably
     frame-local") would read `char *p = RSTRING_PTR(str);` as an escape, and that is the
     single commonest local declaration in the corpus.
+
+    THE STATIC FLAG IS THE REACH, AND IT IS tu_scope's FIRST RULE APPLIED TO SLOTS RATHER
+    THAN TO FUNCTIONS. This walk was already reading every file in the tree, but Tree kept
+    the results in a per-file dict and `escapes` looked in ONE entry -- the deriving
+    function's own file. A slot declared `extern const char *saved;` in a header and defined
+    in another translation unit is invisible that way: the store `saved = RSTRING_PTR(str)`
+    in x.c found nothing named `saved` in x.c, both escape branches declined it and the row
+    discharged `no-window` on an address any later call reads. `declared_scope` is the same
+    rule predicate C's header carve-out is: a header declaration reaches the whole tree, a
+    `.c` `static` reaches its own file and nothing else. One rule, both directions.
+
+    AN AGGREGATE BODY DECLARES MEMBERS, NOT SLOTS, and that had to be fixed before the reach
+    could be widened. `struct pinned_data { VALUE ptr; };` is ONE unit ending in `;`, so the
+    declarator handed to param_name was the whole thing and param_name returns the LAST
+    identifier in it -- the last MEMBER. Confined to one file that was inert; made visible
+    tree-wide it is not, and it produced four rows on the corpus immediately: fiddle's
+    `struct pinned_data`'s member `ptr` matched a local `ptr` in pointer.c, rmagick's
+    `char name[1]` inside a Draw struct matched a local `name` in rminfo.cpp and rmpixel.cpp,
+    and date's zonetab.h member `zone` matched a local in date_parse.c. So the body is cut
+    away and what follows the `}` is the declarator: `struct S { ... } obj;` declares `obj`,
+    and `struct S { ... };` declares no object at all.
     """
-    names = set()
+    names = {}
     for _off, unit in top_level_units(src):
         u = unit.strip()
         if not u.endswith(";"):
@@ -741,15 +774,22 @@ def file_scope_objects(src):
         u = u[:-1].strip()
         if not u or DECL_NOT_OBJECT.match(u):
             continue
+        is_static = bool(re.search(r"\bstatic\b", u))
         for d in split_args(u):
             d = d.split("=")[0]
+            if "}" in d:
+                d = d[d.rfind("}") + 1:]
+            if not d.strip() or TAG_ONLY.match(d):
+                continue                # a tag or a type definition, not an object
             # a prototype declares no object; a function POINTER does, and is spelled
             # `(*fp)(...)`, so only the un-parenthesised declarator is dropped
             if "(" in d and not re.search(r"\(\s*\*", d):
                 continue
             nm = param_name(d)
             if nm:
-                names.add(nm)
+                # two declarations of one name in one file: internal linkage only if every
+                # one of them says so, which is the reporting direction
+                names[nm] = names.get(nm, True) and is_static
     return names
 
 
@@ -813,10 +853,15 @@ class Tree:
         self.by_name = {}
         self.cfuncs = set()
         self.statics = {}               # path -> names at file/namespace scope
+        self.tree_slots = set()         # ...of those, the ones visible tree-wide
         for path, src in self.files.items():
             self._index_funcs(path, src)
             self._index_cfuncs(src)
-            self.statics[path] = file_scope_objects(src)
+            decls = file_scope_objects(src)
+            self.statics[path] = set(decls)
+            for nm, is_static in decls.items():
+                if tu_scope.declared_scope(path, is_static) == tu_scope.TREE:
+                    self.tree_slots.add(nm)
         for f in self.funcs:
             self.by_name.setdefault(f.name, []).append(f)
         self.ranges = {}
@@ -871,6 +916,17 @@ class Tree:
         for name, args, _s, _e in find_calls(src):
             if DEFINE_RE.match(name):
                 self.cfuncs.update(re.findall(r"[A-Za-z_]\w*", " ".join(args)))
+
+    def visible_slots(self, path):
+        """Persistent-storage names a store in `path` can be naming.
+
+        Its own file's declarations, plus every declaration the tree makes visible
+        everywhere -- a header's, and any non-`static` file-scope object. ANOTHER
+        translation unit's `static` is deliberately absent: nothing in this file can name
+        it, so treating it as a sink would read a plain local of the same spelling as an
+        escape. That is the mirror of the header carve-out, from the same rule.
+        """
+        return self.statics.get(path, set()) | self.tree_slots
 
     def enclosing(self, path, off):
         """The innermost top-level function whose body contains `off`, or None."""
@@ -959,12 +1015,9 @@ def converted_locals(fn):
 # ------------------------------------------------------- stage 2: what the pointer does
 
 
-def statement_before(body, rel):
-    """The text of the partial statement ending at `rel`. Used to find an assignment."""
-    lhs = body[max(0, rel - 400):rel]
-    for cut in (";", "{", "}", ","):
-        lhs = lhs[lhs.rfind(cut) + 1:]
-    return lhs
+# The partial statement ending at an offset -- how both predicates find the left-hand side
+# of an assignment. Shared, with the copy propagation it feeds; see tu_scope's fourth rule.
+statement_before = tu_scope.statement_before
 
 
 def is_indexed(fn, deriv_off, macro):
@@ -1038,61 +1091,6 @@ def pointer_alias(fn, deriv_off, macro):
     return None
 
 
-def _pointer_typed(fn, lhs, upto):
-    """Was `lhs` declared a pointer at or before `upto`? Same test pointer_alias uses."""
-    stmt = statement_before(fn.body, upto)
-    return "*" in stmt or bool(re.search(r"\*\s*%s\b" % re.escape(lhs), fn.body[:upto]))
-
-
-# `p`, or `p + n` / `p - n` / `p++` -- a base name with pointer arithmetic on it. The base
-# comes FIRST, because `n + p` is legal C and `e - p` is not a pointer at all; see
-# _local_copies for why that asymmetry is the whole test.
-COPY_RHS = re.compile(r"([A-Za-z_]\w*)\s*(?:[-+][^;]*)?$")
-
-
-def _local_copies(fn, rel):
-    """[(off, lhs, rhs)] for every `lhs = rhs;` after `rel` that carries the same buffer.
-
-    Casts and redundant parentheses are stripped from the right-hand side for the same
-    reason pointer_alias strips them from the left: `q = (const char *)p;` is the same
-    copy as `q = p;` and matching only the bare spelling loses it.
-
-    POINTER ARITHMETIC IS STILL THE POINTER. `q = p + 1` points into the same String bytes
-    as `p` and dangles for exactly the same reason, but the right-hand side had to be one
-    bare name, so `q` never entered the alias set, `last_use` stopped at the copy, the
-    window scan found nothing after it and the row discharged `no-window`: a clean sheet on
-    a live derivation. `q = p; ... use(q)` reported the window on the same source.
-
-    THE EXCLUSION IT MUST NOT LOSE is the mirror shape, and it is load-bearing: `off = e - p`
-    is a pointer DIFFERENCE -- a `ptrdiff_t`, an integer, nothing that can dangle -- and
-    stringio's `ptr->pos = e - RSTRING_PTR(ptr->string)` is the one gem in the corpus that
-    is safe by design. Two things keep it out and both are needed. The base must be the
-    LEFT operand, so `e - p` offers `e` and not `p`; and the LEFT-HAND SIDE must be
-    pointer-typed, which `off` is not. The type test is the same one pointer_alias uses --
-    subtracting two pointers yields an integer, so no pointer-typed lvalue can be assigned
-    a difference, and the two tests fail this shape independently.
-    """
-    body, out = fn.body, []
-    for m in re.finditer(r"(?<![=!<>+\-*/%&|^])=(?!=)", body):
-        if m.start() < rel:
-            continue
-        stmt = statement_before(body, m.start())
-        d = re.search(r"(?:^|[\s*(])([A-Za-z_]\w*)\s*$", stmt)
-        semi = body.find(";", m.end())
-        if not d or semi < 0:
-            continue
-        rhs = body[m.end():semi].strip()
-        while True:
-            stripped = re.sub(r"^\(\s*[A-Za-z_][\w\s*]*\)\s*", "", rhs).strip()
-            if stripped == rhs:
-                break
-            rhs = stripped
-        base = COPY_RHS.fullmatch(rhs)
-        if base and _pointer_typed(fn, d.group(1), m.start()):
-            out.append((m.start(), d.group(1), base.group(1)))
-    return out
-
-
 def alias_names(fn, deriv_off, alias):
     """Every local that carries the derived pointer, following local-to-local copies.
 
@@ -1103,30 +1101,18 @@ def alias_names(fn, deriv_off, alias):
 
     Tracking only `p` reads `q = p` as `p`'s final use, so the window scan stops before the
     `rb_funcall` and the row discharges `no-window` -- a clean sheet on a live derivation,
-    which is the failure mode this predicate is most biased against. Pointer identity
-    therefore propagates through plain copies, transitively and in offset order: a copy only
-    extends the set if it runs AFTER the name it copies became an alias, so `r = q; ...;
-    q = p;` does not make `r` an alias of the buffer.
+    which is the failure mode this predicate is most biased against.
 
-    The right-hand side must be exactly one name and the left-hand side must be
-    pointer-typed, for the reason pointer_alias states: without the type check
-    `c = RSTRING_PTR(s)[i]` makes an `int` look like the buffer. Anything with arithmetic in
-    it -- `q = p + n`, and above all `off = e - p`, which is an offset and not a pointer --
-    is not a copy and does not extend the set.
+    THE PROPAGATION ITSELF IS tu_scope's FOURTH RULE, not this file's. Predicate B carried
+    the same defect on the same shape (`p = RSTRING_PTR(str); q = p; return q;` reported one
+    converted non-cfunc and zero hits), so the transitive closure, the pointer-typed test,
+    the arithmetic base-left rule and the offset ordering are stated once there. What stays
+    here is the SEED: this predicate has exactly one, the local the derivation was assigned
+    to, at the derivation's own offset.
     """
     if not alias:
         return []
-    rel = deriv_off - fn.bstart
-    copies = _local_copies(fn, rel)
-    seen = {alias: rel}
-    frontier = [(alias, rel)]
-    while frontier:
-        cur, since = frontier.pop()
-        for off, lhs, rhs in copies:
-            if rhs == cur and off > since and lhs not in seen:
-                seen[lhs] = off
-                frontier.append((lhs, off))
-    return sorted(seen, key=lambda n: seen[n])
+    return tu_scope.alias_set(fn.body, {alias: deriv_off - fn.bstart})
 
 
 def _names_re(names):
@@ -1188,6 +1174,45 @@ LVALUE_BASE = re.compile(
     r"^\*?\s*((?:[A-Za-z_]\w*\s*::\s*)*[A-Za-z_]\w*)\s*(->|\[|\.|$)")
 
 
+def _pointer_operand(body, text):
+    """Is `text` a bare local this frame declared a pointer?
+
+    Only the bare-identifier form, and deliberately: it exists to answer "could this be the
+    right operand of a pointer difference", where a wrong YES costs a row and a wrong NO
+    reports one. Frame-wide rather than up-to-an-offset, because a subtraction says nothing
+    about where the operand was declared.
+    """
+    t = text.strip()
+    return bool(re.fullmatch(r"[A-Za-z_]\w*", t)) \
+        and tu_scope.pointer_typed(body, t, len(body))
+
+
+def _top_level_minus(text):
+    """Offsets of the BINARY `-` operators at bracket depth 0 in `text`.
+
+    Three spellings are not one: `->` is a member access, `--` is a decrement, and a `-`
+    with no operand to its left is a unary sign. Only a `-` following an identifier, a `)`
+    or a `]` subtracts, and only one outside every bracket subtracts from the value of the
+    whole expression -- `f(a - b)` yields whatever `f` returns.
+    """
+    out, depth, prev = [], 0, ""
+    for i, c in enumerate(text):
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "-" and depth == 0:
+            nxt = text[i + 1:i + 2]
+            # `prev` is "" at the start of the text, and `"" in "_)]"` is True in Python --
+            # which made a leading unary `-RSTRING_LEN(x)` parse as a subtraction.
+            if nxt not in ("-", ">") and prev != "-" and prev \
+                    and (prev.isalnum() or prev in "_)]"):
+                out.append(i)
+        if not c.isspace():
+            prev = c
+    return out
+
+
 def escapes(fn, deriv_off, expr, names, cons, tree=None):
     """[(kind, off, text, extra)] -- ways the pointer outlives or leaves this frame.
 
@@ -1198,19 +1223,42 @@ def escapes(fn, deriv_off, expr, names, cons, tree=None):
     rel = deriv_off - fn.bstart
     ptrp = fn.ptr_params()
     alias_re = _names_re(names)
-    statics = set(tree.statics.get(fn.path, ()) if tree is not None else ())
+    statics = set(tree.visible_slots(fn.path) if tree is not None else ())
     statics.update(local_statics(body))
 
-    def carries(text):
-        # Pointer DIFFERENCE is an offset, not a pointer. stringio's
-        # `ptr->pos = e - RSTRING_PTR(ptr->string)` stores a long; reading it as a stored
-        # interior pointer flagged the one gem in the corpus that is safe by design.
-        stripped = text.replace("->", "")
-        if "-" in stripped:
-            return False
+    def holds(text):
+        """Does `text`, taken whole, evaluate to something carrying the buffer?"""
         if alias_re and alias_re.search(text):
             return True
         return any(nm in INTERIOR for nm, _a, _s, _e in find_calls(text))
+
+    def carries(text):
+        # POINTER MINUS INTEGER IS STILL A POINTER; POINTER MINUS POINTER IS NOT.
+        # The first cut of this rejected every expression containing a `-`, which kept
+        # stringio's `ptr->pos = e - RSTRING_PTR(ptr->string)` out -- a `ptrdiff_t`, the one
+        # gem in the corpus safe by design -- at the cost of rejecting `RSTRING_END(str) - 1`
+        # with it. That is a valid pointer into the String's final byte and stores into a
+        # file static exactly as the bare derivation does; the row discharged `no-window`,
+        # zero hits. The distinction is which operand carries the buffer: if anything to the
+        # RIGHT of a top-level `-` does, the result is an integer and cannot dangle.
+        #
+        # "Carries the buffer" is too narrow for the right operand and that is not a detail:
+        # `pos = e - p` is scanned once per derivation, and on the `RSTRING_END` row the
+        # alias set is `{e}`, so `p` -- the other derivation's alias, a pointer -- read as an
+        # integer and the difference read as an adjusted pointer. So the right operand asks
+        # the wider question, "is this pointer-valued at all", with the frame-wide form of
+        # the same declaration test the copy scan uses.
+        cuts = _top_level_minus(text)
+        if not cuts:
+            return holds(text)
+        parts, last = [], 0
+        for c in cuts:
+            parts.append(text[last:c])
+            last = c + 1
+        parts.append(text[last:])
+        if any(holds(p) or _pointer_operand(body, p) for p in parts[1:]):
+            return False
+        return holds(parts[0])
 
     # 1. returned -- either directly, or via the local it was aliased into.
     for m in re.finditer(r"\breturn\b", body):
@@ -2211,9 +2259,35 @@ NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-"]
 #                       rule. Not cleared: the source's last read before the rebind is the
 #                       ARGUMENT of the allocating call itself, so nothing roots it at `*s1`.
 #                       Pinned here rather than left floating in a positive-control tree.
-TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 20, "iconv-": 15, "zstd-": 6,
+#
+# ROUND 9, FOURTH REVIEW PASS: +4 rows over the 99-tree corpus (460 -> 464), 0 removed, 0
+# columns changed. All four come from ONE change -- `carries()` no longer rejecting every
+# expression that contains a `-` -- and all four are the SAME shape as rows the predicate
+# already reported, with a subtraction somewhere in the same statement. Proven, not asserted:
+# deleting only the `-` term from each site makes the UNFIXED script report the same row at
+# the same line, so the blanket rejection was discharging them and nothing else was.
+#
+#   json 2 -> 3       parser.c:2710 `cResumableParser_rest`, `return rb_utf8_str_new(ptr +
+#                       offset, len - offset)`. Identical in kind to parser.c:140, already
+#                       triaged four paragraphs up as NOISE from `carries()`: the pointer is
+#                       an ARGUMENT of the returned call, and narrowing `carries()` to reject
+#                       an argument position would also reject `return strchr(p, ',')`, which
+#                       really does return an interior pointer. Same disposition.
+#   zlib 3 -> 4       zlib.c:2921 (3.2.1), :2915 (3.2.3), :2788 (basecamp-patch),
+#   in all three        `gz->crc = checksum_long(crc32, gz->crc, (Bytef*)RSTRING_PTR(str) +
+#   trees               gz->ungetc, RSTRING_LEN(str) - gz->ungetc)`. The value stored is a
+#                       CRC, not the pointer -- the same argument-position noise as json's,
+#                       and the same shape as zlib.c:2841 (`gz->comment = rb_str_new(
+#                       RSTRING_PTR(...), len)`), which has been a hit in every round. NOISE
+#                       under the same stated limit.
+#
+# The change that produced them is a recall fix and its own red is generated (`tail =
+# RSTRING_END(str) - 1` into a file static); these four are what it costs, and the exclusion
+# it was protecting -- stringio's `ptr->pos = e - RSTRING_PTR(ptr->string)` -- still holds and
+# still has its green.
+TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 21, "iconv-": 15, "zstd-": 6,
            "sqlite3-2.9.5": 3, "websocket-driver-": 2, "stringio-": 1,
-           "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 2, "puma-": 6,
+           "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 3, "puma-": 6,
            "unicorn-6.1.0": 6, "date-": 18, "openssl-3.3.0": 5, "openssl-3.3.1": 5,
            "openssl-3.3.3": 5, "openssl-4.0.0": 5}
 
@@ -3075,6 +3149,177 @@ def self_test(pool):
           "...and GREEN in the same fixture: a.c's copy is in a.c's OWN callee, so "
           "copies-in-callee still discharges it -- a scoping fix that clears nothing is "
           "the rule turned off", tu_dis)
+
+    # 8g/8h. GENERATED RED AND GREEN: A PERSISTENT SLOT DECLARED IN ANOTHER TRANSLATION
+    #    UNIT (:1201).
+    #
+    #    The sink set was `tree.statics[fn.path]` -- the deriving function's OWN file. A slot
+    #    declared `extern const char *saved;` in a header and defined in y.c is not in x.c's
+    #    entry, so `saved = RSTRING_PTR(str)` in x.c matched no sink, both escape branches
+    #    declined it and the row discharged `no-window`: zero hits on an address every later
+    #    call reads through the same name.
+    #
+    #    THE MIRROR IS THE GREEN, AND IT IS THE SAME RULE. Predicate C scopes a `static` to
+    #    its .c and deliberately NOT to a header, because a header's declaration reaches every
+    #    includer. Read the other way round that says y.c's own `static const char *hidden;`
+    #    reaches nothing outside y.c -- so x.c's plain local of that name is not a sink, and a
+    #    tree-wide set that ignored linkage would report it. One fixture carries both: two
+    #    stores, one file, one funnel; a fix that scopes too loosely fails the green and one
+    #    that does not resolve the header at all fails the red.
+    #
+    #    x.h declares the slot and y.c defines it, which is what makes this a THREE-file
+    #    fixture rather than a two-file one -- the definition has to be somewhere, and putting
+    #    it in x.c would make the row visible to the unfixed code.
+    xh = ("extern const char *saved;\n")
+    yc = ("#include <ruby.h>\n\n"
+          "const char *saved;\n"
+          "static const char *hidden;\n\n"
+          "static VALUE\n"
+          "readback(VALUE self)\n"
+          "{\n"
+          "    return rb_str_new_cstr(hidden ? hidden : saved);\n"
+          "}\n\n"
+          "void Init_y(void) { rb_define_method(rb_cObject, \"r\", readback, 0); }\n")
+    xc = ("#include <ruby.h>\n"
+          "#include \"x.h\"\n\n"
+          "static VALUE\n"
+          "store(VALUE self, VALUE str)\n"
+          "{\n"
+          "    Check_Type(str, T_STRING);\n"
+          "%s\n"
+          "    return Qnil;\n"
+          "}\n\n"
+          "void Init_x(void) { rb_define_method(rb_cObject, \"s\", store, 1); }\n")
+    xtu = {
+        # the slot really is visible here: x.h declares it, y.c defines it
+        "extern": "    saved = RSTRING_PTR(str);",
+        # a name that is another translation unit's `static`: this is a plain LOCAL and
+        # nothing in this file can even refer to y.c's slot
+        "shadowed": "    const char *hidden = RSTRING_PTR(str);\n    (void)hidden;",
+    }
+    xt = {tag: _sweep(_synth("fx-xtu-%s" % tag,
+                             {"ext/x.h": xh, "ext/y.c": yc, "ext/x.c": xc % arm}))
+          for tag, arm in xtu.items()}
+    check(xt["extern"].funcs == 4 and len(xt["extern"].derivations) == 1
+          and len(xt["extern"].with_window) == 1 and len(xt["extern"].hits) == 1
+          and xt["extern"].hits[0][0] == "ESCAPES-INTO-STATIC",
+          "cross-TU sink red: a slot declared in a header and defined in another .c is a "
+          "persistent sink in the file that STORES into it -- unfixed the sink set was that "
+          "file's own declarations and the row discharged no-window",
+          "funcs %d, derive %d, win %d, hits %s, discharges %s"
+          % (xt["extern"].funcs, len(xt["extern"].derivations),
+             len(xt["extern"].with_window), [(h[0], h[2]) for h in xt["extern"].hits],
+             [d[0] for d in xt["extern"].discharges]))
+    check(xt["shadowed"].funcs == 4 and len(xt["shadowed"].derivations) == 1
+          and not xt["shadowed"].hits
+          and any(d[0] == "no-window" for d in xt["shadowed"].discharges),
+          "cross-TU sink green: ANOTHER file's `static` is not visible here, so a local of "
+          "the same name still discharges -- the widening is the header carve-out read "
+          "backwards, not 'every file-scope name everywhere'",
+          "funcs %d, derive %d, hits %s, discharges %s"
+          % (xt["shadowed"].funcs, len(xt["shadowed"].derivations),
+             [(h[0], h[2]) for h in xt["shadowed"].hits],
+             [d[0] for d in xt["shadowed"].discharges]))
+    # ...and the parse rule the widening forced, asserted directly rather than through a row:
+    # an aggregate body declares MEMBERS and a bare tag declares nothing, so neither may enter
+    # the slot set. Confined to one file that was inert; tree-wide it produced four corpus
+    # rows immediately (fiddle `struct pinned_data { VALUE ptr; }` against a local `ptr`,
+    # rmagick's `char name[1]` against two locals called `name`, date's `struct zone;`).
+    slots = file_scope_objects(
+        "struct pinned_data { VALUE ptr; };\n"
+        "struct zone;\n"
+        "typedef struct { int x; } thing_t;\n"
+        "static struct holder { const char *p; } g_slot;\n"
+        "const char *saved;\n"
+        "static const char *hidden;\n")
+    check(slots == {"g_slot": True, "saved": False, "hidden": True},
+          "slot walk green: an aggregate BODY declares members and a bare tag declares "
+          "nothing -- only `g_slot`, `saved` and `hidden` are objects, and only the two "
+          "spelled `static` in a .c have internal linkage", sorted(slots.items()))
+
+    # 8i/8j. GENERATED RED AND GREEN: A SUBTRACTIVE POINTER EXPRESSION IS STILL A POINTER.
+    #
+    #    `carries()` rejected every expression containing a `-`, to keep stringio's
+    #    `ptr->pos = e - RSTRING_PTR(ptr->string)` out -- a ptrdiff_t, the one gem in the
+    #    corpus safe by design. It rejected the adjusted pointer with it: `tail =
+    #    RSTRING_END(str) - 1` is a valid pointer into the String's final byte, stored into a
+    #    file static that outlives the call, and the row discharged `no-window` with zero
+    #    hits. The discriminator is which operand carries the buffer, not whether a `-` is
+    #    present.
+    #
+    #    THREE ARMS, because both directions have to be pinned in one fixture. `plain` is the
+    #    same function with no arithmetic at all and fixes what the row should look like;
+    #    `adjusted` must give that same row; `difference` must still clear, and its funnel is
+    #    asserted so a parse failure cannot pass as the exclusion holding.
+    minus_c = ("#include <ruby.h>\n\n"
+               "static const char *tail;\n"
+               "static long pos;\n\n"
+               "static VALUE\n"
+               "store(VALUE self, VALUE str)\n"
+               "{\n"
+               "    const char *p = RSTRING_PTR(str);\n"
+               "    const char *e = RSTRING_END(str);\n"
+               "%s\n"
+               "    return Qnil;\n"
+               "}\n\n"
+               "static VALUE\n"
+               "later(VALUE self)\n"
+               "{\n"
+               "    return rb_str_new(tail, pos);\n"
+               "}\n\n"
+               "void Init_probe(void)\n"
+               "{\n"
+               "    rb_define_method(rb_cObject, \"s\", store, 1);\n"
+               "    rb_define_method(rb_cObject, \"l\", later, 0);\n"
+               "}\n")
+    minus_arms = {
+        "adjusted": "    tail = e - 1;\n    (void)p;",
+        "plain": "    tail = e;\n    (void)p;",
+        "difference": "    pos = e - p;",
+    }
+    mn = {tag: _sweep(_synth("fx-minus-%s" % tag, {"ext/probe.c": minus_c % arm}))
+          for tag, arm in minus_arms.items()}
+    base_mn = (len(mn["plain"].derivations), len(mn["plain"].with_window),
+               [h[0] for h in mn["plain"].hits])
+    check(base_mn == (2, 1, ["ESCAPES-INTO-STATIC"])
+          and (len(mn["adjusted"].derivations), len(mn["adjusted"].with_window),
+               [h[0] for h in mn["adjusted"].hits]) == base_mn,
+          "adjusted-pointer red: `tail = RSTRING_END(str) - 1` stored into a file static "
+          "gives the same funnel and the same row as `tail = RSTRING_END(str)` -- unfixed "
+          "the `-` alone discharged it no-window",
+          "plain %s vs adjusted %s"
+          % (base_mn, (len(mn["adjusted"].derivations), len(mn["adjusted"].with_window),
+                       [h[0] for h in mn["adjusted"].hits])))
+    check(len(mn["difference"].derivations) == 2 and not mn["difference"].with_window
+          and not mn["difference"].hits
+          and any(d[0] == "no-window" for d in mn["difference"].discharges),
+          "pointer-difference green: `pos = e - p` into a file static is an INTEGER and is "
+          "still not an escape -- the exclusion stringio depends on, now stated as 'the "
+          "right operand carries the buffer' rather than as 'a `-` is present'",
+          "derive %d, win %d, hits %s, discharges %s"
+          % (len(mn["difference"].derivations), len(mn["difference"].with_window),
+             [(h[0], h[2]) for h in mn["difference"].hits],
+             [d[0] for d in mn["difference"].discharges]))
+    # THE REJECTION TABLE FOR THE SPLIT ITSELF, asserted directly rather than through a row.
+    # Three spellings of `-` are not subtraction and a fourth is not top-level; each of them
+    # is a constant in _top_level_minus, and a constant added to fix a corpus row is not
+    # tested by the corpus staying green -- POST_DECL_STOP was inert in this suite for a
+    # whole round on exactly that argument.
+    cuts = {t: bool(_top_level_minus(s)) for t, s in {
+        "member": "s->ptr",              # `->` is a member access
+        "decrement": "p--",              # `--` is a decrement
+        "unary": "-RSTRING_LEN(x)",      # a leading `-` has no left operand
+        "signed-rhs": "e - -1",          # ...and neither does the second one here
+        "nested": "f(a - b)",            # inside a call: the value is f's, not the operand's
+        "indexed": "x[-1]",              # inside a subscript
+        "binary": "e - 1",               # these two are
+        "tight": "e-1",
+    }.items()}
+    check(cuts == {"member": False, "decrement": False, "unary": False, "nested": False,
+                   "indexed": False, "signed-rhs": True, "binary": True, "tight": True},
+          "minus-split green: `->`, `--`, a leading sign and a `-` inside brackets are not "
+          "top-level subtractions; `e - 1`, `e-1` and the first `-` of `e - -1` are",
+          sorted(cuts.items()))
 
     # 9. PER-RULE MUTATION TABLE. A discharge rule with no generated red is a rule nobody
     #    has tested; round 5 shipped four over-clears in predicate A that a green-only

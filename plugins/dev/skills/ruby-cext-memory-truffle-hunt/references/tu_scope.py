@@ -1,8 +1,9 @@
-"""The linkage rule all four pass-1 sweeps resolve names by, written down once.
+"""The rules all four pass-1 sweeps kept re-deriving, written down once.
 
     from tu_scope import Scope, TREE, declared_scope, bind
     from tu_scope import top_level_units, scope_zero_braces, storage_depth
     from tu_scope import match_brace, match_paren, skip_post_declarator
+    from tu_scope import statement_before, pointer_typed, local_copies, alias_set
 
 WHY THIS FILE EXISTS
 --------------------
@@ -136,6 +137,46 @@ trailing return type that is itself a function-pointer type (`-> VALUE (*)(int)`
 at its `(`; and one naming an elaborated type (`-> struct S`) stops at `struct`. All
 three cost recall rather than clearing a row, which is the direction this function is
 allowed to be wrong in.
+
+THE FOURTH RULE, AND IT IS NOT A PARSING RULE: WHICH LOCALS CARRY THE SAME POINTER
+---------------------------------------------------------------------------------
+The three rules above are lexical -- where a declaration lives, which braces are
+scopes, where a declarator ends. This one is intra-procedural dataflow, and it is here
+for the same measured reason and not for tidiness: `q = p;` copies a pointer, and a
+predicate that tracks only `p` stops looking at the copy.
+
+    predicate D  alias_names/_local_copies                     (round 9, thread D:1186)
+    predicate B  escapes_by_return's `aliases`                 (round 9, thread B:716)
+
+Both hosts fail the same way and it is this directory's signature failure: the funnel
+counts the derivation, the scan finds no later use, and the row clears. D printed
+`derive 1/1 -> windowed 0/0 -> hit 0` on a pointer read after a compaction; B printed
+one converted non-cfunc and zero hits on `p = RSTRING_PTR(str); q = p; return q;`. A
+recall loss that reads as a clean gem, twice, in two files -- which is the bar this
+module's other three rules were extracted at.
+
+The two callers seed it differently and that difference is theirs to keep: D seeds from
+ONE derivation offset, B from every in-place conversion of its by-value parameter plus
+`RSTRING_GETMEM`'s output argument. So `alias_set` takes the seeds as `{name: offset}`
+and answers only the question both share -- which OTHER names now hold the same value.
+
+THREE CONSTRAINTS, EACH FORCED BY A ROW THAT WOULD OTHERWISE HAVE MOVED THE WRONG WAY:
+
+  the left-hand side must be POINTER-TYPED. Without it `c = RSTRING_PTR(s)[i]` makes an
+  `int` look like the buffer and every later mention of `c` reads as an escape --
+  stringio's `strio_getbyte`, a false positive with a very ordinary spelling.
+
+  arithmetic keeps the pointer, and the BASE MUST BE THE LEFT OPERAND. `q = p + 1`
+  points into the same String bytes; `off = e - p` is a ptrdiff_t and cannot dangle.
+  `n + p` is legal C and loses recall here, which is the direction to be wrong in.
+
+  a copy extends the set only if it runs AFTER the name it copies became an alias, so
+  `r = q; ...; q = p;` does not make `r` an alias of the buffer.
+
+`exclude` is the caller's, because the two disagree about what an assignment to a
+pointer PARAMETER means: for B, `*out = p` is the escape it is looking for, so `out`
+must not be swallowed as "just another alias" first. D asks about `out` in a different
+order and passes nothing.
 """
 
 import bisect
@@ -393,6 +434,84 @@ def scope_zero_braces(src):
     for _u in top_level_units(src, 0, transparent):
         pass
     return transparent
+
+
+# ------------------------------------------------- which locals carry the same pointer
+#
+# `p`, or `p + n` / `p - n` / `p++` -- a base name with pointer arithmetic on it. The base
+# comes FIRST, because `n + p` is legal C and `e - p` is not a pointer at all; see the
+# module docstring for why that asymmetry is the whole test.
+COPY_RHS = re.compile(r"([A-Za-z_]\w*)\s*(?:[-+][^;]*)?$")
+_ASSIGN = re.compile(r"(?<![=!<>+\-*/%&|^])=(?!=)")
+_LHS_TAIL = re.compile(r"(?:^|[\s*(])([A-Za-z_]\w*)\s*$")
+_CAST_HEAD = re.compile(r"^\(\s*[A-Za-z_][\w\s*]*\)\s*")
+
+
+def statement_before(body, rel):
+    """The text of the partial statement ending at `rel`. Used to find an assignment."""
+    lhs = body[max(0, rel - 400):rel]
+    for cut in (";", "{", "}", ","):
+        lhs = lhs[lhs.rfind(cut) + 1:]
+    return lhs
+
+
+def pointer_typed(body, name, upto):
+    """Was `name` declared a pointer at or before `upto`?
+
+    Either the assignment being read IS the declaration (`char *p = ...`), or a `*name`
+    declarator appeared earlier in the frame.
+    """
+    stmt = statement_before(body, upto)
+    return "*" in stmt or bool(re.search(r"\*\s*%s\b" % re.escape(name), body[:upto]))
+
+
+def local_copies(body, after=0):
+    """[(off, lhs, rhs_base)] for every `lhs = rhs;` at or after `after` that copies one name.
+
+    Casts and redundant parentheses are stripped from the right-hand side: `q = (const char
+    *)p;` is the same copy as `q = p;` and matching only the bare spelling loses it.
+    """
+    out = []
+    for m in _ASSIGN.finditer(body):
+        if m.start() < after:
+            continue
+        stmt = statement_before(body, m.start())
+        d = _LHS_TAIL.search(stmt)
+        semi = body.find(";", m.end())
+        if not d or semi < 0:
+            continue
+        rhs = body[m.end():semi].strip()
+        while True:
+            stripped = _CAST_HEAD.sub("", rhs).strip()
+            if stripped == rhs:
+                break
+            rhs = stripped
+        base = COPY_RHS.fullmatch(rhs)
+        if base and pointer_typed(body, d.group(1), m.start()):
+            out.append((m.start(), d.group(1), base.group(1)))
+    return out
+
+
+def alias_set(body, seeds, exclude=()):
+    """Every local in `body` that carries the same pointer as one of `seeds`.
+
+    `seeds` is `{name: offset}` -- the offset at which each name became an alias. Returns
+    the names in offset order, seeds included; an empty `seeds` yields an empty list, which
+    every caller must treat as "no alias", never as "any name".
+    """
+    if not seeds:
+        return []
+    copies = local_copies(body, min(seeds.values()))
+    exclude = set(exclude)
+    seen = dict(seeds)
+    frontier = sorted(seeds.items(), key=lambda kv: kv[1])
+    while frontier:
+        cur, since = frontier.pop()
+        for off, lhs, rhs in copies:
+            if rhs == cur and off > since and lhs not in seen and lhs not in exclude:
+                seen[lhs] = off
+                frontier.append((lhs, off))
+    return sorted(seen, key=lambda n: seen[n])
 
 
 def storage_depth(src):

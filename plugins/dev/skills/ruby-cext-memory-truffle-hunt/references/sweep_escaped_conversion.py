@@ -144,27 +144,51 @@ than only the hit count, because the failure being guarded against prints `0 fn(
   10e  the interior stored into a file-scope slot             `g_saved = RSTRING_PTR(s)`
   10f  a caller conversion an assignment overwrote            `StringValue(x); x = y; f(x)`
 
-All six keep this predicate keyed on a BY-VALUE PARAMETER (`converted_params` ->
+A SEVENTH, ONE COPY FURTHER ALONG, from the round-9 review (:716). 10a seeds the alias set
+from the conversion itself, so `*out = p` is found and `q = p; *out = q` is not: pointer
+identity did not survive a local-to-local copy, and `p = RSTRING_PTR(str); q = p; return q;`
+-- the filed rmagick defect written one line longer -- reported one converted non-cfunc and
+ZERO hits. Predicate D carried the identical defect on its own alias set, so the propagation
+is now `tu_scope.alias_set` and this file supplies only the seeds. Item 13, generated red and
+green: `q = p; return q;` must give the SAME row as `return p;`, `q = p; *out = q;` must be a
+STORES-INTERIOR rather than be swallowed as an alias, and `r = q;` running BEFORE `q = p;`
+must make `r` nothing at all. Corpus-neutral, like all six above.
+
+All of them keep this predicate keyed on a BY-VALUE PARAMETER (`converted_params` ->
 `value_params` -> a bare `VALUE` in the parameter list) and change only what counts as an
 *escape*. None of them introduces a window, a GC-triggering call, or a pointer held across
 one -- that is predicate D's charter and widening B into it is how a gem gets cleared by
 both. 10c in particular is the escape-analysis half of `RSTRING_GETMEM`: D covers the same
 macro's argument taking part in WINDOW analysis, separately.
 
-NAME RESOLUTION IS SHARED, AND LIVES IN tu_scope.py
----------------------------------------------------
+FOUR SHARED RULES, ALL OF THEM IN tu_scope.py
+---------------------------------------------
 Every lookup that turns a NAME at a use site into a DEFINITION goes through
 `tu_scope.bind`, which states C's linkage rule once for all four predicates: a use binds
 to a definition in its own file first, a `static` definition in another .c/.cc/.cpp/.cxx
 is not a candidate at all, and everything else -- non-static definitions, and anything
-declared in a HEADER -- stays tree-wide. That module is a sibling file and these scripts
-will not run without it; references/ is the unit that ships.
+declared in a HEADER -- stays tree-wide.
+
+This file was the last one carrying its own PRE-EXTRACTION copies of the other three, and
+what that cost was measured rather than argued: 23,120 indexed definitions over the 99-tree
+corpus against the 23,318 predicates C and D agreed on. Collapsing it onto tu_scope moved
+the count to 23,318 and moved NO row -- the whole visible difference is nio4r 341 -> 416 and
+sassc 983 -> 1106, definitions carrying `EV_NOEXCEPT` and a C++ `const` qualifier, none of
+which converts a by-value parameter.
+
+  rule 2  which braces open a storage scope   -- `namespace X {`, `extern "C" {`
+  rule 3  where a declarator ends and a body begins, with its rejection table, which this
+          file's --self-test now asserts alongside C's and D's
+  rule 4  which locals carry the same pointer -- the transitive closure over local-to-local
+          copies that `escapes_by_return` seeds from its conversion and from RSTRING_GETMEM
+
+That module is a sibling file and these scripts will not run without it; references/ is the
+unit that ships.
 
 ACCEPTANCE (--self-test): see self_test(). Run it before trusting any result from this
 script -- silence is a property of the query until the counts say otherwise.
 """
 import argparse
-import bisect
 import pathlib
 import re
 import shutil
@@ -245,78 +269,22 @@ def strip_directives(src):
     return "".join(out)
 
 
-def match_brace(src, open_idx):
-    """Index of the `}` matching the `{` at open_idx, or -1."""
-    depth = 0
-    for i in range(open_idx, len(src)):
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
-
-
-# C++ SCOPE HEADS, and the walk that treats them as transparent. Ported from
-# sweep_static_values.py, where the same three brace dispositions were forced by vernier:
-# a depth-0 `{` belongs to the CURRENT statement when it opens an aggregate or an
-# initialiser, ENDS it when it opens a function body, and -- the disposition C++ adds --
-# opens a scope with no storage duration of its own when it follows `namespace X` or
-# `extern "C"`. Predicate B only ever had the first two, so every definition in a
-# namespaced or `extern "C"`-wrapped tree sat at nonzero depth and _index_funcs skipped it:
-# `0 fn(s)`, which reads as a clean gem.
+# THE BRACE WALK AND THE DECLARATOR WALK ARE tu_scope's, NOT THIS FILE'S ANY MORE.
 #
-# `extern "C"` reaches here AFTER strip_noise, which blanks string BODIES and keeps the
-# quotes -- the text is `extern " " {`, so the pattern has to allow a blanked literal.
-NAMESPACE_HEAD = re.compile(r"\bnamespace(?:\s+\w+(?:\s*::\s*\w+)*)?\s*$")
-LINKAGE_HEAD = re.compile(r"\bextern\s*\"[^\"]*\"\s*$")
-
-
-def top_level_units(src, base=0, transparent=None):
-    """[(offset, text)] -- one entry per declaration or definition at static-storage scope.
-
-    `transparent`, when a set is passed, also collects the offsets of the `{` and `}` of
-    every namespace and linkage block the walk descends through. The walk that knows which
-    braces are scopes is the walk that knows which braces are not, so both callers read it
-    from here: _index_funcs subtracts those offsets from its depth count, and
-    file_scope_objects reads the units.
-    """
-    n, i, start = len(src), 0, 0
-    while i < n:
-        c = src[i]
-        if c == "{":
-            close = match_brace(src, i)
-            if close < 0:
-                return
-            pre = src[start:i].rstrip()
-            if NAMESPACE_HEAD.search(pre) or LINKAGE_HEAD.search(pre):
-                if transparent is not None:
-                    transparent.add(i)
-                    transparent.add(close)
-                for u in top_level_units(src[i + 1:close], base + i + 1, transparent):
-                    yield u
-                i = start = close + 1
-                continue
-            if re.search(r"\b(struct|union|enum)\b\s*\w*$", pre) or pre.endswith("="):
-                i = close + 1          # an aggregate or an initialiser: same statement
-                continue
-            yield base + start, src[start:close + 1]
-            i = start = close + 1
-            continue
-        if c == ";":
-            yield base + start, src[start:i + 1]
-            i = start = i + 1
-            continue
-        i += 1
-
-
-def scope_zero_braces(src):
-    """Offsets of the `{`/`}` that open and close a namespace or linkage block."""
-    transparent = set()
-    for _u in top_level_units(src, 0, transparent):
-        pass
-    return transparent
+# Both were ported into this file verbatim in round 8 and left here when they were extracted
+# in round 9, so this was the last remaining pre-extraction copy in the directory -- measured
+# at 23,120 indexed functions against the 23,318 predicates C and D agree on over the same 99
+# trees. The 198 definitions in the gap are the ones carrying `__attribute__((...))`,
+# `noexcept`, `EV_NOEXCEPT` or a C++ `const` qualifier between the `)` and the `{`, which
+# this file's own five-line index skipped whitespace only across.
+#
+# Rule 2 (which braces open a storage scope) and rule 3 (where a declarator ends and a body
+# begins) are one rule each now, in one file, with one rejection table that this file's
+# self-test asserts alongside C's and D's.
+match_brace = tu_scope.match_brace
+top_level_units = tu_scope.top_level_units
+scope_zero_braces = tu_scope.scope_zero_braces
+skip_post_declarator = tu_scope.skip_post_declarator
 
 
 def split_args(text):
@@ -538,33 +506,23 @@ class Tree:
         macro's block instead of the function's body. That is a false NEGATIVE generator,
         which is the failure mode that matters.
 
-        Depth is counted over STORAGE scopes, not braces. `namespace X {` and
-        `extern "C" {` nest their contents without giving them a new storage duration, so
-        scope_zero_braces marks that pair and the count skips it -- otherwise a C++ tree
-        that wraps its helpers in either one indexes zero functions and every later stage
-        reports a clean sheet on an empty index. sweep_static_values.py needed the same
-        three dispositions for the same reason; this is the port.
+        Depth is counted over STORAGE scopes, not braces, and the crossing from the `)` to
+        the `{` is a walk rather than a whitespace skip. Both are tu_scope's -- the same
+        five lines predicate C and predicate D index with, after this file spent a round
+        carrying its own copy of them. What that cost was measurable and was measured: this
+        index found 23,120 definitions over the corpus where C and D found 23,318, and the
+        198 missing ones are every definition whose declarator carries `__attribute__((...))`,
+        `noexcept`, `EV_NOEXCEPT` or a C++ `const` qualifier. A definition this walk drops
+        takes its conversions, its escapes and its call sites with it.
         """
-        transparent = scope_zero_braces(src)
-        # brace offsets and the storage depth after each, so a name's depth is a bisect
-        # rather than a re-count of the file
-        bpos, bdepth, depth = [], [], 0
-        for m in re.finditer(r"[{}]", src):
-            if m.start() in transparent:
-                continue
-            depth += 1 if m.group() == "{" else -1
-            bpos.append(m.start())
-            bdepth.append(depth)
+        depth_at = tu_scope.storage_depth(src)
         for m in re.finditer(r"\b([A-Za-z_]\w*)\s*(?=\()", src):
-            k = bisect.bisect_left(bpos, m.start())
-            if (bdepth[k - 1] if k else 0) != 0 or m.group(1) in NOT_CALLS:
+            if depth_at(m.start()) != 0 or m.group(1) in NOT_CALLS:
                 continue
             args, past = call_args(src, m.end())
             if args is None:
                 continue
-            k = past
-            while k < len(src) and src[k] in " \t\r\n":
-                k += 1
+            k = skip_post_declarator(src, past)
             if k >= len(src) or src[k] != "{":
                 continue
             close = match_brace(src, k)
@@ -683,13 +641,26 @@ def escapes_by_return(fn, param, statics=()):
     # only the first was ever found. (Predicate D has a sibling gap on the same macro; its
     # half is about the argument taking part in WINDOW analysis. This half is escape
     # analysis only and does not reach into D.)
-    aliases = set()
+    #
+    # AND THE ALIAS OF AN ALIAS IS STILL THE INTERIOR. `p = RSTRING_PTR(str); q = p;
+    # return q;` seeded only `p`, so `derives("q")` was false, the return read as clean and
+    # the tree reported one converted non-cfunc and ZERO hits -- the same silent recall loss
+    # one copy further along, in the same function, and the same defect predicate D carried
+    # on its own alias set. The propagation is tu_scope's fourth rule, stated once for both;
+    # what stays here is the SEEDS, which are this predicate's own: an in-place conversion
+    # of its by-value parameter, and RSTRING_GETMEM's output argument.
+    seeds = {}
+
+    def seed(nm, off):
+        if nm not in seeds or off < seeds[nm]:
+            seeds[nm] = off
+
     for name, args, _s, _e in find_calls(body):
         if name in ("RSTRING_GETMEM", "rb_str_getmem") and len(args) >= 2 \
                 and args[0].strip() == param:
             nm = re.fullmatch(r"\*?\s*([A-Za-z_]\w*)", args[1].strip())
             if nm:
-                aliases.add(nm.group(1))
+                seed(nm.group(1), _s)
     for m in re.finditer(r"(?<![=!<>])=(?!=)", body):
         semi = body.find(";", m.end())
         if semi < 0:
@@ -705,7 +676,12 @@ def escapes_by_return(fn, param, statics=()):
         # file-scope slot, which are the STORES-INTERIOR case handled below.
         nm = re.match(r"^(?:[A-Za-z_]\w*\s+)*\*?\s*([A-Za-z_]\w*)$", stmt)
         if nm and nm.group(1) not in ptr_params and nm.group(1) not in statics:
-            aliases.add(nm.group(1))
+            seed(nm.group(1), m.start())
+    # The exclusion is passed in rather than applied afterwards: an out-parameter and a
+    # file-scope slot are the two SINKS this function reports, and a sink that is also
+    # pointer-typed reads as a copy. Swallowing `*out = p` into the alias set would delete
+    # the STORES-INTERIOR row it exists to produce.
+    aliases = set(tu_scope.alias_set(body, seeds, exclude=ptr_params | statics))
 
     def derives(expr):
         """Does `expr` evaluate to the converted String's interior?"""
@@ -1500,6 +1476,152 @@ void Init_b(void) { rb_define_method(rb_cObject, "b_go", b_go, 1); }
           "...and GREEN tree-wide: with no namesake in b.c and external linkage on the "
           "helper, BOTH callers reach it and both report",
           sorted((h[0], h[1]) for h in rg.hits))
+
+    # ---------------------------------------------------------------- round-9 thread
+    #
+    # 12. THE FUNCTION INDEX IS tu_scope's NOW (:716's neighbour). This file carried the
+    #     last pre-extraction copy of the brace walk and the declarator walk, measured at
+    #     23,120 indexed definitions against the 23,318 predicates C and D agreed on over the
+    #     same 99 trees. The collapse is corpus-visible in exactly one place -- nio4r 341 ->
+    #     416 and sassc 983 -> 1106, and no row moves -- so the red has to be generated, and
+    #     it is the same shape both other callers assert.
+    def hdr_tree(tag, header):
+        return _synth("t_hdr_%s" % tag, {"ext/t.cpp": """#include <ruby.h>
+%s
+{
+    StringValue(str);
+    return RSTRING_PTR(str);
+}
+static VALUE go(VALUE self, VALUE arg) { return rb_str_new2(grab(arg)); }
+void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
+""" % header})
+
+    hdrs = {
+        "plain": "static const char *grab(VALUE str)",
+        "attr": "static const char *grab(VALUE str) __attribute__((noinline))",
+        "noexcept": "static const char *grab(VALUE str) noexcept",
+        "trailing": "static auto grab(VALUE str) -> const char *",
+    }
+    hd = {t: sweep(Tree(hdr_tree(t, h)), t) for t, h in hdrs.items()}
+    base_hd = (hd["plain"].funcs, len(hd["plain"].conversions), len(hd["plain"].non_cfunc),
+               sorted(h[0] for h in hd["plain"].hits))
+    check(base_hd == (3, 1, 1, ["RETURNS-INTERIOR"])
+          and all((hd[t].funcs, len(hd[t].conversions), len(hd[t].non_cfunc),
+                   sorted(h[0] for h in hd[t].hits)) == base_hd for t in hdrs),
+          "12 RED: `__attribute__((...))`, `noexcept` and a C++ trailing return type between "
+          "the `)` and the `{` give the same funnel and the same row as the bare declarator "
+          "-- the pre-extraction index skipped whitespace only and reported 0 fn(s), "
+          "0 conversions",
+          [(t, hd[t].funcs, len(hd[t].conversions), [h[0] for h in hd[t].hits])
+           for t in hdrs])
+    # ...and the REJECTION TABLE, because opening the crossing up is what once made a sweep
+    # invent four functions out of X-macro lists and `__declspec(...)`. tu_scope carries the
+    # table; every caller asserts it, and this is now the third.
+    rejects = {
+        "macro": "MY_EXPORT(sym)\nstatic VALUE bad(VALUE str)\n{\n    return Qnil;\n}\n",
+        "knr": "static VALUE bad(str) VALUE str; {\n    return Qnil;\n}\n",
+        "proto": "static VALUE helper(VALUE);\n"
+                 "static VALUE bad(VALUE str)\n{\n    return Qnil;\n}\n",
+        "init": "struct S s = mk(1), t = {2};\n"
+                "static VALUE bad(VALUE str)\n{\n    return Qnil;\n}\n",
+        "typedef-aggregate": "__declspec(align(8)) typedef struct { int x; } thing_t;\n"
+                             "static VALUE bad(VALUE str)\n{\n    return Qnil;\n}\n",
+        "x-macro": "XX(A, 1)\ntypedef enum { E_A } phase_t;\n"
+                   "static VALUE bad(VALUE str)\n{\n    return Qnil;\n}\n",
+    }
+    indexed = {t: sorted(f.name for f in Tree(
+        _synth("t_rej_%s" % t, {"ext/t.cpp": "#include <ruby.h>\n\n" + src})).funcs)
+        for t, src in rejects.items()}
+    check(indexed == {"macro": ["bad"], "knr": [], "proto": ["bad"], "init": ["bad"],
+                      "typedef-aggregate": ["bad"], "x-macro": ["bad"]},
+          "12 GREEN: the open walk still refuses to invent a body -- a macro call, a "
+          "prototype, an initialiser list, `__declspec(...) typedef struct` and an X-macro "
+          "list each index the ONE real definition, and K&R indexes none (a stated recall "
+          "limit, shared with predicates C and D)", indexed)
+
+    # 13. POINTER IDENTITY SURVIVES A LOCAL-TO-LOCAL COPY (:716).
+    #
+    #     `p = RSTRING_PTR(str); q = p; return q;` seeded only `p`, so `derives("q")` was
+    #     false and the escape scan found nothing: one converted non-cfunc, ZERO hits, on the
+    #     filed defect written one line longer. Corpus-neutral, so this synthetic is the only
+    #     thing between a working fix and a silently reverted one, and the funnel is asserted
+    #     because the shape being guarded against prints `0 fn(s), 0 conversions`.
+    #
+    #     THE COPY IS THE FLAG. The `direct` arm returns `p` and must give the same row; if
+    #     the two disagree the check is measuring the conversion walk rather than the copy.
+    chain = """#include <ruby.h>
+static const char *grab(VALUE str, const char **out)
+{
+    StringValue(str);
+    const char *p = RSTRING_PTR(str);
+    const char *q;
+    const char *r = 0;
+%s    return %s;
+}
+static VALUE go(VALUE self, VALUE arg)
+{
+    const char *sink = 0;
+    const char *got = grab(arg, &sink);
+    return rb_str_new2(got ? got : sink);
+}
+void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
+"""
+    ch_arms = {
+        # the copy, then the return through it
+        "copy": ("    q = p;\n", "q"),
+        # the same defect written directly -- the row this one must match
+        "direct": ("    q = p;\n", "p"),
+        # the copy, then the store through it into the caller's out-parameter
+        "store": ("    q = p;\n    *out = q;\n", "0"),
+        # ORDERING: `r = q` runs BEFORE `q = p`, so `r` never held the buffer and the
+        # return through it is not an escape. Without this the fix is "any assignment
+        # anywhere makes an alias".
+        "before": ("    r = q;\n    q = p;\n", "r"),
+    }
+    ch = {}
+    for tag, (mid, ret) in ch_arms.items():
+        r = sweep(Tree(_synth("t_chain_%s" % tag, {"ext/t.c": chain % (mid, ret)})), tag)
+        ch[tag] = (r.funcs, len(r.conversions), len(r.non_cfunc),
+                   sorted(h[0] for h in r.hits))
+    check(ch["direct"] == (3, 1, 1, ["RETURNS-INTERIOR"])
+          and ch["copy"] == ch["direct"],
+          "13 RED: `q = p; return q;` is the same row as `return p;` -- unfixed the alias "
+          "set held only `p` and the tree reported 1 conversion, 1 non-cfunc and 0 hits",
+          "copy %s vs direct %s" % (ch["copy"], ch["direct"]))
+    check(ch["store"] == (3, 1, 1, ["STORES-INTERIOR"]),
+          "13 RED, second sink: the copy stored through an out-parameter is a "
+          "STORES-INTERIOR -- and the out-param is NOT swallowed into the alias set, which "
+          "would have deleted the row instead of adding one", "%s" % (ch["store"],))
+    check(ch["before"] == (3, 1, 1, []),
+          "13 GREEN: `r = q;` running BEFORE `q = p;` does not make `r` an alias -- the "
+          "propagation is in offset order, not a name soup", "%s" % (ch["before"],))
+    #     ...and the `exclude` argument, which was inert in this suite AND over the whole
+    #     corpus until this fixture existed. `*out = p` is a copy by every test the
+    #     propagation applies -- pointer-typed left-hand side, one bare name on the right --
+    #     so without the exclusion the SINK joins the alias set and every later mention of
+    #     `out` reads as the buffer, including `out[1]`, which is a different element of the
+    #     caller's array. One row becomes two.
+    r = sweep(Tree(_synth("t_sink_not_alias", {"ext/t.c": """#include <ruby.h>
+static const char *grab(VALUE str, const char **out)
+{
+    StringValue(str);
+    const char *p = RSTRING_PTR(str);
+    *out = p;
+    return out[1];
+}
+static VALUE go(VALUE self, VALUE arg)
+{
+    const char *sink[2] = {0, 0};
+    return rb_str_new2(grab(arg, sink));
+}
+void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
+"""})), "t_sink_not_alias")
+    check((r.funcs, len(r.conversions), len(r.non_cfunc),
+           sorted(h[0] for h in r.hits)) == (3, 1, 1, ["STORES-INTERIOR"]),
+          "13 GREEN, the exclusion: an out-parameter is a SINK and does not become an alias "
+          "of what was stored through it -- `return out[1]` is not the buffer",
+          "funnel fn=%d conv=%d non-cfunc=%d hits=%s"
+          % (r.funcs, len(r.conversions), len(r.non_cfunc), sorted(h[0] for h in r.hits)))
 
     print("\n".join(log))
     print("\nself-test: %s" % ("PASS" if ok else "FAIL"))
