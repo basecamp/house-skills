@@ -313,32 +313,40 @@ the project domain, then the maintainer directly. If the project has no private 
 not fall back to a public issue with a reproducer attached: file the minimal public report
 without the trigger, and tell the maintainer privately where the trigger is.
 
-Round-9 worked rows, for calibration:
+Worked rows, for calibration. **Two of this round's are held back until their fixes ship** — one
+is under an embargoed advisory and one is not yet reported at all, so they appear here as shapes
+rather than as targets. That is §8's check-in test applied to this file: a skill ships, and a
+worked row naming an unfixed defect is a disclosure.
 
 | Finding | Trigger | Row | Channel |
 |---|---|---|---|
-| sqlite3 heap `argv` in `aggregator.c` | the **size of row data** crossing the 640-byte embedded-slot boundary | row 1 | private GHSA |
-| zlib `z->stream.opaque` | the **FDICT bit in the compressed bytes** — see below | row 1 | private, `security@ruby-lang.org` |
+| *(held)* a conversion whose window opens only **above the allocator's embedded boundary** | the **size** of untrusted data | row 1 | private |
+| *(held)* a decoder that reads back a stored self-reference, on a branch **the input selects** | a flag in the input's own header | row 1 | private |
 | psych `start_document_try` | tags the developer hands the emitter | row 3 | public issue |
+| `iconv`'s `rb_warning` sites | attacker-controlled charset *and* payload — but see rule 4 | row 3 | public issue |
 
-**The zlib row is here because it changed, and it is the best worked example of rule 1.** It was
-first written down as row 3 — "a preset dictionary the developer passes to `set_dictionary`" — and
-routed public. Reading the code was enough to doubt it: `set_dictionary` is what the C code calls
-*in response to* `Z_NEED_DICT`, and `Z_NEED_DICT` is returned because the **input stream's zlib
-header has the FDICT flag set**, which is a property of the bytes being inflated. Execution
-settled it. One process wrote FDICT-flagged bytes to a file; a second process, grep-proven never to
-name `Deflate` or `set_dictionary`, read that file and inflated — 3/3 SIGSEGV.
+**The second row is the best worked example of rule 1, and the lesson keeps without the target.**
+It went in as row 3: the branch that reads the stale pointer also *calls* a configuration API, and
+the obvious reading was "the developer chose to use that feature." Wrong — that API is what the C
+code calls **in response to** the condition, and the condition is set by a flag in the input. The
+reproducer had used the API only on the *encoding* side, to manufacture the test data, which is
+exactly how the misreading survived three rounds.
+
+**Discriminator, and it is cheap:** build the input in one process, consume it in another that
+*provably cannot name* the suspected API, and grep the consumer to prove it. If it still fires, the
+API was scenery.
 
 Then rule 1 was applied to the corpus rather than to the signature, and it moved the row a second
-time: `net-http`, in **all five apps**, retains `Zlib::Inflate.new(32 + Zlib::MAX_WBITS)` and
-inflates response chunks in a loop, so any outbound request answered with
-`Content-Encoding: deflate` routes untrusted bytes into a long-lived inflater. Nobody had to choose
-anything. Reproduced against the real `Net::HTTPResponse::Inflater`, 3/3, control clean.
+time — a widely-bundled HTTP library retains one of these decoders across a response body and feeds
+it chunk by chunk, so ordinary remote input reaches it and nobody chose anything. The one-shot
+class-method form is pinned for the duration of its own call and measured clean; **a retained
+decoder plus a per-chunk feed is the shape to grep for.**
 
-Two lessons worth more than the finding. The first framing was not careless — it named a real API
-that really appears in the reproducer, on the *other* side of the test data. And a defect can be
-routed by an honest reading of what pulls the trigger and still be wrong, because *"developer
-chose it"* is a claim about every caller in the corpus and only a grep and a run can check it.
+Two lessons worth more than either finding. The first framing was not careless — it named a real
+API that really does appear in the reproducer, on the *other* side of the test data. And a defect
+can be routed by an honest reading of what pulls the trigger and still be wrong, because
+*"developer chose it"* is a claim about every caller in the corpus, and only a grep and a run can
+check it.
 
 Then check the code still matches **upstream HEAD** — `gh api repos/OWNER/REPO/contents/PATH
 --jq .content | base64 -d` — and search for prior art. Issue anatomy:

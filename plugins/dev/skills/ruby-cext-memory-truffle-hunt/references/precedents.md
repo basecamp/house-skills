@@ -89,7 +89,7 @@ non-Ruby library where the owning object's `dmark` does not call the **pinning**
 | openssl | `ossl_ssl.c:810` (NPN advertise), `:814` (NPN select) | Round 2 could not reach these because both ends negotiated TLS 1.3, where NPN is never sent. A TLS 1.2 ceiling made both fail immediately | extends [ruby/openssl#1088](https://github.com/ruby/openssl/issues/1088) — master only |
 | nokogiri | `xslt_stylesheet.c:63` `_private`, `xml_reader.c:682` and `xml_sax_parser_context.c:93` `(void *)rb_io` | Stylesheet/IO `VALUE` in a persistent libxml2/libxslt object with no `dmark`/`dcompact`, read on every later use | new upstream issues; affected at HEAD |
 | mysql2 | `result.h:9` `fieldTypes` | **Not this class at all** — a `VALUE` field of an xmalloc'd struct that no `dmark` marks. Freed by *ordinary* GC inside the very call that allocates it; `rb_ary_store` then writes through a freed slot | upstream (affected at HEAD, 0.5.4–0.5.7). A private fork branched off 0.5.4 carries it too — **auditing upstream proves nothing about a fork**, whatever its version string says |
-| zlib | `zlib.c:1230` store / `:1116` read — `z->stream.opaque = (voidpf)obj` | `zstream_mark` marks `buf` and `input`, never `obj`; the `Z_NEED_DICT` branch reads it back | ruby/zlib, **all versions incl. HEAD** — private channel: it is a CRuby default gem |
+| *(held — a CRuby default gem)* | a decoder stores its **own wrapper's `VALUE`** into the C library's stream struct at construction | the type declares no `dcompact`, so compaction leaves the copy stale; one branch reads it back and dereferences it | **routed privately, unfixed at the time of writing** — site withheld until it ships. Shape: `obj = TypedData_Make_Struct(...); <lib_struct>-><opaque_field> = (void *)obj;` |
 | pg | `pg_connection.c:2994/:3055` | `PQsetNotice*` userdata; `pgconn_gc_compact` has no `self` back-reference | already covered by [ged/ruby-pg#734](https://github.com/ged/ruby-pg/issues/734); pg was outside the audited corpus |
 | prometheus-client-mmap | `mmap.rs:535-541` `track_rstring` | **A third shape.** `let key = str.as_raw()` — a `VALUE` laundered through Ruby as an Integer and used as a WeakMap key. Compaction leaves a stale key; a later string in the recycled slot collides and **evicts a live entry** | upstream (gitlab-org); affected at HEAD |
 
@@ -566,29 +566,30 @@ safe teaches the idiom.
 
 ## Round 9 — routing, and four zeros that were not clearances
 
-Two findings routed **privately** this round (sqlite3's aggregate `argv`, zlib's
-`stream.opaque`). Per truffle-hunt §7, re-applied at check-in time, their mechanisms are
-described here and their **reproducers are deliberately absent**. The scent survives sanitising.
+Two findings were routed **privately** this round — one under an embargoed advisory, one not yet
+reported. Per truffle-hunt §7, re-applied at check-in time, **both appear here as shapes rather
+than as targets**: no gem, no file, no line, no trigger construction. This file ships publicly and
+twice, so a worked row naming an unfixed defect is a disclosure regardless of intent. The scents
+below lose nothing by it.
 
 ### The routing scent, which is worth more than either finding
 
-- **An API that appears in the reproducer may be on the wrong side of the trigger.** zlib's
-  `z->stream.opaque` is read back only on the `Z_NEED_DICT` branch, and the obvious reading is
-  "the developer chose to use a preset dictionary". Wrong: `set_dictionary` is what the C code
-  calls *in response to* `Z_NEED_DICT`, and `Z_NEED_DICT` is returned because **the input's zlib
-  header has the FDICT bit set** — a property of the attacker's bytes. The round-3 reproducer used
-  `set_dictionary` only on the *Deflate* side, to manufacture the test data, which is exactly how
-  the misreading survived three rounds.
-  **Discriminator:** build the input in one process, consume it in another that provably cannot
-  name the suspected API, and grep the consumer to prove it. If it still fires, the API was
+- **An API that appears in the reproducer may be on the wrong side of the trigger.** A decoder read
+  a stale pointer on one branch, and that branch also *calls* a configuration API — so the obvious
+  reading was "the developer chose to use that feature," and it routed public on that basis. Wrong:
+  the API is what the C code calls **in response to** the condition, and the condition is set by a
+  flag in the input's own header. The original reproducer had used that API only on the *encoding*
+  side, to manufacture test data, which is exactly how the misreading survived three rounds.
+  **Discriminator:** build the input in one process, consume it in another that *provably cannot
+  name* the suspected API, and grep the consumer to prove it. If it still fires, the API was
   scenery.
-- **"Developer-chosen" is a claim about every caller in the corpus.** Having decided zlib's
-  trigger was input-driven, the second question is who feeds it. `net-http` retains
-  `Zlib::Inflate.new(32 + Zlib::MAX_WBITS)` on `Net::HTTPResponse::Inflater` and inflates response
-  chunks in a loop — the inflater is reachable only through an ivar, so it is movable. A retained
-  decoder plus a per-chunk feed is the shape to grep for; the one-shot class method
-  (`Zlib::Inflate.inflate`) is pinned for the call and measured clean at 2000 iterations under
-  `GC.stress` + `auto_compact`.
+- **"Developer-chosen" is a claim about every caller in the corpus.** Having decided the trigger
+  was input-driven, the second question is who feeds it — and a widely-bundled HTTP library turned
+  out to retain one of these decoders across a response body and feed it chunk by chunk, so
+  ordinary remote input reaches it and nobody chose anything. The decoder is reachable only through
+  an ivar there, so it is movable. **A retained decoder plus a per-chunk feed is the shape to grep
+  for**; the one-shot class-method form is pinned for the duration of its own call and measured
+  clean at 2000 iterations under `GC.stress` + `auto_compact`.
 
 ### Burned false positives
 
@@ -664,10 +665,11 @@ in the window. Pushing the handles past the 616-byte boundary bought real sensit
 remaining 80,000 put **5,485 ordinary GCs and 3 compactions inside the window**, still clean. So
 the honest bound is "one per 5,485 in-call GCs", not "one per 380,000 iterations".
 
-This is the **same mechanism as the sqlite3 aggregate finding** — under the embedded boundary the
-conversions allocate nothing, so the GC rate that drives the defect never rises. Two independent
-findings, one lesson: **when the subject is a converted String, iteration count measures nothing
-until you have measured GCs inside the window.** Count them with a probe; do not infer them.
+This is the **same mechanism as one of the round's privately-routed findings**, arrived at from a
+different direction — under the embedded boundary the conversions allocate nothing, so the GC rate
+that drives the defect never rises. Two independent findings, one lesson: **when the subject is a
+converted String, iteration count measures nothing until you have measured GCs inside the window.**
+Count them with a probe; do not infer them.
 
 ### Two burned false negatives in the reachability query itself
 
