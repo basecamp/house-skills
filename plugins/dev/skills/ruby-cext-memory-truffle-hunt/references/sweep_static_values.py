@@ -1071,16 +1071,28 @@ class Tree:
                         # functions in one TU may each declare `static VALUE cache;` and
                         # they are two objects: keyed `(file, "cache")` they merged, and a
                         # `rb_global_variable(&cache)` in the first discharged the second's
-                        # unrooted store. The span is the function body the scan is already
-                        # iterating, so the identity costs nothing to carry.
+                        # unrooted store.
+                        #
+                        # AND THE FUNCTION IS STILL ONE SCOPE TOO WIDE. Two DISJOINT nested
+                        # blocks in one function may each declare `static VALUE cache`, and
+                        # they are two objects for the same reason two functions are: the
+                        # name is not visible outside the braces it was declared in.
+                        # Registering the first block's and allocating into the second gave
+                        # `slots 1/2`, one `registered-slot` discharge and HITS 0 -- an
+                        # over-clear reached by a dedupe, which is the shape this file keeps
+                        # having to fix. `innermost_block` is tu_scope's, and the same one
+                        # `source_reads` asks for its shadowing rule: which braces own this
+                        # offset is one question, not two.
                         #
                         # Still gated on TU_EXT, for the header reason in that constant's
                         # comment -- a `static inline` helper in a .h is one object per
                         # INCLUDER, and this pass cannot resolve includes. Those stay
                         # tree-wide keyed, the same residual as a header file static.
+                        blk = tu_scope.innermost_block(src[a:b], m.start() - a)
+                        span = (a + blk[0], a + blk[1] + 1) if blk else (a, b)
                         self.slots.append(Slot(path, m.start(), nm + arr, nm, "scalar",
                                                decl_text,
-                                               scope=Scope(path, (a, b))
+                                               scope=Scope(path, span)
                                                if path.suffix in TU_EXT else TREE))
 
     def _class_member_slots(self, path, qual, boff, body):
@@ -1124,8 +1136,9 @@ class Tree:
         # INTERNAL LINKAGE, decided on the storage-class specifier and nothing else. `static`
         # anywhere ahead of the declarator makes this object private to the file, so it is
         # scoped; `EXTERN VALUE x;` and a bare `VALUE rb_mVernier;` are one object tree-wide
-        # and stay unscoped. The declarator itself is cut off first, or an initialiser
-        # mentioning `static` in a nested expression would flip the linkage.
+        # and stay unscoped.
+        # The declarator itself is cut off first, or an initialiser mentioning `static` in
+        # a nested expression would flip the linkage.
         scope = tu_scope.declared_scope(
             path, re.search(r"\bstatic\b", split_top_off(unit, "=")[0][1]))
         body_open = unit.find("{")
@@ -3316,6 +3329,63 @@ def self_test(pool):
         sup += len({h[3] for h in _sweep(p, ()).hits} - {h[3] for h in _sweep(p).hits})
     check(sup > 0, "--no-discharge exposes %d suppressed slot(s) across the %d controls; "
                    "each is named by rule in -v output" % (sup, len(controls)))
+
+    # ------------------------------------ #29 items 3, 4 and 5: three storage-scope holes
+    #
+    # All three are OVER-CLEARS, all three read as a clean sheet, and each ships its green
+    # as well as its red -- a rule that stops clearing needs a fixture proving it still
+    # clears what it should, or the fix is a deletion.
+
+    # 3. LOCAL STATICS ARE SCOPED TO THE BLOCK, NOT THE FUNCTION. Two DISJOINT nested
+    #    blocks in one function may each declare `static VALUE cache`; keyed by the
+    #    enclosing function's span they dedupe to one slot, and the first block's
+    #    `rb_global_variable(&cache)` then discharges the second block's unrooted
+    #    allocation. Measured unfixed: `slots 1/2`, one registered-slot discharge, HITS 0.
+    #    THE COUNTER IS THE FLAG: the fix is visible as 2 decls surviving the dedupe, which
+    #    is not something the hit list alone can show.
+    two_block = """#include <ruby.h>
+
+static VALUE
+entry(VALUE self, VALUE arg)
+{
+    if (RTEST(arg)) {
+        static VALUE cache;
+        if (!cache) {
+            cache = rb_str_new_cstr("a");
+            rb_global_variable(&cache);
+        }
+        return cache;
+    } else {
+        static VALUE cache;
+        if (!cache) {
+            cache = rb_str_new_cstr("b");
+        }
+        return cache;
+    }
+}
+
+void Init_probe(void) { rb_define_method(rb_cObject, "e", entry, 1); }
+"""
+    tb = _sweep_sources({"probe.c": two_block})
+    check((tb.slots, tb.decls, sorted(d[0] for d in tb.discharges),
+           sorted(h[0] for h in tb.hits)) == (2, 2, ["registered-slot"], ["ALLOCATES"]),
+          "#29 item 3 RED: two disjoint blocks in one function are two slots -- one "
+          "registered, one allocating and unrooted. Unfixed they merged to `slots 1/2` "
+          "and the registration discharged both",
+          "slots %d/%d disch %s hits %s" % (tb.slots, tb.decls,
+                                            [(d[0], d[3]) for d in tb.discharges],
+                                            [(h[0], h[3]) for h in tb.hits]))
+    ob = _sweep_sources({"probe.c": two_block[:two_block.index("    } else {")]
+                         + "    }\n    return Qnil;\n}\n\n"
+                         + "void Init_probe(void) { rb_define_method(rb_cObject, \"e\", "
+                           "entry, 1); }\n"})
+    check((ob.slots, ob.decls, sorted(d[0] for d in ob.discharges), ob.hits)
+          == (1, 1, ["registered-slot"], []),
+          "#29 item 3 GREEN: a genuine SINGLE-block static registered in its own block "
+          "still discharges -- the scope was narrowed, not broken",
+          "slots %d/%d disch %s hits %s" % (ob.slots, ob.decls,
+                                            [(d[0], d[3]) for d in ob.discharges],
+                                            [(h[0], h[3]) for h in ob.hits]))
 
     def _index_names(src):
         return set(Tree(_write_sources({"probe.cpp": src})).funcs)
