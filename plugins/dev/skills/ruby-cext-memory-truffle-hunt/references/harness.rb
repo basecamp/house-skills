@@ -117,6 +117,21 @@ module Hunt
     ObjectSpace.dump(obj)[/"address":"([^"]+)"/, 1]
   end
 
+  # The object SLOT address, as an Integer -- the thing compaction actually moves.
+  #
+  # `bytes_ptr` is NOT a substitute: for a non-embedded String it is the malloc'd buffer,
+  # which stays put while the object slot relocates. Measured on 3.1.6 / 3.2.2 / 3.3.10 /
+  # 3.4.10 / 4.0.6 arm64-darwin, 20 witnesses, verify_compaction_references(expand_heap:):
+  # at every size AT OR ABOVE the boundary, object address 20/20 moved, bytes_ptr 0/20.
+  #
+  # Same number as object_addr -- 0/50 mismatches on every Ruby above -- but Integer rather
+  # than hex String, ~46x cheaper, and it allocates nothing. That last part matters: reading
+  # 4,000 witnesses through ObjectSpace.dump allocates 4,000 Strings into the heap you are
+  # measuring. dlwrap does not pin: the same 50 objects relocate 50/50 after it is called.
+  def object_ptr(obj)
+    Fiddle.dlwrap(obj)
+  end
+
   # Addresses arrive in two forms and only one of them survives `to_i`.
   #
   #   bytes_ptr    -> Integer                4877322120
@@ -215,8 +230,10 @@ module Hunt
   #   Hunt.fragment!            # first
   #   $holder = [subject]       # then the subject
   #
-  # And when a row reports clean, assert the SUBJECT's own address moved -- witness counts prove
-  # the compactor ran, never that your subject was movable.
+  # And when a row reports clean, assert the SUBJECT's own OBJECT address moved --
+  # `object_ptr`, not `bytes_ptr` -- witness counts prove the compactor ran, never that your
+  # subject was movable. On a heap-sized subject `bytes_ptr` is stable by construction, so
+  # that assertion written against the bytes can never fire.
   #
   # THE SAME TRAP HAS A SECOND, TYPE-SHAPED FORM, and fragment! does NOT fix this one.
   # Under plain GC.compact, class-shaped subjects do not relocate AT ALL: 8 rounds,
@@ -244,6 +261,40 @@ module Hunt
   # Parked in a module-level array on purpose: a witness held in a live LOCAL is
   # conservatively pinned by the machine-stack scan and reports "did not move" even when
   # compaction ran perfectly.
+  #
+  # THE ADDRESS COMPARED HERE IS THE OBJECT SLOT, NOT THE BYTES, and that is the whole
+  # point. This shipped comparing `bytes_ptr`, which for a NON-embedded String is a separate
+  # malloc'd buffer that does not move when the object does. Measured, 20 witnesses,
+  # verify_compaction_references(expand_heap: true, toward: :empty):
+  #
+  #                            | object addrs moved | bytes_ptr moved
+  #   size 100, 4.0.6/3.4.10   | 20/20              | 20/20    <- embedded, agreed
+  #   size 615 (boundary - 1)  | 20/20              | 20/20
+  #   size 616 (the boundary)  | 20/20              |  0/20    <- silently dead counter
+  #   size 5000                | 20/20              |  0/20
+  #
+  # And on ruby 3.1.6 arm64-darwin, where the embedded boundary is 24, the DEFAULT size was
+  # already past it. That row cannot be taken the same way, and the reason matters more than
+  # the number: `compact!` RAISES on 3.1.6 --
+  # `verify_compaction_references(expand_heap: true, toward: :empty)` ->
+  # `ArgumentError: unknown keyword: :expand_heap`, since `expand_heap:` arrived in 3.2. So
+  # the 3.1.x row is `GC.compact`, 200 witnesses:
+  #
+  #                            | object addrs moved | bytes_ptr moved
+  #   size 24 on 3.1.6         | 169/200            |  0/200
+  #   size 100 on 3.1.6 (dflt) | 200/200            |  0/200   <- dead at its own default
+  #   size 5000 on 3.1.6       | 200/200            |  0/200
+  #
+  # Two things follow. A `size:` at or above the boundary -- and on 3.1.x the DEFAULT size --
+  # made a working compaction report 0/N and declared the run insensitive. That is the
+  # false-negative direction the rest of this file exists to prevent: a witness count of zero
+  # is the one reading that discards an otherwise good run, and it was
+  # unobtainable-by-construction for any heap-sized witness. The counter can now never be
+  # size-dependent, so witnesses no longer have to be embedded to be honest.
+  #
+  # And any 3.1.x result cited as taken under `expand_heap` could not have been: the call
+  # raises there. Such a result was either measured under plain `GC.compact` -- which
+  # relocates far less, so its sensitivity is not the same claim -- or not measured at all.
   WITNESSES = []
 
   def plant_witnesses(count: 200, size: 100)
@@ -251,7 +302,7 @@ module Hunt
     @witness_addrs = Array.new(count) do
       s = +("w" * size)
       WITNESSES << s
-      bytes_ptr(s)
+      object_ptr(s)
     end
     self
   end
@@ -261,7 +312,7 @@ module Hunt
     # 0/0 would print like a valid control and prove nothing -- fail loudly instead.
     raise "call plant_witnesses before compacting" if WITNESSES.empty?
 
-    moved = WITNESSES.each_with_index.count { |s, i| bytes_ptr(s) != @witness_addrs[i] }
+    moved = WITNESSES.each_with_index.count { |s, i| object_ptr(s) != @witness_addrs[i] }
     [moved, WITNESSES.size]
   end
 
@@ -327,7 +378,11 @@ module Hunt
   # The controls that make it a detector rather than a demo, all of which must hold:
   #   same_frame (the VALUE left in the frame)  0/20  -- conservative scanning pins it
   #   guarded    (RB_GC_GUARD after the read)   0/20
-  #   heap subject, 5000 B, embedded?==false    0/20 with 0 relocations
+  #   heap subject, 5000 B, embedded?==false    0/20 with 0 BUFFER relocations
+  # -- that last one is a control over the mobility regime, not over sensitivity. The heap
+  # subject's object slot relocates like any other (20/20); what does not move is its malloc'd
+  # buffer, which is the address the C code holds. Do not read it as "compaction did nothing
+  # in that cell".
   #   no compaction at all                      0/20
   # GC.verify_compaction_references does NOT mask it -- the read barrier was the obvious
   # suspect and it measures 10/10 on all three Rubies, so it is a stronger forcing function
@@ -392,15 +447,20 @@ if __FILE__ == $PROGRAM_NAME
   end
 
   $subject = [+("a" * 100), +("a" * 5000)]
-  before = $subject.map { |s| Hunt.bytes_ptr(s) }
+  before = $subject.map { |s| [Hunt.bytes_ptr(s), Hunt.object_ptr(s)] }
   Hunt.plant_witnesses
   Hunt.compact!
   Hunt.report_witnesses
 
+  # Both columns, because the difference between them is a false negative the harness itself
+  # shipped: the heap row's bytes are STABLE while its object MOVED, and a check written
+  # against the bytes reads that as "nothing relocated".
   %w[short(100B) long(5000B)].each_with_index do |label, i|
-    now = Hunt.bytes_ptr($subject[i])
-    puts format("%-12s embedded=%-5s bytes 0x%x -> 0x%x  %s",
-                label, Hunt.embedded?($subject[i]), before[i], now,
-                before[i] == now ? "STABLE" : "MOVED")
+    bytes_now = Hunt.bytes_ptr($subject[i])
+    obj_now = Hunt.object_ptr($subject[i])
+    puts format("%-12s embedded=%-5s bytes 0x%x -> 0x%x %-6s  object 0x%x -> 0x%x %s",
+                label, Hunt.embedded?($subject[i]),
+                before[i][0], bytes_now, before[i][0] == bytes_now ? "STABLE" : "MOVED",
+                before[i][1], obj_now, before[i][1] == obj_now ? "STABLE" : "MOVED")
   end
 end
