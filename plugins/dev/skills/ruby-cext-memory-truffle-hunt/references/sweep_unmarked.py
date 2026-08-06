@@ -43,6 +43,45 @@ CATEGORIES
              field the primitive applied to is not resolved here. Conservative by design
   VALUE*     a VALUE array/pointer field; needs a marking loop, check the bound by hand
 
+ROUND 6, DEFECT B1: A MEMBER CALL RESOLVED BY FILE ORDER
+--------------------------------------------------------
+Callee bodies were indexed by BARE NAME, first-wins, so in a C++ tree `collector->mark()`
+bound to whichever `mark()` body `rglob` happened to return first. vernier 1.10.1 declares
+FIVE of them -- Thread (EMPTY), ThreadTable, BaseCollector, TimeCollector, HeapTracker --
+and the script reported `stack_table_value` UNMARKED on two separate structs while
+`BaseCollector::mark` and `HeapTracker::mark` each mark it with a plain `rb_gc_mark`. Two
+false positives on the safest field in the gem.
+
+A second half made it worse and hid the first: `find_calls` guarded on `if args:`, and a
+zero-argument call has an EMPTY argument list, so `collector->mark()` was not merely
+mis-resolved -- it was never walked at all. vernier's entire marking path is that shape.
+
+Resolution is now by (class, method):
+
+    class Foo : public Bar { ... }        base-clause parsed; a method not on Foo is
+                                          looked up on Bar, breadth-first
+    BaseCollector *c = ...; c->mark()     locals, parameters, `auto x = static_cast<T*>`
+                                          and data members type the receiver
+    this->mark() / mark()                 the enclosing class, then its bases
+
+File-order first-wins survives ONLY where the receiver type is genuinely undeterminable
+-- `thread->mark()` over a `std::unique_ptr` in a range-for is the corpus case -- and each
+such pick is COUNTED into `tree.ambiguous` and printed, because an arbitrary pick that
+nothing counts is round-5 (a) all over again: a verdict decided by iteration order,
+invisibly. vernier falls back three times, on `clear`, `size` and `lock`; none of them
+marks anything.
+
+Resolution is by DECLARED type, not by dispatch: `collector->mark()` walks
+`BaseCollector::mark` and not the `TimeCollector::mark` override that may actually run.
+For vernier both mark `stack_table_value`, so the clear holds under either -- but a
+derived override that DROPPED a mark its base performs would be an over-clear this pass
+cannot see. Checked by hand on the one tree it applies to.
+
+The acceptance fixture is a green and a red at once, on one tree: `stack_table_value` must
+STOP being reported and `start_thread` must KEEP being reported. A fix that resolved the
+receiver by crediting everything the call touches passes the first half and fails the
+second.
+
 ROUND 6, PREDICATE A: A SEVERITY COLUMN ON THE UNMARKED ROWS
 ------------------------------------------------------------
 The categories above say which rows are suspects; they do not rank them, and the base sweep
@@ -131,7 +170,8 @@ vanished. Both branches are now registered.
 
 ACCEPTANCE (--self-test): flags fieldTypes on mysql2 m2-red and not on m2-green; clears
 all six VALUE fields of sqlite3 pr-723's struct and flags whichever one a mutated tree
-stops marking; and, for predicate A, grades a generated stackprof reduction on all four
+stops marking; clears vernier's overloaded-`mark()` shape without clearing the unmarked
+field beside it; and, for predicate A, grades a generated stackprof reduction on all four
 grades plus its own reds for the four refinements above.
 
 Run it before trusting any result from this script. The fixture trees are gem/git
@@ -146,9 +186,9 @@ checkouts and are deliberately not committed here; rebuild the directory like so
     git clone https://github.com/sparklemotion/sqlite3-ruby sqlite3-pr723
     cd sqlite3-pr723 && git fetch origin pull/723/head && git checkout FETCH_HEAD
 
-Then: python3 sweep_unmarked.py --self-test acceptance   (expects 22/22 PASS)
+Then: python3 sweep_unmarked.py --self-test acceptance   (expects 27/27 PASS)
 
-Two of the twenty-two run against the REAL gem rather than a generated reduction, and look for
+Two of the twenty-seven run against the REAL gem rather than a generated reduction, and look for
 fixtures beside the acceptance dir: `../corpus/stackprof-0.2.28` for the target grades, and
 `../fixtest/sp-pristine` + `../fixtest/sp-fixed` for the red/green pair (sp-fixed is the
 tree with `VALUE interval` changed to `long`, which is the upstream fix's shape). When they
@@ -170,7 +210,13 @@ import subprocess
 import sys
 import tempfile
 
-C_EXT = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".rs")
+# C only, and `.rs` is deliberately absent -- see SKILL.md, "Rust extensions need a
+# different sweep, not these three". A magnus extension has no rb_data_type_t initialiser
+# in its source (the DataType is built by data_type_builder! inside a derive expansion), so
+# this file's wrap-site regexes return 0 wrap sites on Rust BY CONSTRUCTION -- and a zero
+# reads as a clean verdict. Parsing .rs here bought nothing and mis-stated the coverage.
+# All three sweeps share this tuple verbatim; keep them in step.
+C_EXT = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp")
 
 # ---------------------------------------------------------------- lexing helpers
 #
@@ -405,14 +451,28 @@ def stronger(a, b):
 
 
 def find_calls(body):
-    """[(name, [args])] for every call in a body, nested calls included."""
+    """[(name, args, recv, op)] for every call in a body, nested calls included.
+
+    ZERO-ARGUMENT CALLS COUNT. The old guard was `if args:` on a list that is EMPTY for
+    `collector->mark()`, so a member call taking no arguments was not merely resolved to
+    the wrong body -- it was never walked AT ALL. vernier's entire marking path is that
+    shape (`collector_mark` does nothing but `collector->mark()`), which is why
+    `stack_table_value` reported UNMARKED while `BaseCollector::mark` marks it two
+    screens up. `call_args` returns None only when there is no `(`, so `is not None` is
+    the test that separates "no arguments" from "not a call".
+
+    The receiver comes back WITH the call, because it is the only handle a text scan has
+    on WHICH `mark` runs: `recv->m()`, `recv.m()` and `C::m()`. 12 of the 23 corpus trees
+    carry at least one name with more than one definition.
+    """
     out = []
-    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*(?=\()", body):
-        if m.group(1) in NOT_CALLS:
+    for m in re.finditer(
+            r"(?:\b([A-Za-z_]\w*)\s*(->|::|\.)\s*)?\b([A-Za-z_]\w*)\s*(?=\()", body):
+        if m.group(3) in NOT_CALLS:
             continue
         args, _ = call_args(body, m.end())
-        if args:
-            out.append((m.group(1), args))
+        if args is not None:
+            out.append((m.group(3), args, m.group(1), m.group(2)))
     return out
 
 
@@ -447,14 +507,20 @@ class Tree:
         self.struct_file = {}    # name -> path (for reporting)
         self.aliases = {}        # typedef name -> underlying name
         self.dtypes = {}         # rb_data_type_t name -> {"dmark":fn, "dcompact":fn, ...}
-        self.funcs = {}          # function name -> body text
+        self.funcs = {}          # function name (or "Cls::name") -> body text
+        self.sigs = {}           # same key -> parameter-list text
+        self.methods = set()     # (class, method) pairs declared in-tree
+        self.bases = {}          # class -> [base classes named in its base-clause]
         self.type_of_dtype = {}  # rb_data_type_t name -> wrapped struct type name
         self.wrap_sites = []     # (path, dtype, struct_type, macro)
         self._helper_memo = {}   # ("dmark"|"dcompact") -> {fn -> kind}, with cycle guard
         self.func_spans = {}     # function name -> (path, body_start, body_end) offsets
         self.func_defs = {}      # function name -> how many definitions carry that name
+        self.ambiguous = {}      # bare name -> how often a call FELL BACK to first-wins
         self.static_values = set()   # file-scope `static VALUE name;` identifiers
         self._src_memo = {}      # predicate A: token -> [rhs], memoised
+        self._local_memo = {}    # scope key -> {identifier: class name}
+        self._member_memo = {}   # class -> {member: class name}
         for path, src in self.files.items():
             self._index_structs(path, src)
             self._index_aliases(src)
@@ -575,7 +641,7 @@ class Tree:
         # the sweep could not. vernier was the strongest candidate in the round-5 corpus
         # precisely because it shares stackprof's architecture, and the query could not see it.
         for m in re.finditer(
-                r"\b(?:typedef\s+)?(struct|union|class)\s+(\w+)?\s*(?::[^{;]*)?\{", src):
+                r"\b(?:typedef\s+)?(struct|union|class)\s+(\w+)?\s*(:[^{;]*)?\{", src):
             open_idx = src.index("{", m.end() - 1)
             close = match_brace(src, open_idx)
             if close < 0:
@@ -584,6 +650,16 @@ class Tree:
             names = []
             if m.group(2):
                 names.append(m.group(2))
+                # The base-clause is what makes `TimeCollector : public BaseCollector`
+                # resolvable: a method not declared on the derived class is looked up on
+                # its bases. Access specifiers and `virtual` are dropped; a template
+                # argument list is left alone by the `\w+` token scan, which is right --
+                # `std::vector<Thread>` is not a base we have a body for anyway.
+                if m.group(3):
+                    self.bases.setdefault(m.group(2), [
+                        b for b in re.findall(r"[A-Za-z_]\w*", m.group(3))
+                        if b not in ("public", "private", "protected", "virtual")])
+                self._index_methods(m.group(2), body)
             # typedef declarator list after the closing brace: `} A, *APtr;`
             semi = src.find(";", close)
             if semi > 0 and src[close + 1:semi].strip():
@@ -594,6 +670,196 @@ class Tree:
             for nm in names:
                 self.structs.setdefault(nm, body)
                 self.struct_file.setdefault(nm, path)
+
+    # -- C++ methods (round 6, defect B1) -----------------------------------
+
+    NESTED = re.compile(r"\b(?:struct|union|class)\s+(\w+)?\s*(?::[^{;]*)?\{")
+    DEFN = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+
+    def _nested_spans(self, body):
+        """[(start, end)] of nested class/struct/union declarations inside a class body.
+
+        A nested type's members and methods belong to IT, not to the enclosing class:
+        vernier's `TimeCollector` contains `class TimeCollectorThread : public
+        PeriodicThread`, whose `TimeCollector &time_collector;` would otherwise register
+        as a member of TimeCollector and type a receiver wrongly. Each nested type is
+        indexed in its own right by the enclosing finditer, so skipping the span here
+        loses nothing.
+        """
+        spans = []
+        for m in self.NESTED.finditer(body):
+            o = body.index("{", m.end() - 1)
+            c = match_brace(body, o)
+            if c > 0:
+                spans.append((m.start(), c))
+        return spans
+
+    def _index_methods(self, cls, body):
+        """Index `cls`'s method bodies under the qualified key `Cls::name`.
+
+        This is round-6 defect B1. `_index_funcs` keys every definition by its BARE name,
+        first-wins, so `collector->mark()` bound to whichever `mark()` body came first in
+        file order. vernier declares FIVE (Thread, ThreadTable, BaseCollector,
+        TimeCollector, HeapTracker), two of which mark nothing the call site cares about,
+        and the pick was decided by the order `rglob` happened to hand back the files.
+
+        Definitions are taken at the class body's TOP LEVEL only: the scan resumes past
+        each accepted body, so a `foo(x) { ... }` sitting inside a method is never
+        mistaken for a sibling method, and nested types are skipped outright.
+        """
+        skip = self._nested_spans(body)
+        i = 0
+        while True:
+            m = self.DEFN.search(body, i)
+            if not m:
+                return
+            if any(a <= m.start() < b for a, b in skip):
+                i = max(b for a, b in skip if a <= m.start() < b)
+                continue
+            if m.group(1) in NOT_CALLS:
+                i = m.end()
+                continue
+            args, j = call_args(body, m.end() - 1)
+            k = j
+            while k < len(body) and body[k] in " \t\r\n":
+                k += 1
+            # A constructor's member-initialiser list sits between `)` and `{`, and it is
+            # the shape BaseCollector's own constructor takes.
+            if k < len(body) and body[k] == ":":
+                brace = body.find("{", k)
+                k = brace if brace >= 0 else k
+            if k < len(body) and body[k] == "{":
+                close = match_brace(body, k)
+                if close > 0:
+                    key = "%s::%s" % (cls, m.group(1))
+                    self.methods.add((cls, m.group(1)))
+                    self.funcs.setdefault(key, body[k + 1:close])
+                    self.sigs.setdefault(key, " ".join(args or []))
+                    i = close + 1
+                    continue
+            i = m.end()
+
+    def _members(self, cls):
+        """{data member: class name} for `cls`, so `threads.mark()` resolves.
+
+        Only members whose declared type is a class we HAVE a body for are kept, which is
+        what keeps `VALUE stack_table_value` and `int n` out without a type table.
+        """
+        if cls not in self._member_memo:
+            body = self.structs.get(cls, "")
+            for a, b in reversed(self._nested_spans(body)):
+                body = body[:a] + blank(body[a:b]) + body[b:]
+            out = {}
+            for frag in re.split(r"[;{}]", body):
+                m = re.match(r"\s*(?:(?:const|volatile|static|mutable)\s+)*"
+                             r"([A-Za-z_]\w*)\s*[*&]?\s*([A-Za-z_]\w*)\s*$", frag)
+                if m and m.group(1) in self.structs:
+                    out.setdefault(m.group(2), m.group(1))
+            self._member_memo[cls] = out
+        return self._member_memo[cls]
+
+    def member_type(self, cls, name):
+        """The declared class of member `name` on `cls` or one of its bases."""
+        for c in self.mro(cls):
+            t = self._members(c).get(name)
+            if t:
+                return t
+        return None
+
+    def mro(self, cls, depth=8):
+        """`cls` then its bases, breadth-first, cycle-guarded."""
+        out, queue, seen = [], [cls], set()
+        while queue and len(out) < depth:
+            c = queue.pop(0)
+            if not c or c in seen:
+                continue
+            seen.add(c)
+            out.append(c)
+            queue.extend(self.bases.get(c, ()))
+        return out
+
+    def method_body_key(self, cls, name):
+        """`Cls::name` resolved against `cls` and then its bases, or None."""
+        for c in self.mro(cls):
+            if (c, name) in self.methods:
+                return "%s::%s" % (c, name)
+        return None
+
+    # A declaration or parameter naming a type we have a class body for. The type test is
+    # what makes these two loose patterns safe: `VALUE obj = ...`, `int i = 0` and
+    # `delete collector;` all parse as (type, name) and are all dropped for having no
+    # struct body, so only a real in-tree class ever types a receiver.
+    DECL_PTR = re.compile(r"\b(?:(?:const|volatile|static)\s+)*"
+                          r"([A-Za-z_]\w*)\s*[*&]+\s*([A-Za-z_]\w*)\s*(?==|;|,|\))")
+    DECL_VAL = re.compile(r"\b(?:(?:const|volatile|static)\s+)*"
+                          r"([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*(?==|;|,|\))")
+    # `auto` hides the type in the cast, which is exactly how a dmark callback is written.
+    DECL_AUTO = re.compile(r"\bauto\s*[*&]?\s*([A-Za-z_]\w*)\s*=\s*"
+                           r"(?:static_cast|dynamic_cast|reinterpret_cast|const_cast)"
+                           r"\s*<\s*(?:const\s+)?([A-Za-z_]\w*)")
+
+    def local_types(self, key):
+        """{identifier: class name} for locals and parameters visible in `key`'s body.
+
+        `collector_mark` is the whole reason this exists:
+
+            BaseCollector *collector = static_cast<BaseCollector *>(data);
+            collector->mark();
+
+        The parameter list is scanned with the body, since a helper that marks through a
+        typed parameter (`static void mark_one(Foo *f) { f->mark(); }`) is the same shape
+        one frame out.
+        """
+        if key not in self._local_memo:
+            text = self.sigs.get(key, "") + ";\n" + (self.body_of(key) or "")
+            out = {}
+            for pat in (self.DECL_PTR, self.DECL_VAL):
+                for m in pat.finditer(text):
+                    if m.group(1) in self.structs:
+                        out.setdefault(m.group(2), m.group(1))
+            for m in self.DECL_AUTO.finditer(text):
+                if m.group(2) in self.structs:
+                    out.setdefault(m.group(1), m.group(2))
+            self._local_memo[key] = out
+        return self._local_memo[key]
+
+    def callee_key(self, name, recv, op, scope):
+        """Which body `recv op name(...)` runs, seen from inside function `scope`.
+
+        The four handles, in the order they are tried:
+
+          C::name()     the receiver IS the class
+          recv->name()  the receiver's type, from a local declaration, a parameter, or a
+          recv.name()   data member of the enclosing class -- and `this` is that class
+          name()        unqualified inside a member function: the enclosing class, bases next
+
+        FALL BACK TO FILE-ORDER FIRST-WINS ONLY WHEN THE RECEIVER TYPE IS GENUINELY
+        UNDETERMINABLE -- `thread->mark()` over a `std::unique_ptr` in a range-for is the
+        corpus case -- and COUNT it, because an arbitrary pick that nothing counts is the
+        round-5 (a) disease: a verdict decided by iteration order, invisibly. The count
+        rides in the report's coverage line next to the overloaded-name tally.
+
+        A resolved receiver whose class does not declare the method also falls back
+        (`list.push_back(...)` on a std:: type): refusing to descend would be recall-safe
+        but silently drops the marking evidence the pre-B1 script had, and the fallback is
+        counted either way.
+        """
+        cls = scope.split("::")[0] if "::" in scope else None
+        target = None
+        if op == "::":
+            target = recv
+        elif op:
+            target = cls if recv == "this" else \
+                (self.local_types(scope).get(recv) or self.member_type(cls, recv))
+        elif cls:
+            target = cls
+        if target:
+            k = self.method_body_key(target, name)
+            if k:
+                return k
+        if self.func_defs.get(name, 0) > 1:
+            self.ambiguous[name] = self.ambiguous.get(name, 0) + 1
+        return name
 
     # -- typedef aliases ----------------------------------------------------
 
@@ -643,17 +909,25 @@ class Tree:
                 close = match_brace(src, k)
                 if close > 0:
                     self.funcs.setdefault(name, src[k + 1:close])
+                    self.sigs.setdefault(name, src[m.end():j])
                     # Offsets, not just text: predicate A reports the file:line of the
                     # coercion it found, and a body extracted into a string has none.
                     self.func_spans.setdefault(name, (path, k + 1, close))
+                    # An OUT-OF-LINE definition -- `void HeapTracker::mark() { ... }` --
+                    # is a method too, and indexing it only by its bare name puts it back
+                    # in the first-wins pool that defect B1 exists to drain.
+                    q = re.search(r"([A-Za-z_]\w*)\s*::\s*$", src[:m.start(1)])
+                    if q:
+                        key = "%s::%s" % (q.group(1), name)
+                        self.methods.add((q.group(1), name))
+                        self.funcs.setdefault(key, src[k + 1:close])
+                        self.sigs.setdefault(key, src[m.end():j])
                     # C++ overloads collide on the bare name, and first-wins then decides
                     # a verdict by file order -- the same disease as the round-5 (a)
-                    # de-dupe defect. vernier declares FOUR `mark()` bodies; the first is
-                    # Thread::mark, which is EMPTY, so `collector->mark()` resolved to it
-                    # and `stack_table_value` reported UNMARKED even though
-                    # BaseCollector::mark marks it on the next screen. Resolving this
-                    # properly needs the static type of the callee expression. Counting
-                    # the collision at least stops the arbitrary pick being invisible.
+                    # de-dupe defect. Resolution is now by (class, method) with base-clause
+                    # lookup, so this count is no longer the verdict-maker it was; it stays
+                    # because a name with more than one definition is still where a
+                    # FALLBACK pick can land, and `tree.ambiguous` counts those.
                     self.func_defs[name] = self.func_defs.get(name, 0) + 1
 
     # -- rb_data_type_t -----------------------------------------------------
@@ -801,10 +1075,12 @@ class Tree:
             return memo[fn]
         memo[fn] = None                       # cycle guard: recursion resolves to None
         kinds = set()
-        for name, _args in find_calls(self.body_of(fn) or ""):
+        for name, _args, recv, op in find_calls(self.body_of(fn) or ""):
             k = loc_kind(name) if key == "dcompact" else prim_kind(name)
-            if k is None and depth > 0 and name != fn and self.body_of(name) is not None:
-                k = self.helper_kind(name, key, depth - 1)
+            if k is None and depth > 0:
+                callee = self.callee_key(name, recv, op, fn)
+                if callee != fn and self.body_of(callee) is not None:
+                    k = self.helper_kind(callee, key, depth - 1)
             if k:
                 kinds.add(k)
         best = None
@@ -832,17 +1108,25 @@ class Tree:
         """
         body = self.body_of(fn) or ""
         mentioned |= set(re.findall(r"[A-Za-z_]\w*", body))
-        for name, args in find_calls(body):
+        for name, args, recv, op in find_calls(body):
             kind = loc_kind(name) if key == "dcompact" else prim_kind(name)
             if kind:
                 for tok in arg_tokens(args):
                     direct[tok] = stronger(direct.get(tok), kind)
-            elif depth > 0 and name != fn and self.body_of(name) is not None:
-                hk = self.helper_kind(name, key)
-                if hk:
-                    for tok in arg_tokens(args):
-                        helper[tok] = stronger(helper.get(tok), hk)
-                self._collect_marks(name, key, direct, helper, mentioned, depth - 1)
+                continue
+            if depth <= 0:
+                continue
+            # Round 6 (B1): the CALLEE, not the bare name. `collector->mark()` runs
+            # BaseCollector::mark, and binding it to whichever `mark()` the file order
+            # produced is how vernier's `stack_table_value` reported UNMARKED.
+            callee = self.callee_key(name, recv, op, fn)
+            if callee == fn or self.body_of(callee) is None:
+                continue
+            hk = self.helper_kind(callee, key)
+            if hk:
+                for tok in arg_tokens(args):
+                    helper[tok] = stronger(helper.get(tok), hk)
+            self._collect_marks(callee, key, direct, helper, mentioned, depth - 1)
 
     def mark_index(self, dtype):
         """Per-key marking evidence, in three tiers. {key: (direct, helper, mentioned)}
@@ -1352,12 +1636,16 @@ def report(name, tree, suspects, clears, verbose, grades=None):
                           ("HEAP-IF-COERCED", "REGISTERED", "IMMEDIATE-ONLY")
                           if counts.get(g)),
                   nostore))
-    # C++ overloads that collide on the bare name. Every one of them is a place where the
-    # callee body used to resolve a mark was picked by FILE ORDER. Non-zero here means
-    # some verdict in this tree may have been decided arbitrarily -- vernier's four
-    # `mark()` bodies are the measured case, and the first one is empty.
+    # C++ overloads that collide on the bare name -- every one of them a place where a
+    # callee body COULD be picked by file order. Since round 6 (B1) the pick is made from
+    # the receiver's static type, so this count is a hazard tally, not a verdict tally;
+    # the number that says an arbitrary pick actually HAPPENED is the second one.
+    # Non-zero `first-wins` means some verdict in this tree still rests on file order.
     overloaded = sum(1 for n, c in tree.func_defs.items() if c > 1)
     amb = ", %d overloaded name(s)" % overloaded if overloaded else ""
+    picks = sum(tree.ambiguous.values())
+    amb += (", %d first-wins pick(s) over %d name(s)"
+            % (picks, len(tree.ambiguous))) if picks else ""
     print("%s: %d suspect(s), %d field(s) cleared "
           "[%d wrap site(s), %d dtype(s), %d unresolved%s]%s"
           % (name, len(suspects), len([c for c in clears if c[2] != "-"]),
@@ -1454,6 +1742,70 @@ static void c_free(void *p) { delete (Collector *)p; }
 static void c_mark(void *p) { Collector *c = static_cast<Collector *>(p); c->mark(); }
 static const rb_data_type_t c_type = { "collector", { c_mark, c_free, }, };
 static VALUE c_wrap(VALUE k, Collector *c) { return TypedData_Wrap_Struct(k, &c_type, c); }
+"""
+
+# Round 6, defect B1: the callee of a member call was indexed by BARE NAME, first-wins, so
+# `collector->mark()` bound to whichever `mark()` body `rglob` happened to put first. This
+# is vernier reduced to that shape -- FOUR `mark()` bodies, the empty one first in file
+# order, the real one on the BASE class, and a call site whose receiver is declared right
+# there. It is a GREEN and a RED at once, and both halves are load-bearing:
+#
+#   stack_table_value  MUST NOT be reported. BaseCollector::mark marks it; only the empty
+#                      Thread::mark makes it look unmarked. Before B1 it WAS reported --
+#                      and on the real gem that was a false positive on the safest field
+#                      in the file.
+#   start_thread       MUST still be reported. Nothing marks it, and a fix that resolves
+#                      the receiver by clearing everything the call touches would hide it.
+#
+# Two further things the shape pins down. `TimeCollector::mark` is an OVERRIDE that is
+# never walked, because the receiver's STATIC type is BaseCollector -- the resolution is
+# by declared type, not by the set of bodies that share a name. And `threads.mark()`
+# resolves through a DATA MEMBER's type, which is the second receiver form.
+RED_CXX_OVERLOAD = """
+#include <ruby.h>
+class Thread {
+    public:
+        VALUE ruby_thread;
+        /* FIRST in file order, and EMPTY. */
+        void mark() { }
+};
+class ThreadTable {
+    public:
+        std::vector<Thread *> list;
+        void mark() {
+            for (auto t : list) { t->mark(); }
+        }
+};
+class BaseCollector {
+    public:
+    VALUE stack_table_value;
+    VALUE start_thread;
+    virtual void mark() {
+        rb_gc_mark(stack_table_value);
+    }
+};
+class TimeCollector : public BaseCollector {
+    public:
+    ThreadTable threads;
+    void mark() {
+        rb_gc_mark(stack_table_value);
+        threads.mark();
+    }
+};
+static void collector_mark(void *data) {
+    BaseCollector *collector = static_cast<BaseCollector *>(data);
+    collector->mark();
+}
+static void collector_free(void *data) { delete (BaseCollector *)data; }
+static const rb_data_type_t rb_collector_type = {
+    .wrap_struct_name = "collector",
+    .function = { .dmark = collector_mark, .dfree = collector_free, },
+};
+static BaseCollector *get_collector(VALUE obj) {
+    BaseCollector *collector;
+    TypedData_Get_Struct(obj, BaseCollector, &rb_collector_type, collector);
+    return collector;
+}
 """
 
 RED_COMPACT_DECL = """
@@ -1727,6 +2079,20 @@ def self_test(base):
     cats, fields = flagged_from_source(GREEN_MACRO)
     check(not fields,
           "green (macro) a gem's own gc_location #define counts as an update",
+          sorted(fields))
+
+    # -- round 6 (B1): a member call resolves by (class, method), not by file order ----
+    #
+    # ONE fixture, TWO assertions, and the pair is the point: a fix that resolved the
+    # receiver by simply crediting everything the call touches passes the first and fails
+    # the second. Measured before B1: {"stack_table_value", "start_thread"} -- the false
+    # positive and the real finding, indistinguishable.
+    _cats, fields = flagged_from_source(RED_CXX_OVERLOAD)
+    check("stack_table_value" not in fields,
+          "green (B1) a member call binds to the receiver's class, not the first "
+          "same-named body", sorted(fields))
+    check("start_thread" in fields,
+          "red (B1) the genuinely unmarked field of that same class still reports",
           sorted(fields))
 
     # -- predicate A: a severity COLUMN on the rows above --------------------------
