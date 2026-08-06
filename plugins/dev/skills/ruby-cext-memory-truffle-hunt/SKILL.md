@@ -208,6 +208,39 @@ through `constant->start` out of the zero-filled vacated slot. So an aliasing li
 only as pinned as its *caller's* argv, and a C extension that builds an argv with `xmalloc`
 removes the protection every Ruby-level caller was relying on.
 
+### The second pin: `StringValueCStr(x)` takes `&x`, and that forces a stack slot
+
+Measured in round 8 on mysql2's `rb_mysql_connect`, and it is the reason a whole family of
+"five unguarded pointers held across a GVL release" sites comes back clean. `StringValueCStr(x)`
+expands to `rb_string_value_cstr(&x)`. **Taking the address of `x` forces the compiler to give
+it a stack slot in the deriving frame**, and that slot is conservatively scanned. So the
+subject is pinned by the derivation itself, independently of `argv`.
+
+Byte-faithful shape replica of `rb_mysql_connect` — fixed arity 8, five derives, the real
+`rb_hash_foreach` / `rb_str_export_to_enc` window — 20 rounds per cell, witnesses 4000/4000,
+subject proven movable before the call:
+
+| | `argv` on the VM stack | `argv` on the heap |
+|---|---|---|
+| params live — **as shipped** | **0/20** | **0/20** |
+| params nulled after the derives | **0/20** | **20/20** |
+
+**Corruption needs BOTH pins gone.** Removing the `argv` pin alone is not enough, which is why
+the prism heap-argv result above does not generalise to every gem that builds a heap argv: prism
+aliases through a *library* that keeps reading the buffer, and its derive is `RSTRING_PTR`, which
+takes no address.
+
+Two consequences worth carrying:
+
+- **It closes the coercion hole for `StringValueCStr` specifically.** A `to_str` object whose
+  coerced String `argv` never held, with no other reference anywhere in the process, survived
+  0/20 on 3.4.10 and 3.4.7 while a decoy relocated 20/20. The okra/rmagick distinction still
+  holds for `StringValue(x)` followed by a *separate* `RSTRING_PTR(x)`, and for any derive that
+  re-assigns the variable — but not for the single-expression `StringValueCStr` form.
+- **A red that derives with `StringValueCStr` is not a positive control.** It survived ~400
+  nested C calls. Switching the red's derive to `RSTRING_PTR` fired 20/20 immediately. A
+  generated red built on the wrong macro reports sensitivity zero and reads as a pass.
+
 ### The positive control for in-call relocation
 
 Round 6 could observe relocation inside a single C call but never a consequence — 10/10
@@ -476,6 +509,30 @@ dropped plus churn (liveness). Clear a gem only when both pass. Controls, positi
 ## Class-Specific False Negatives
 
 Each of these made a genuinely broken gem report "survived".
+
+**An embedded-size payload can suppress the very GC that causes the bug.** Round 8's sqlite3
+finding was first labelled *latent under ordinary GC* on the strength of 10^6 clean values —
+because the payload was 13 bytes, chosen deliberately so a move or free would be visible in
+the bytes. Strings inside the variable-width-allocation slot (**640 B on Ruby 3.4**) allocate
+no external buffer, so they generate no `malloc_increase`, so ordinary malloc-limit GCs never
+land in a one-allocation window. The boundary is sharp and was measured:
+
+| value size | ordinary GC, no compaction |
+|---|---|
+| ~20 B | clean over **20,000,000** steps |
+| ~608 B (one slot class below) | clean over 10,000,000 steps |
+| **~648 B** | **segfault inside 1,000,000** |
+| ~4 KB | segfault at ~2,000 |
+
+Same binary, same API, one knob. So: **when the window is bounded by an allocation, sweep the
+payload across the embedded boundary before calling anything latent.** An observable chosen to
+make corruption legible is exactly the observable that can remove the allocation pressure.
+
+**A stale VM-stack slot in a live frame pins the subject.** The VM stack is marked up to the
+*innermost* frame's `sp`, so a slot left behind by an earlier expression in a frame that is
+still on the stack keeps its object pinned. Touching `$holder[0]` in the driver frame silently
+took a round-8 mysql2 probe to sensitivity zero — witnesses still relocated, so it read as a
+clean pass.
 
 **Churn must land in the subject's size pool.** For an *embedded* subject the freed slot is
 only reused by fillers from the same GC size pool — check `ObjectSpace.dump(s)["slot_size"]`,
