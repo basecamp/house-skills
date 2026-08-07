@@ -663,6 +663,60 @@ _REJECT = {
 }
 
 
+# THE STATED RECALL LIMIT OF THIS WHOLE FAMILY, and the reason it is written here rather
+# than discovered once a round.
+#
+# These sweeps read C with regular expressions. That is the right tool for what they do --
+# a recall-biased pass-1 triage over the C in real Ruby extensions, whose output a human
+# then reads -- and it is the wrong tool for deciding anything about adversarial C++.
+#
+# The #30 review demonstrated the difference at length. Ten rounds produced NINETEEN valid
+# counterexamples: `if constexpr`, `[[unlikely]]`, `Outer<int>::Base<long>`, `Base<(N > 0)>`,
+# `T(t)...`, `Holder::p`, `(void)sizeof(p = x)`, a write in a `for` increment, and more.
+# Every one was a true statement about C++ syntax. Every one was fixed. The corpus moved by
+# ZERO ROWS across all four predicates, because no gem in the 99 trees spells any of them.
+# Four of the fixes introduced fresh defects, one of which discharged a real row in silence
+# for four commits.
+#
+# So the acceptance criterion is the CORPUS, not the language. A shape that cannot move 99
+# real trees is a hypothetical, and hardening a regex against an unbounded supply of them
+# costs precision in the discharging direction while buying nothing. If precision on exotic
+# C++ ever genuinely matters, the answer is a real parser, not a better pattern.
+#
+# `unparsed_cxx_cases()` pins that boundary the way K&R is pinned: a short list of shapes
+# this family is NOT expected to handle, asserted so that a walk which starts handling one
+# has to come here and say so deliberately.
+# EACH IS A WELL-FORMED DEFINITION, and the first cut of this list was not (#31 review):
+# a fold expression with no enclosing parameter pack, a lambda capturing an undeclared
+# name, and a requires-clause on a PROTOTYPE, which these walkers ignore anyway. Malformed
+# input cannot demonstrate a boundary -- the check stayed green because there was nothing
+# there to parse, which is the same hollow-fixture failure this suite keeps catching.
+_UNPARSED_CXX = {
+    "fold-expression":
+        "template <class... A> static int sum_(A... a) { return (a + ... + 0); }",
+    "requires-clause":
+        "template <class T> requires (sizeof(T) > 0) static T id_(T x) { return x; }",
+    "lambda-capture":
+        "static const char *lam_(VALUE s) { auto f = [p = RSTRING_PTR(s)]() "
+        "{ return p; }; return f(); }",
+}
+
+
+def unparsed_cxx_cases():
+    """{tag: source} -- valid C++ whose MEANING this family does not read.
+
+    Not a to-do list, and not "the walker cannot see it". Measured: each of these is
+    indexed as a function, so the walker does read the file; what it does not do is
+    understand the construct. The `lambda-capture` case is the sharp one -- `lam_` returns
+    an interior pointer captured by a lambda, and this family reports nothing for it. That
+    is the recall limit, stated.
+
+    See the comment above: these exist so the boundary is a decision with a test behind it
+    rather than the next reviewer's discovery.
+    """
+    return dict(_UNPARSED_CXX)
+
+
 def declarator_cases():
     """{tag: (source, frozenset of names a conforming index returns)}.
 
@@ -1382,94 +1436,26 @@ def alias_reads(body, seeds, exclude=()):
     NAME reports the string literal as an escaping interior pointer -- which is what
     predicate B did. The kill is rule 5, not a special case beside it.
 
-    A CARRIER CAN BE RESTORED AFTER IT IS KILLED (#30 review), and one `since` per name
-    cannot say so:
+    RESTORATION IS DELIBERATELY NOT MODELLED. `q = p; p = "safe"; p = q; return p;` restores
+    a carrier after it is killed, and this function returns no read for that `return p`. A
+    propagating version of it was built on the #30 review and then REMOVED, which is worth
+    recording because the reasoning generalises:
 
-        char *q = p;        /* q carries */
-        p = "safe";         /* p stops carrying */
-        p = q;              /* p carries AGAIN */
-        return p;           /* a real escape, reported as a clean sheet */
+      - it moved ZERO rows across the 99-tree corpus, in either direction;
+      - its first cut resurrected the exact false positive rule 5 exists to kill, by
+        seeding any name whose right-hand side merely MENTIONED a carrier;
+      - its second cut lost every read between two restorations of the same name.
 
-    `self_derived` does not reach it -- the right-hand side reads `q`, not `p` -- and
-    re-seeding `p` in `alias_map` would be wrong in the other direction, because the map
-    holds ONE offset per name and moving it forward would discard the reads before the
-    kill. A name's live region is a set of INTERVALS, and that is a bigger change than this
-    rule needs.
-
-    So the restoration pass below is ADDITIVE ONLY: for a copy whose two sides are both
-    carriers, union the reads of the left-hand side taken from the copy onward. It can add
-    offsets and can never remove one, so it cannot resurrect the over-clear this same
-    function has now shipped twice. Both callers treat a larger read set as a longer window
-    or a live carrier -- over-reporting, which is the side each of them fails on.
-
-    AND A RESTORATION MUST PROPAGATE, not merely contribute its own reads (#30 review, the
-    first cut of this pass got that wrong):
-
-        q = p; p = "safe"; p = q; r = p; return r;
-
-    `r` is a fresh local copied from the RESTORED `p`, so unioning `p`'s reads leaves `r`
-    out of the alias set entirely and the return is not seen. Restoration therefore
-    re-enters `alias_map` as a fresh seed set rather than being unioned in place, which is
-    what lets the ordinary copy propagation reach `r` -- and, by the same route, anything
-    copied from `r`. `done` keys on (name, offset) so a name may be live from several
-    offsets without the loop repeating one, and offsets only ever move forward, so it
-    terminates.
-
-    WHAT KEEPS THIS FROM UNDOING ITEM 1 is the liveness test, and only that. The first cut
-    of the propagating version seeded any `lhs` whose right-hand side merely NAMED a
-    carrier, which turned the `kill-copy` arm -- `p = "safe"; q = p; return q;`, where the
-    copy carries the literal -- red in one step. The right-hand side must genuinely READ the
-    pointer at the copy, which is the same question `alias_map` asks of its own propagation
-    and is asked here the same way.
-
-    A guard for "`lhs` must already be a carrier" was written alongside it and then removed:
-    it is unreachable behind the liveness test, no fixture can distinguish it (seeding a
-    fresh name directly and reaching it through `alias_map` give the same read set), and an
-    untested condition beside a tested one is the shape this predicate family has now been
-    burned by twice.
+    A name's live region is genuinely a set of INTERVALS and this map holds one offset per
+    name, so modelling it properly is a different data structure, not a patch. Until a real
+    tree needs it, the missing reads are recall this predicate family states rather than
+    complexity it carries -- and complexity here fails in the DISCHARGING direction, which
+    is the one that loses findings silently.
     """
     m = alias_map(body, seeds, exclude)
-    out, done, layer = set(), set(), m
-    while layer:
-        for nm, since in layer.items():
-            if (nm, since) in done:
-                continue
-            done.add((nm, since))
-            out.update(source_reads(body, nm, since, kill=DOMINATING_WRITE))
-        # ONE NAME MAY BE RESTORED MORE THAN ONCE, and a {name: offset} map keeps only
-        # the last of them (#30 review):
-        #
-        #     p = "safe"; p = q; if (c) return p; p = "safe"; p = q; return NULL;
-        #
-        # The second restoration overwrote the first seed, so the reads BETWEEN them --
-        # the conditional `return p` -- disappeared. Each (name, offset) is its own seed
-        # set, and `done` already keys on the pair, so they are collected as a list and
-        # each is propagated on its own.
-        extra = []
-        for off, lhs, rhs in local_copies(body, min(m.values())):
-            if lhs in exclude or rhs not in layer:
-                continue
-            if off <= layer[rhs] or (lhs, off) in done:
-                continue
-            live = source_reads(body, rhs, layer[rhs], kill=DOMINATING_WRITE)
-            if not any(off < r < rhs_end(body, off) for r in live):
-                continue        # the right-hand side no longer reads the pointer
-            extra.append((lhs, off))
-        nxt = {}
-        for lhs, off in extra:
-            for nm, since in alias_map(body, {lhs: off}, exclude).items():
-                if (nm, since) not in done:
-                    nxt[(nm, since)] = None
-        layer = {}
-        for nm, since in nxt:
-            # a later seed for the same name does not cancel an earlier one; process the
-            # earliest here and let the loop pick up the rest on its next pass
-            if nm not in layer or since < layer[nm]:
-                layer[nm] = since
-        for nm, since in nxt:
-            if (nm, since) not in done and layer.get(nm) != since:
-                out.update(source_reads(body, nm, since, kill=DOMINATING_WRITE))
-                done.add((nm, since))
+    out = set()
+    for nm, since in m.items():
+        out.update(source_reads(body, nm, since, kill=DOMINATING_WRITE))
     return out
 
 
