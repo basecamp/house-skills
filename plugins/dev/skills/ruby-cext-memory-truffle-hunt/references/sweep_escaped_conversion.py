@@ -1677,15 +1677,10 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
     #
     #     AND TWO MORE FROM THE SAME REVIEW, both measured on rmagick before being fixed:
     #
-    #       restore     `q = p; p = "safe"; p = q; return p;`  -- a carrier can be RESTORED
-    #                   after it is killed. One `since` per name cannot say so, so
-    #                   alias_reads() unions a second read set from the restoring copy
-    #                   rather than moving the seed; see its docstring for why additive.
-    #       restore-copy `... p = q; r = p; return r;`          -- and the restoration has
-    #                   to PROPAGATE. The first cut of that pass only unioned the restored
-    #                   name's own reads, so a fresh local copied from the restored carrier
-    #                   never entered the alias set at all and the return was invisible.
-    #                   This arm returns `r`, not `p`, which is the whole point of it.
+    #     RESTORATION (`q = p; p = "safe"; p = q; return p;`) IS NOT COVERED HERE, and
+    #     that is a decision rather than an oversight -- see alias_reads' docstring. A
+    #     propagating version was built on the #30 review, moved zero corpus rows, broke
+    #     the `kill` arm once and lost reads between two restorations once, and was removed.
     #       qual-write  `Holder::p = "safe"; return p;`        -- a QUALIFIED member is not
     #                   this local. The third spelling of the `->`/`.` rule writes() already
     #                   carries, and the one character that was missing from it.
@@ -1731,8 +1726,6 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
         "and-write": ('    out && (p = "safe");\n', "p", ["RETURNS-INTERIOR"]),
         "or-write":  ('    out || (p = "safe");\n', "p", ["RETURNS-INTERIOR"]),
         "tern-write":('    out ? (p = "safe") : 0;\n', "p", ["RETURNS-INTERIOR"]),
-        "restore":   ('    q = p;\n    p = "safe";\n    p = q;\n', "p",
-                      ["RETURNS-INTERIOR"]),
         "qual-write":('    Holder::p = "safe";\n', "p", ["RETURNS-INTERIOR"]),
         "for-body":  ('    for (n = 0; n < 3; n++) p = "safe";\n', "p",
                       ["RETURNS-INTERIOR"]),
@@ -1742,8 +1735,6 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
                       ["RETURNS-INTERIOR"]),
         "attr-arm":  ('    if (out) [[unlikely]] p = "safe";\n', "p",
                       ["RETURNS-INTERIOR"]),
-        "restore-copy": ('    q = p;\n    p = "safe";\n    p = q;\n    r = p;\n', "r",
-                         ["RETURNS-INTERIOR"]),
         # The copy sits in a CONTROL EXPRESSION, so the next `;` is after the return.
         # `copy-stmt` is the same copy written as its own statement, and it was correct
         # all along -- the pair is what names the cause instead of the symptom.
@@ -1753,9 +1744,6 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
                       ["RETURNS-INTERIOR", "RETURNS-INTERIOR"]),
         # The SAME carrier restored twice: the reads between the two restorations must
         # survive. A {name: offset} seed map kept only the last and lost them.
-        "re-restore": ('    q = p;\n    p = "safe";\n    p = q;\n'
-                       '    if (out) return p;\n    p = "safe";\n    p = q;\n', "p",
-                       ["RETURNS-INTERIOR", "RETURNS-INTERIOR"]),
         # An UNEVALUATED operand never runs, so the write in it cannot kill. All three
         # dominance tests accept it: it has a block, no transfer token precedes it, and no
         # conditional operator guards it.
@@ -1774,6 +1762,31 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
           "without the reassignment still is, a conditional reassignment still is, and a "
           "write that re-derives from the name (`p = p + 1`) still is",
           kr)
+
+    # THE STATED C++ RECALL LIMIT, asserted so it is a decision and not a discovery.
+    # See tu_scope's comment above `unparsed_cxx_cases`. These shapes are NOT handled; the
+    # check is that each still parses to a clean sheet rather than to a crash or a hit, so
+    # a walk that starts handling one has to come here and change this on purpose.
+    #
+    # The claim is INERTNESS, not silence: a known-red function beside the unparsed
+    # construct must reach exactly the verdict it reaches without it. That is what "out of
+    # recall" has to mean for a pass-1 sweep -- the shape is not understood, and it does
+    # not crash the walk or move the answer for the code around it.
+    def _unparsed_hits(prefix):
+        body = ("#include <ruby.h>\n%s\nstatic const char *grab(VALUE str)\n{\n"
+                "    StringValue(str);\n    return RSTRING_PTR(str);\n}\n" % prefix)
+        r = sweep(Tree(_synth("t_unparsed", {"ext/t.cpp": body})), "unparsed")
+        return sorted(h[0] for h in r.hits)
+
+    baseline = _unparsed_hits("")
+    unparsed = {t: _unparsed_hits(src)
+                for t, src in tu_scope.unparsed_cxx_cases().items()}
+    check(baseline == ["RETURNS-INTERIOR"]
+          and all(v == baseline for v in unparsed.values()),
+          "the stated C++ recall limit holds: a fold expression, a requires-clause and a "
+          "lambda capture are not parsed by this family, and none of them changes the "
+          "verdict on the known-red function beside it -- see tu_scope.unparsed_cxx_cases",
+          [baseline, unparsed])
 
     def _index_names(src):
         return {f.name for f in Tree(_synth("t_conform", {"ext/t.cpp": src})).funcs}
