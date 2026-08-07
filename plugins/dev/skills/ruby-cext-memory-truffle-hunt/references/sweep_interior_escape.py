@@ -2244,27 +2244,23 @@ NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-"]
 # on the path the derivation ran on; on the path where it does run there is no window at
 # all. The row was a window measured on a pointer the derivation never produced. The
 # trees keep their other rows and no gem's verdict moves.
-# PR #30 REVIEW, ONE ROW: iconv- 15 -> 14, and it is a FALSE POSITIVE LEAVING, not a
-# defect going quiet. `tu_scope.self_derived` (the alias kill's third hole, found by Codex
-# on the #29 PR) stops a write whose right-hand side reads the name from killing later
-# reads of it. In `strip_glibc_option`:
+# PR #30 REVIEW: THIS TABLE DID NOT MOVE, AND THE ROUND-TRIP IS THE POINT. An earlier
+# commit on this branch took `iconv-` to 14, discharging `strip_glibc_option`'s
+# HELD-ACROSS-WINDOW through `last-use-after` on the grounds that `val` is read again after
+# the derivation. It is -- but not the same `val`:
 #
 #     const char *ptr = RSTRING_PTR(val), *pend = RSTRING_END(val);
-#     ...
-#     VALUE opt = rb_str_subseq(val, slash - ptr, pend - slash);   <- allocates
-#     val = rb_str_subseq(val, 0, slash - ptr);                    <- writes val, READS val
+#     VALUE opt = rb_str_subseq(val, slash - ptr, pend - slash);   /* allocates */
+#     val = rb_str_subseq(val, 0, slash - ptr);                    /* a DIFFERENT String */
 #     *code = val;
 #
-# the write to `val` used to kill the two later reads of it, so this predicate believed the
-# String was dead across the allocation and raised HELD-ACROSS-WINDOW on `ptr`. `val` is in
-# fact read at and after the last deref, so the row now discharges through `last-use-after`,
-# a rule that was already here and was being denied its input.
-#
-# THE SAME ONE-LINE RULE MOVES TWO PREDICATES IN OPPOSITE DIRECTIONS -- it RESTORES a lost
-# RETURNS-INTERIOR in B (where a missed kill discharges) and REMOVES a spurious window here
-# (where it reports). That is the polarity `source_reads` documents, seen from both sides in
-# one change.
-TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 21, "iconv-": 14, "zstd-": 6,
+# `tu_scope.self_derived` had been applied in both kill modes, so that self-assignment
+# stopped counting as a write and the later reads of `val` were credited to the ORIGINAL
+# String. A pointer walked onto itself still points into the same object; a VALUE assigned
+# from itself names a new one. The rule is DOMINATING_WRITE only now, the row is back, and
+# `iconv-` is 15 again -- so this predicate's corpus output is byte-identical across the
+# whole review round.
+TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 21, "iconv-": 15, "zstd-": 6,
            "sqlite3-2.9.5": 3, "websocket-driver-": 2, "stringio-": 1,
            "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 3, "puma-": 6,
            "unicorn-6.1.0": 6, "date-": 18, "openssl-3.3.0": 5, "openssl-3.3.1": 5,
@@ -2771,6 +2767,43 @@ def self_test(pool):
     }
     dm = {t: _sweep(_synth("fx-dom-%s" % t, {"ext/probe.c": dom_c % arm}))
           for t, arm in dom_arms.items()}
+
+    # 8h5. `self_derived` IS DOMINATING_WRITE ONLY, AND THIS STAGE IS WHY (#30 review).
+    #
+    #    A POINTER walked onto itself still points into the same object, so the alias set is
+    #    right to keep carrying it. A `VALUE` assigned from itself does NOT -- it names a new
+    #    object -- and this predicate's liveness stage asks the same shared question about
+    #    the SOURCE under ANY_WRITE. Applied in both modes, the self-assignment stopped
+    #    counting as a write, the later `*code = val` was credited to the ORIGINAL String,
+    #    `last-use-after` fired, and the row DISCHARGED. An over-clear, the direction that
+    #    loses findings silently, and it shipped once on this branch.
+    #
+    #    THE FIXTURE IS iconv's `strip_glibc_option` VERBATIM, and that is deliberate: three
+    #    synthetic spellings of "self-assign, then read the source" all failed to reproduce
+    #    it, discharging through `copies-in-callee` or `no-window` instead. What the real
+    #    function has that they lacked is the last deref of `ptr` sitting INSIDE the
+    #    allocating call (`slash - ptr` as an argument to `rb_str_subseq`), which is what
+    #    puts the source read after it. A fixture that cannot reproduce the shape is not a
+    #    smaller version of it.
+    src_c = ('#include <ruby.h>\n\nstatic VALUE\n'
+             'strip_glibc_option(VALUE *code)\n{\n'
+             '    VALUE val = StringValue(*code);\n'
+             '    const char *ptr = RSTRING_PTR(val), *pend = RSTRING_END(val);\n'
+             '    const char *slash = memchr(ptr, 47, pend - ptr);\n\n'
+             '    if (slash && slash < pend - 1 && slash[1] == 47) {\n'
+             '\tVALUE opt = rb_str_subseq(val, slash - ptr, pend - slash);\n'
+             '\tval = rb_str_subseq(val, 0, slash - ptr);\n'
+             '\t*code = val;\n\treturn opt;\n    }\n    return 0;\n}\n\n'
+             'void Init_probe(void)\n{\n'
+             '    rb_define_method(rb_cObject, "s", strip_glibc_option, 1);\n}\n')
+    sm = _sweep(_synth("fx-src-dup", {"ext/probe.c": src_c}))
+    check(len(sm.hits) == 1 and any(d[0] == "no-window" for d in sm.discharges),
+          "8h5 RED (#30 review): a VALUE assigned from itself names a NEW object, so it "
+          "still kills the source's liveness -- iconv's strip_glibc_option keeps its "
+          "HELD-ACROSS-WINDOW row, and the tree's unrelated no-window discharge still "
+          "fires, so a sweep that simply discharges nothing fails here too",
+          [len(sm.hits), sorted(h[0] for h in sm.hits),
+           sorted(d[0] for d in sm.discharges)])
     # THE SWITCH SHAPE NEEDS ALL THREE OFFSETS INSIDE THE SWITCH BODY, and getting that
     # wrong is how a fixture ends up asserting nothing. The dominance test already skips
     # any write whose innermost block does not contain BOTH the derivation and the

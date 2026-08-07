@@ -902,7 +902,10 @@ def _stmt_start(body, off):
 
 
 _BARE_ARM = re.compile(r"\b(?:else|do)\s*$")
-_ARM_HEAD = re.compile(r"\b(if|for|while|switch)\s*$")
+# `if constexpr` (C++17) is still an `if` for this purpose: the discarded branch does not
+# run, so a write inside it does not dominate. The head before the `(` ends in `constexpr`,
+# which the bare alternation could not see. Found on the #30 review.
+_ARM_HEAD = re.compile(r"\b(?:if\s+constexpr|if|for|while|switch)\s*$")
 # A conditional OPERATOR guarding a write that has no conditional STATEMENT around it:
 # `len && (p = x);`, `len || (p = x);`, `len ? (p = x) : 0;`. See conditional_stmt.
 _COND_OP = re.compile(r"&&|\|\||\?")
@@ -1019,9 +1022,23 @@ def self_derived(body, off):
     IT OVER-REPORTS, DELIBERATELY, and that is the side this module fails on: `p = f(p)`
     where `f` returns something unrelated keeps an alias that no longer carries. Under
     DOMINATING_WRITE a missed kill REPORTS a row a human then reads; a wrongful kill
-    DISCHARGES one silently, which is how this defect shipped. Under ANY_WRITE the claim is
-    the plain one -- the occurrence after a self-derived write really does still read an
-    interior pointer of the source object -- so the rule is not mode-specific.
+    DISCHARGES one silently, which is how this defect shipped.
+
+    IT IS DOMINATING_WRITE ONLY, AND THAT IS THE WHOLE CLAIM (#30 review). A POINTER walked
+    onto itself still points into the same object, so the name still carries. A `VALUE`
+    assigned from itself does NOT:
+
+        p = RSTRING_PTR(str);
+        str = rb_str_dup(str);        /* str now names a DIFFERENT String */
+        RB_GC_GUARD(str);             /* guards the duplicate, not p's object */
+        use(p);
+
+    Predicate D's liveness stage asks this same predicate about the SOURCE OBJECT under
+    ANY_WRITE, where the later reads of `str` read the duplicate. Exempting that write
+    credits the guard with rooting the original and DISCHARGES a real held-across-allocation
+    row -- an over-clear, the direction that loses findings silently. The first cut of this
+    rule applied to both modes and did exactly that; see the iconv note in
+    sweep_interior_escape's TRIAGED table for the row it took.
 
     THE RIGHT-HAND SIDE IS AN EXPRESSION, NOT A LINE, and bounding it by the next `;` is
     wrong in the one shape this corpus is full of. trilogy's connect option block spells
@@ -1158,9 +1175,9 @@ def source_reads(body, name, since, kill=ANY_WRITE):
         for w, end in done:
             if not (lo < w and end <= hi):
                 continue
-            if self_derived(body, w):
-                continue      # a pointer walk stores the pointer back into the name
             if kill == DOMINATING_WRITE:
+                if self_derived(body, w):
+                    continue  # a pointer walk stores the pointer back into the name
                 b = innermost_block(body, w, bl)
                 if b is not None and not (b[0] <= since < b[1] and b[0] <= at < b[1]):
                     continue      # a write that need not run cannot discharge a live row
