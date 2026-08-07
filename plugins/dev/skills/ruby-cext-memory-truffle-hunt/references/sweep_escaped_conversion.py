@@ -1738,6 +1738,10 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
                       ["RETURNS-INTERIOR"]),
         "while-body":('    while (out) p = "safe";\n', "p", ["RETURNS-INTERIOR"]),
         "constexpr": ('    if constexpr (0) p = "safe";\n', "p", ["RETURNS-INTERIOR"]),
+        "for-incr":  ('    for (n = 0; n < 3; p = "safe") ++n;\n', "p",
+                      ["RETURNS-INTERIOR"]),
+        "attr-arm":  ('    if (out) [[unlikely]] p = "safe";\n', "p",
+                      ["RETURNS-INTERIOR"]),
         "restore-copy": ('    q = p;\n    p = "safe";\n    p = q;\n    r = p;\n', "r",
                          ["RETURNS-INTERIOR"]),
     }

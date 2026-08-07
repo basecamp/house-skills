@@ -3285,6 +3285,19 @@ def self_test(base, siblings=()):
     # exist to stop. Blanking is the behaviour the walk actually governs, so it is the
     # behaviour asserted. `VALUE held` is the control: it sits outside every method body,
     # so a blanker that blanked the whole class would fail here too.
+    # A template-id may appear at EVERY component of a qualified base, not only the last
+    # (#30 review): `Outer<int>::Base<long>()`. Asserted through the same walk, since the
+    # symptom and the control are identical.
+    nested = blank_method_bodies(RED_CXX_PACK_INIT.replace(
+        "PBox(T... t) : T(t)...",
+        "PBox(T... t) : Outer<int>::Base<long>()"))
+    check("ctor_local" not in nested and "VALUE held" in nested,
+          "green (c++ nested template-id ctor-init) `Outer<int>::Base<long>()` is a "
+          "qualified base whose INTERMEDIATE component carries a template-id: the "
+          "constructor is still recognised and its body blanked",
+          "ctor_local present=%s, held present=%s"
+          % ("ctor_local" in nested, "VALUE held" in nested))
+
     packed = blank_method_bodies(RED_CXX_PACK_INIT)
     check("ctor_local" not in packed and "VALUE held" in packed,
           "green (c++ pack ctor-init) `PBox(T... t) : T(t)...` is a constructor: the pack "

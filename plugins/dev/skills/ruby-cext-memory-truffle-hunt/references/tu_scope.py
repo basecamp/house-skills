@@ -526,18 +526,29 @@ def _skip_member_init(src, k):
     while True:
         while k < n and src[k] in " \t\r\n":
             k += 1
-        m = _QUAL_NAME.match(src, k)
-        if not m:
-            return -1
-        k = m.end()
-        while k < n and src[k] in " \t\r\n":
-            k += 1
-        if k < n and src[k] == "<":
-            k = _skip_template_args(src, k)
-            if k < 0:
+        # A QUALIFIED NAME MAY CARRY A TEMPLATE-ID AT EVERY COMPONENT, not only the last
+        # (#30 review): `Outer<int>::Base<long>()`. Parsing one name, skipping one `<...>`
+        # and then demanding `(` or `{` rejects the constructor at the `::`. Walk the
+        # components instead -- name, optional template-id, optional `::`, repeat.
+        while True:
+            m = re.match(r"[A-Za-z_]\w*", src[k:])
+            if not m:
                 return -1
+            k += m.end()
             while k < n and src[k] in " \t\r\n":
                 k += 1
+            if k < n and src[k] == "<":
+                k = _skip_template_args(src, k)
+                if k < 0:
+                    return -1
+                while k < n and src[k] in " \t\r\n":
+                    k += 1
+            if src[k:k + 2] == "::":
+                k += 2
+                while k < n and src[k] in " \t\r\n":
+                    k += 1
+                continue
+            break
         if k < n and src[k] == "(":
             close = match_paren(src, k)
         elif k < n and src[k] == "{":
@@ -901,6 +912,38 @@ def _stmt_start(body, off):
     return 0
 
 
+def _in_control_header(body, off):
+    """Is `off` inside the parentheses of an `if`/`for`/`while`/`switch` header?
+
+    `for (i = 0; i < n; p = "safe") ++i;` puts the write in the INCREMENT clause (#30
+    review), which a zero-iteration loop never runs. The statement-boundary scan cannot see
+    it: the clause separators are semicolons at paren depth zero relative to the write, so
+    the head measures empty and the write reads as unconditional.
+
+    Semicolons are therefore skipped here rather than ending the scan -- inside a header
+    they are clause separators, not statement boundaries -- while a brace at depth zero
+    ends it, because that is a real statement boundary in any surrounding block. The `init`
+    clause does always run, so calling the whole header conditional over-reports; that is
+    the direction this test fails on deliberately.
+    """
+    depth = 0
+    for i in range(off - 1, -1, -1):
+        c = body[i]
+        if c == ")":
+            depth += 1
+        elif c == "(":
+            if depth == 0:
+                return bool(_ARM_HEAD.search(body[:i].rstrip()))
+            depth -= 1
+        elif c in "{}" and depth == 0:
+            return False
+    return False
+
+
+# A standard attribute sequence at the END of a statement head: `[[unlikely]]`,
+# `[[likely]]`, `[[fallthrough]]`, and any vendor spelling with the same brackets.
+_ATTR_TAIL = re.compile(r"(?:\s*\[\[[^\]]*\]\])+$")
+
 _BARE_ARM = re.compile(r"\b(?:else|do)\s*$")
 # `if constexpr` (C++17) is still an `if` for this purpose: the discarded branch does not
 # run, so a write inside it does not dominate. The head before the `(` ends in `constexpr`,
@@ -943,7 +986,14 @@ def conditional_stmt(body, off):
     That is the safe direction here and deliberately so -- an unrecognised guard KILLS a
     live row, an over-recognised one merely keeps a row a human then reads.
     """
+    if _in_control_header(body, off):
+        return True
     head = body[_stmt_start(body, off):off].rstrip()
+    # A C++11 ATTRIBUTE SITS BETWEEN THE `)` AND THE STATEMENT (#30 review):
+    # `if (cond) [[unlikely]] p = "safe";` leaves a head ending in `]]`, so the arm test
+    # below never sees the `)` it is looking for. Attributes carry no control flow, so
+    # dropping them is exact rather than an approximation.
+    head = _ATTR_TAIL.sub("", head).rstrip()
     if _BARE_ARM.search(head):
         return True
     if _COND_OP.search(head):
