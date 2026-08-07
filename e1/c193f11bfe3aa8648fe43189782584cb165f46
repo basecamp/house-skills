@@ -1,0 +1,28 @@
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/sweep_interior_escape.py
+  s_fbdd46ddda99c1::t_806cd2ffa29ea8 5335-5494
+  s_c6b6253febb054::t_cebed267374a94 1063-1072,1484-1499,2243-2250,2257-2261,2507-2544,2636-2647
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "e1c193f11bfe3aa8648fe43189782584cb165f46",
+  "prompts": {},
+  "sessions": {
+    "s_c6b6253febb054": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "614bcc56-21f7-4e3e-9c88-69157fd34265",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    },
+    "s_fbdd46ddda99c1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ee18d3b4-394a-4197-ada3-15fcda13f41d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
