@@ -1,0 +1,27 @@
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/sweep_escaped_conversion.py
+  s_7f3f0e6f0e91af::t_38643addddd21d 1713
+  s_7f3f0e6f0e91af::t_64f03453642676 1684-1688
+  s_7f3f0e6f0e91af::t_8f176f5d7d9b05 1740-1741
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/tu_scope.py
+  s_7f3f0e6f0e91af::t_778fb645ac88d6 1286
+  s_7f3f0e6f0e91af::t_88a5203a6b2b7a 1310
+  s_7f3f0e6f0e91af::t_2a2fd24969e74e 1273-1285,1301-1308,1320
+  s_7f3f0e6f0e91af::t_2a9715b093d298 1287-1298
+  s_7f3f0e6f0e91af::t_ab343dedfd42d6 1311-1319
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "80c88d34df1705d4c646d4dffabda8df69082d85",
+  "prompts": {},
+  "sessions": {
+    "s_7f3f0e6f0e91af": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c8e61efb-34f6-40cd-a60f-e0a4ef99e3b4",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
