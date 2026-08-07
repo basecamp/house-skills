@@ -765,6 +765,12 @@ def prim_kind(name):
     return "movable" if MOVABLE_PRIM.match(name) else "pin"
 
 
+# A callback slot naming one of these registers nothing. `Qnil` is not a function
+# pointer either, and a slot spelled that way is a typo that would otherwise enter
+# the index as a mark function named `Qnil` and bind to nothing.
+NULLISH = frozenset(("NULL", "0", "nullptr", "Qnil"))
+
+
 def callback_name(text):
     """The function a dtype callback slot names, with casts and parentheses removed.
 
@@ -815,43 +821,78 @@ def mark_callbacks(src):
     parts, so `.function = { .dmark = X }` is reached without unwrapping the group first;
     the positional fallback runs only when that found nothing, which is A's disposition and
     for A's reason -- a designated `.function` holding a POSITIONAL list matches neither.
+
+    ONE TYPE CAN HAVE SEVERAL INITIALISERS AND ONLY SOME OF THEM MARK, which is the third
+    review round's second finding and the same `#ifdef` family as the zstd trap one level
+    up. `strip_directives` keeps the code inside conditionals -- deliberately, and predicate
+    A depends on it in the opposite direction -- so mutually exclusive variants of the SAME
+    `rb_data_type_t` are both retained:
+
+        #ifdef HAVE_PINNING
+        static const rb_data_type_t wrap_type = { "wrap", { wrap_mark, 0, 0, }, ... };
+        #else
+        static const rb_data_type_t wrap_type = { "wrap", { NULL, 0, 0, }, ... };
+        #endif
+
+    The named callback registered unconditionally, so in a build selecting the second
+    variant the derivations cleared with NO MARK RUNNING AT ALL. Registration is graded per
+    VARIABLE now: a variant naming no callback, or naming `NULL`, makes every variant of
+    that variable UNTRUSTED, exactly as one movable mark makes a field unpinned. Two
+    genuinely different types in one file are two variables and are graded apart.
+
+    UNTRUSTED IS NOT DROPPED, and that distinction is the whole reason this returns a flag
+    rather than filtering. Removing the registration would take its mark function out of the
+    closure and out of `movable` with it -- and a movable mark lost that way lets a pin
+    registered by some OTHER type answer for the same `(type, field)` key. That is
+    `gate-whole-closure` one scope out. So an untrusted registration still seeds the
+    closure; it just cannot contribute to `pinned`.
+
+    The legacy `Data_Wrap_Struct` family is graded per CALL SITE and always trusted: each
+    call is its own registration of its own object, with no second variant to disagree.
     """
-    out = []
+    out, variants = [], {}
     for m in re.finditer(r"\brb_data_type_t\s+(\w+)\s*=\s*\{", src):
         open_idx = src.index("{", m.end() - 1)
         close = match_brace(src, open_idx)
         if close < 0:
             continue
         body = src[open_idx + 1:close]
-        found = False
+        got, named = [], False
         for f in re.finditer(r"\.dmark\s*=\s*([^,}]+)", body):
             v = callback_name(f.group(1))
             if v:
-                out.append((v, open_idx + 1 + f.start(1)))
-                found = True
-        if found:
-            continue
-        parts = split_args(body)
-        grp = next((p for p in parts if p.strip().startswith("{")), None)
-        if grp is None:
-            fnpart = next((p for p in parts if re.match(r"\.function\s*=", p.strip())),
-                          None)
-            if fnpart:
-                grp = fnpart.split("=", 1)[1].strip()
-        if grp and grp.startswith("{"):
-            fns = split_args(grp.strip()[1:-1])
-            if fns:
-                v = callback_name(fns[0])
-                if v:
-                    out.append((v, open_idx))
+                named = True
+                got.append((v, open_idx + 1 + f.start(1)))
+        if not named:
+            parts = split_args(body)
+            grp = next((p for p in parts if p.strip().startswith("{")), None)
+            if grp is None:
+                fnpart = next((p for p in parts if re.match(r"\.function\s*=", p.strip())),
+                              None)
+                if fnpart:
+                    grp = fnpart.split("=", 1)[1].strip()
+            if grp and grp.startswith("{"):
+                fns = split_args(grp.strip()[1:-1])
+                if fns:
+                    v = callback_name(fns[0])
+                    if v:
+                        got.append((v, open_idx))
+        variants.setdefault(m.group(1), []).append(got)
+    # A variant PINS when it names at least one callback that is not a null constant. A
+    # variable is trusted only when every retained variant does.
+    trusted = {var: all(any(n not in NULLISH for n, _o in got) for got in vs)
+               for var, vs in variants.items()}
+    for var, vs in variants.items():
+        for got in vs:
+            out += [(n, o, trusted[var]) for n, o in got if n not in NULLISH]
     for macro, mi in UNTYPED_MARK.items():
         for m in re.finditer(r"\b%s\s*(?=\()" % macro, src):
             args, _ = call_args(src, m.end())
             if not args or len(args) <= mi:
                 continue
             v = callback_name(args[mi])
-            if v:
-                out.append((v, m.start()))
+            if v and v not in NULLISH:
+                out.append((v, m.start(), True))
     return out
 
 
@@ -1215,8 +1256,8 @@ class Tree:
         """
         frontier, seen, out, uncond = [], set(), [], set()
         for path, src in self.files.items():
-            for name, off in mark_callbacks(src):
-                frontier += [(fn, True) for fn in
+            for name, off, trusted in mark_callbacks(src):
+                frontier += [(fn, trusted) for fn in
                              tu_scope.bind(self.by_name.get(name, ()), path, off)]
         while frontier:
             fn, u = frontier.pop()
@@ -2303,14 +2344,41 @@ def pin_source_stable(fn, deriv_off, expr):
     leg is load-bearing. Measured cost over the 99 trees: zero. Keeping it unconditional is
     a rule with one clause rather than two, in the round whose whole subject is this
     discharge firing where it should not.
+
+    THE PATH LEG ASKS tu_scope's ALIAS SET RATHER THAN THE LITERAL SPELLING, and choosing
+    that over a third exact-path clause is the point of the round. `alias = w;` then
+    `alias->buf = other;` rebinds the same field through a second name, and the first cut of
+    this function -- which matched only `w->buf` -- discharged it. That is the SECOND time a
+    fix in this rule was routed around by one level of indirection: `unconditional_mark` was
+    exact-path too, and a call to a mark helper walked past it. Both bypasses had the same
+    shape, so the answer is not a third exact-path clause but the general question, asked of
+    the module that already answers it.
+
+    `tu_scope.alias_map` is rule 4 -- which locals carry the same pointer -- and a
+    `struct wrap *` copy is exactly its shape, so this needs no new machinery and inherits
+    its three constraints (pointer-typed left-hand side, ordering, and rule 5's kill on a
+    carrier that has been overwritten). Seeded at offset 0 rather than at the derivation,
+    because an alias taken BEFORE the derive aliases the same object just as well as one
+    taken after; that is the reviewer's own spelling.
+
+    ONLY THE PATH LEG ITERATES ALIASES. The base leg exists to keep `escape_stays_inside`'s
+    comparison honest, and that comparison is only ever made against the derivation's own
+    base spelling -- so an alias being reassigned cannot mislead it. Widening the base leg
+    to every alias would also make the establishing `alias = w;` itself read as a rebinding,
+    which is a decline with nothing behind it.
     """
     rel = deriv_off - fn.bstart
     m = MEMBER_PATH.fullmatch(expr)
     if m is None:
         return True
-    later = [o for o in tu_scope.writes(fn.body, m.group(1)) if o > rel]
-    later += [w.start() for w in _path_write(expr).finditer(fn.body) if w.start() > rel]
-    return not later
+    base, rest = m.group(1), m.group(2)
+    if [o for o in tu_scope.writes(fn.body, base) if o > rel]:
+        return False
+    for name in tu_scope.alias_map(fn.body, {base: 0}):
+        if [w.start() for w in _path_write(name + rest).finditer(fn.body)
+                if w.start() > rel]:
+            return False
+    return True
 
 
 def escape_stays_inside(base, kind, text):
@@ -3076,6 +3144,26 @@ NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-"]
 #   the rebound base  `w = other` before `w->held = p`. ZERO corpus instances. Measured, not
 #                       assumed: the base leg alone declines 0 of the pinned-key derivations
 #                       in the 99 trees, which is why keeping it unconditional costs nothing.
+#
+# ROUND 11, THIRD REVIEW PASS: TWO MORE, AND THE CORPUS IS FLAT AGAIN -- 414 -> 414, every
+# discharge count identical, pin keys 115 and movable keys 69 before and after. Both fixes
+# are visible ONLY in the fixtures, and both were swept for rather than assumed flat:
+#
+#   the aliased path  `alias = w; ... alias->buf = other;`. The rebinding rule shipped one
+#                       round earlier matched the literal `w->buf` spelling, so one pointer
+#                       copy walked past it. Now asks tu_scope.alias_map. This is the SECOND
+#                       exact-path fix in this rule to be routed around by one level of
+#                       indirection -- unconditional_mark went the same way, via a mark
+#                       helper -- which is why the answer here is the general question asked
+#                       of the module that already answers it, and not a third clause.
+#   the NULL variant  two `rb_data_type_t` initialisers for one variable, one naming a
+#                       callback and one `NULL`. SWEPT: over the 99 trees there are 329
+#                       initialisers in 274 files, 76 of them inside a preprocessor
+#                       conditional, and ZERO variables declared twice. The shape is
+#                       synthetic today. The companion sweep at the CALL level found 43
+#                       marking primitives inside conditionals with only zstd's three
+#                       `#else` pins and a msgpack shim dead, which is what 8r pins; this is
+#                       the same question one level up and it comes back empty.
 TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 7, "iconv-": 15, "zstd-": 6,
            "sqlite3-2.9.5": 3, "websocket-driver-": 2, "stringio-": 1,
            "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 2, "puma-": 6,
@@ -4344,6 +4432,206 @@ def self_test(pool):
             [h[0] for h in es[t].hits], sorted(d[0] for d in es[t].discharges))
            for t in sorted(edge_arms)]
           + [("movable-edge index", sorted(mv.pinned), sorted(mv.movable))])
+
+    # 8x. GENERATED REDS AND GREENS: THE REBINDING CAN GO THROUGH AN ALIAS. #32's third
+    #     review round, first finding, and the second time a fix in this rule was routed
+    #     around by ONE level of indirection -- `unconditional_mark` by a call to a mark
+    #     helper, and now `pin_source_stable` by an ordinary pointer copy. Both first cuts
+    #     were exact-path, so the answer here is deliberately NOT a third exact-path clause.
+    #
+    #       alias-before  `alias = w;` ... `alias->buf = other;`   -> STILL A HIT
+    #       alias-after   the copy taken after the derivation      -> STILL A HIT
+    #       alias-unused  the alias exists and is only READ        -> DISCHARGES
+    #       other-struct  a different wrapper's `twin->buf =`      -> DISCHARGES
+    #
+    #     THE PATH LEG NOW ASKS tu_scope.alias_map, which is rule 4 -- which locals carry
+    #     the same pointer -- and a `struct wrap *` copy is exactly its shape. That buys the
+    #     three constraints rule 4 already carries rather than three new ones, and it is why
+    #     `other-struct` is a green: `twin` comes from its own TypedData_Get_Struct and is
+    #     not in the alias set, so the rule is asking about ALIASES and not about "any
+    #     pointer to this struct type", which would decline every wrapper-pair function in
+    #     the corpus.
+    #
+    #     `alias-unused` is the green that keeps the widening honest in the other direction:
+    #     an alias that is only ever read must not decline, or the rule degenerates into
+    #     "any second name for this pointer exists". A STATED LIMIT, over-reporting and
+    #     recorded rather than fixed: a carrier that is killed before the write
+    #     (`alias = w; alias = twin; alias->buf = x;`) still declines, because the check asks
+    #     the alias SET rather than `alias_reads`. Rule 5's kill would answer it; the safe
+    #     direction here is to decline, and no corpus row pays for it.
+    ali_c = ("#include <ruby.h>\n\n"
+             "struct wrap { VALUE buf; const char *held; };\n\n"
+             "static void\n"
+             "wrap_mark(void *p)\n"
+             "{\n"
+             "    struct wrap *w = p;\n"
+             "    rb_gc_mark(w->buf);\n"
+             "}\n\n"
+             "static const rb_data_type_t wrap_type = {\n"
+             "    \"wrap\",\n"
+             "    { wrap_mark, 0, 0, },\n"
+             "    0, 0, RUBY_TYPED_FREE_IMMEDIATELY\n"
+             "};\n\n"
+             "static VALUE\n"
+             "feed(VALUE self, VALUE peer, VALUE other)\n"
+             "{\n"
+             "    struct wrap *w;\n"
+             "    struct wrap *twin;\n"
+             "    struct wrap *alias;\n"
+             "    const char *p;\n"
+             "    VALUE out;\n"
+             "    TypedData_Get_Struct(self, struct wrap, &wrap_type, w);\n"
+             "    TypedData_Get_Struct(peer, struct wrap, &wrap_type, twin);\n"
+             "%s"
+             "    p = RSTRING_PTR(w->buf);\n"
+             "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+             "%s"
+             "    out = rb_str_new(p, 4);\n"
+             "    return out;\n"
+             "}\n\n"
+             "void Init_probe(void)\n"
+             "{\n"
+             "    rb_define_method(rb_cObject, \"f\", feed, 0);\n"
+             "}\n")
+    ali_arms = {
+        "alias-before": ("    alias = w;\n", "    alias->buf = other;\n"),
+        "alias-after":  ("", "    alias = w;\n    alias->buf = other;\n"),
+        "alias-unused": ("    alias = w;\n", "    rb_str_new(alias->held, 2);\n"),
+        "other-struct": ("", "    twin->buf = other;\n"),
+    }
+
+    def _ali_arm(tag, pre, post):
+        root = _synth("fx-ali-%s" % tag, {"ext/probe.c": ali_c % (pre, post)})
+        return _sweep(root), _hits(root, disabled=("pinning-mark",))
+    al = {t: _ali_arm(t, *a) for t, a in ali_arms.items()}
+    ali_green, ali_red = ("alias-unused", "other-struct"), ("alias-before", "alias-after")
+    check(all((al[t][0].funcs, len(al[t][0].derivations), len(al[t][0].with_window))
+              == (3, 1, 1) and al[t][1] for t in ali_arms)
+          and all(not al[t][0].hits
+                  and [d[0] for d in al[t][0].discharges] == ["pinning-mark"]
+                  for t in ali_green)
+          and all(len(al[t][0].hits) == 1 and not al[t][0].discharges for t in ali_red),
+          "pin-rebinding through an ALIAS: `alias = w; alias->buf = other;` rebinds the "
+          "pinned field under a second name and leaves the row standing, whether the copy "
+          "is taken before or after the derivation -- the leg asks tu_scope's alias set, "
+          "not the literal spelling. An alias that is only READ, and a different wrapper of "
+          "the same type, both still discharge",
+          [(t, al[t][0].funcs, len(al[t][0].derivations), len(al[t][0].with_window),
+            [h[0] for h in al[t][0].hits], sorted(d[0] for d in al[t][0].discharges))
+           for t in sorted(ali_arms)])
+
+    # 8y. GENERATED REDS AND GREENS: EVERY RETAINED VARIANT OF A DATA TYPE MUST PIN. #32's
+    #     third round, second finding, and the `#ifdef` family one level above 8r's -- that
+    #     one is two marks for one FIELD, this is two initialisers for one TYPE:
+    #
+    #       null-variant     `.dmark = wrap_mark` / `.dmark = NULL`     -> STILL A HIT
+    #       movable-variant  an UNTRUSTED type registering the MOVABLE
+    #                        mark, beside a trusted type's pin          -> STILL A HIT
+    #       both-pin         two variants, both naming the callback     -> DISCHARGES
+    #       single           one ordinary registration                  -> DISCHARGES
+    #       two-types        a DIFFERENT variable carries the NULL      -> DISCHARGES
+    #
+    #     `strip_directives` keeps both arms -- deliberately, and predicate A depends on it
+    #     in the OPPOSITE direction, since that is what stops a dead `rb_gc_mark` from
+    #     downgrading a live `rb_gc_mark_movable` under `stronger()`. So the fix cannot be
+    #     to stop retaining variants; it is to grade registration per VARIABLE and let the
+    #     unsafe variant win, which is the same disposition `movable` beats `pinned` uses.
+    #
+    #     `movable-variant` IS THE LOAD-BEARING ARM, and it is 8w's `movable-edge` one scope
+    #     out. Untrusted registrations are DEMOTED, not dropped: dropping them takes the
+    #     mark function out of the closure and out of `movable` with it, and then a pin
+    #     registered by a DIFFERENT type answers for the same `(type, field)` key. Asserted
+    #     on the index -- `pinned` empty, `movable` holding `(wrap, buf)` -- so a future
+    #     edit that drops instead of demotes fails here and not only on a row.
+    #
+    #     `two-types` is the green for the grouping itself: trust is per VARIABLE, so one
+    #     type's NULL variant must not contaminate another's, and the two are graded apart
+    #     even in one file.
+    #
+    #     CORPUS: 0 INSTANCES, and this was swept for rather than assumed. Over the 99 trees
+    #     there are 329 `rb_data_type_t` initialisers in 274 files; 76 of them sit inside a
+    #     preprocessor conditional, and ZERO declare the same variable twice. So the shape
+    #     is entirely synthetic today, the corpus cannot move, and this fixture is the only
+    #     thing that can tell the fix from no fix. The companion sweep at the CALL level
+    #     (43 marking primitives inside conditionals, only zstd's three `#else` pins and a
+    #     msgpack shim dead) is what 8r pins; this is the same question one level up.
+    reg_head = ("#include <ruby.h>\n\n"
+                "struct wrap { VALUE buf; };\n"
+                "struct other { VALUE buf; };\n\n"
+                "static void\n"
+                "other_mark(void *p)\n"
+                "{\n"
+                "    struct other *o = p;\n"
+                "    rb_gc_mark(o->buf);\n"
+                "}\n\n"
+                "static void\n"
+                "wrap_mark(void *p)\n"
+                "{\n"
+                "    struct wrap *w = p;\n"
+                "    rb_gc_mark(w->buf);\n"
+                "}\n\n"
+                "static void\n"
+                "move_mark(void *p)\n"
+                "{\n"
+                "    struct wrap *w = p;\n"
+                "    rb_gc_mark_movable(w->buf);\n"
+                "}\n\n")
+    reg_tail = ("static VALUE\n"
+                "feed(VALUE self)\n"
+                "{\n"
+                "    struct wrap *w;\n"
+                "    const char *p;\n"
+                "    VALUE out;\n"
+                "    TypedData_Get_Struct(self, struct wrap, &wrap_type, w);\n"
+                "    p = RSTRING_PTR(w->buf);\n"
+                "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+                "    out = rb_str_new(p, 4);\n"
+                "    return out;\n"
+                "}\n\n"
+                "void Init_probe(void)\n"
+                "{\n"
+                "    rb_define_method(rb_cObject, \"f\", feed, 0);\n"
+                "}\n")
+
+    def _dt(name, cb):
+        return ("static const rb_data_type_t %s = {\n"
+                "    \"%s\", { %s, 0, 0, }, 0, 0, RUBY_TYPED_FREE_IMMEDIATELY\n"
+                "};\n" % (name, name, cb))
+    reg_arms = {
+        "null-variant": ("#ifdef HAVE_PINNING\n" + _dt("wrap_type", "wrap_mark")
+                         + "#else\n" + _dt("wrap_type", "NULL") + "#endif\n\n"),
+        "both-pin": ("#ifdef HAVE_PINNING\n" + _dt("wrap_type", "wrap_mark")
+                     + "#else\n" + _dt("wrap_type", "wrap_mark") + "#endif\n\n"),
+        "single": _dt("wrap_type", "wrap_mark") + "\n",
+        "two-types": ("#ifdef HAVE_PINNING\n" + _dt("other_type", "other_mark")
+                      + "#else\n" + _dt("other_type", "NULL") + "#endif\n\n"
+                      + _dt("wrap_type", "wrap_mark") + "\n"),
+        "movable-variant": ("#ifdef HAVE_PINNING\n" + _dt("move_type", "move_mark")
+                            + "#else\n" + _dt("move_type", "NULL") + "#endif\n\n"
+                            + _dt("wrap_type", "wrap_mark") + "\n"),
+    }
+    rg_root = {t: _synth("fx-reg-%s" % t, {"ext/probe.c": reg_head + m + reg_tail})
+               for t, m in reg_arms.items()}
+    rg = {t: _sweep(r) for t, r in rg_root.items()}
+    reg_green = ("both-pin", "single", "two-types")
+    reg_red = ("null-variant", "movable-variant")
+    mvt = Tree(rg_root["movable-variant"])
+    check(all((rg[t].funcs, len(rg[t].derivations), len(rg[t].with_window)) == (5, 1, 1)
+              for t in reg_arms)
+          and all(not rg[t].hits and [d[0] for d in rg[t].discharges] == ["pinning-mark"]
+                  for t in reg_green)
+          and all(len(rg[t].hits) == 1 and not rg[t].discharges for t in reg_red)
+          and not mvt.pinned and ("wrap", "buf") in mvt.movable,
+          "registration-variant red/green: a type whose OTHER `#ifdef` variant sets `.dmark "
+          "= NULL` registers nothing in that build, so its pin cannot clear -- while two "
+          "pinning variants, a single registration, and a different variable carrying the "
+          "NULL all still discharge. And an untrusted registration is DEMOTED, not dropped: "
+          "its movable mark still registers the hazard, or a pin from another type answers "
+          "for the same key",
+          [(t, rg[t].funcs, len(rg[t].derivations), len(rg[t].with_window),
+            [h[0] for h in rg[t].hits], sorted(d[0] for d in rg[t].discharges))
+           for t in sorted(reg_arms)]
+          + [("movable-variant index", sorted(mvt.pinned), sorted(mvt.movable))])
 
     # 8l/8m. GENERATED RED: A BARE STORE INTO STATIC STORAGE IS AN ESCAPE.
     #

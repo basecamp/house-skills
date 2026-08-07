@@ -757,6 +757,46 @@ leg does not cover the other. **The shape is in the corpus four times** — json
 already cleared them. The discharge order is doing real work, and that is an argument for the order
 rather than for a weaker rebinding test.
 
+### The lesson that outlived all of them: an exact-path fix gets routed around by one hop
+
+Three review rounds on one rule, and **twice** the accepted fix was bypassed by a single level of
+indirection. Both times the first cut matched a literal path and the bypass added one hop:
+
+| the fix | what walked past it |
+|---|---|
+| `unconditional_mark` — is this mark call conditional *in its own body*? | `if (c) mark_fields(w);` — the condition on the **call edge**, one frame out |
+| `pin_source_stable` — is `w->buf` written after the derivation? | `alias = w; alias->buf = other;` — the write through an **alias**, one copy out |
+
+The third round's answer was deliberately *not* a third exact-path clause. The rebinding leg now
+asks `tu_scope.alias_map` — rule 4, which locals carry the same pointer — because a `struct wrap *`
+copy is exactly its shape, and asking the module that already answers the general question buys its
+three constraints instead of inventing three more. **When a fix is exact-path, the next review finds
+the same defect one hop away; ask the general question or expect to ship the same round again.**
+
+Two shapes to check against that, both cheap and both worth doing before declaring a rule done:
+does the condition/write reach through a **call**, and does it reach through a **copy**?
+
+### One more `#ifdef` level: variants of the data type, not of the mark
+
+`strip_directives` retains both arms of a conditional — load-bearing in *both* directions, and the
+directions are opposite. For predicate A it is what stops a dead `rb_gc_mark` from downgrading a
+live `rb_gc_mark_movable` under `stronger()`. For predicate D it is what lets a dead `#else` pin be
+subtracted by a live movable. But it also means two mutually exclusive initialisers of the *same*
+`rb_data_type_t` are both retained, and a `.dmark = NULL` variant beside a `.dmark = wrap_mark` one
+registered the callback unconditionally — so in builds selecting the NULL variant, derivations
+cleared with **no mark running at all**.
+
+Registration is graded per **variable** now, with the unsafe variant winning, which is the same
+disposition as movable-beats-pinning. And untrusted registrations are **demoted, not dropped** — the
+same trap as gating the whole mark closure, one scope out: removing them takes their *movable* marks
+out of the index too, and then a pin registered by a different type answers for the same key.
+
+**Swept before being called flat:** 329 `rb_data_type_t` initialisers across 274 files in the 99
+trees, **76 of them inside a preprocessor conditional**, and **zero** variables initialised twice.
+The shape is synthetic today. That is the same disposition as the call-level sweep it sits above
+(43 marking primitives inside conditionals, only zstd's three `#else` pins and one msgpack shim
+dead) — enumerate, count, and say the count, rather than asserting the corpus is clean.
+
 ### Coverage is not row count
 
 The C++ `namespace` / `extern "C"` brace dispositions, ported from predicate C into B and D, moved
