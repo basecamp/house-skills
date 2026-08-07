@@ -784,6 +784,7 @@ class Tree:
         self.pasted = self._expand_pastes()
         self.all = "\n".join(self.files.values()) + "\n" + self.pasted
         self.structs = {}        # struct/union name -> body text
+        self.structs_local = {}  # (path, name) -> body, for internal linkage
         self.aliases = {}        # typedef name -> underlying name
         self.dtypes = {}         # rb_data_type_t name -> initialiser body
         self.funcs = {}          # in-tree function name -> body text
@@ -874,6 +875,14 @@ class Tree:
     # -- types --------------------------------------------------------------
 
     def _index_structs(self, path, src):
+        # A TYPE IN AN ANONYMOUS NAMESPACE IS PER-TRANSLATION-UNIT, and the bare-name index
+        # cannot say so (#30 review). Two `.cc` files may each declare
+        # `namespace { struct Holder { ... }; Holder state; }` with DIFFERENT members;
+        # `setdefault` gives the second file the first file's body, so its slot is labelled
+        # with the wrong file, the wrong member, and loses its own registration. Item 4
+        # made the SLOT scope-aware and left this companion index behind, which turned one
+        # merged row into two rows of which one is fabricated.
+        anon = tu_scope.anonymous_namespace_spans(src)
         for m in re.finditer(r"\b(?:typedef\s+)?(struct|union)\s+(\w+)?\s*\{", src):
             open_idx = src.index("{", m.end() - 1)
             close = match_brace(src, open_idx)
@@ -889,8 +898,11 @@ class Tree:
                     d = decl.strip().lstrip("*").strip()
                     if d.isidentifier():
                         names.append(d)
+            local = any(a <= open_idx < b for a, b in anon)
             for nm in names:
                 self.structs.setdefault(nm, (body, path, open_idx + 1))
+                if local:
+                    self.structs_local[(path, nm)] = (body, path, open_idx + 1)
 
     def _index_aliases(self, src):
         for m in re.finditer(
@@ -898,10 +910,17 @@ class Tree:
             if m.group(1) != m.group(2):
                 self.aliases.setdefault(m.group(2), m.group(1))
 
-    def struct_body(self, name, depth=4):
-        """(body, path, offset) for a struct/union type name, resolving typedefs."""
+    def struct_body(self, name, path=None, depth=4):
+        """(body, path, offset) for a struct/union type name, resolving typedefs.
+
+        `path` names the translation unit asking. A type declared in that file's anonymous
+        namespace wins over the tree-wide entry of the same name, because it IS a different
+        type -- see _index_structs.
+        """
         n = name
         for _ in range(depth):
+            if path is not None and (path, n) in self.structs_local:
+                return self.structs_local[(path, n)]
             if n in self.structs:
                 return self.structs[n]
             if n in self.aliases:
@@ -1202,7 +1221,7 @@ class Tree:
         # point of the `sub is not None` guard. `EXTERN VALUE Module_Magick;` matches this
         # pattern with type=EXTERN, name=`VALUE Module_Magick`; returning here swallowed
         # every rmagick global and the gem measured 1 slot across 15 files.
-        sub = self.struct_body(d.group(1)) if d and d.group(1) != "VALUE" else None
+        sub = self.struct_body(d.group(1), path) if d and d.group(1) != "VALUE" else None
         if sub is not None:
             for decl in split_args(d.group(2)):
                 nm, arr, ptr = declarator(decl)
@@ -1287,7 +1306,7 @@ class Tree:
                                  "ptr" if ptr else "field", s.strip(), opath, ooff,
                                  scope))
                 continue
-            sub = self.struct_body(tname)
+            sub = self.struct_body(tname, bpath)
             if sub is not None:
                 for decl in split_args(rest):
                     nm, arr, ptr = declarator(decl)
@@ -3446,6 +3465,36 @@ void Init_probe(void) { rb_define_method(rb_cObject, "e", entry, 1); }
           "does not reach another (slots 2/2, one discharged one hit)",
           "named %d/%d, static %d/%d %s" % (nm.slots, nm.decls, st.slots, st.decls,
                                             [(h[0], h[3]) for h in st.hits]))
+
+    # 4b. ...AND THE COMPANION TYPE INDEX HAS TO BE SCOPED WITH IT (#30 review). Item 4
+    #     scoped the SLOT and left `Tree.structs` keyed by bare name, so two TUs each
+    #     declaring `namespace { struct Holder {...}; Holder state; }` with DIFFERENT
+    #     members both resolved to the FIRST file's body. b.cc's slot was then labelled
+    #     with a.cc's path and a.cc's member name, lost its own registration, and reported
+    #     as a second, fabricated row. Item 4 turned one merged row into two rows of which
+    #     one was invented, so this is the half of that fix that was missing.
+    #
+    #     a.cc allocates and never registers -- a REAL hit, and the green half. b.cc
+    #     registers its own member -- it must discharge, at ITS OWN file and member.
+    tu_a = ("#include <ruby.h>\nnamespace {\nstruct Holder { VALUE alpha; };\n"
+            "Holder state;\n}\nextern \"C\" VALUE mk_a(VALUE self) { "
+            "state.alpha = rb_str_new_cstr(\"a\"); return state.alpha; }\n"
+            "void Init_probe(void) { rb_define_method(rb_cObject, \"a\", mk_a, 0); }\n")
+    tu_b = ("#include <ruby.h>\nnamespace {\nstruct Holder { VALUE beta; };\n"
+            "Holder state;\n}\nvoid reg_b(void) { rb_gc_register_address(&state.beta); }\n"
+            "extern \"C\" VALUE mk_b(VALUE self) { state.beta = rb_str_new_cstr(\"b\"); "
+            "return state.beta; }\n")
+    ts = _sweep_sources({"a.cc": tu_a, "b.cc": tu_b})
+    check((ts.slots, ts.decls, sorted(d[0] for d in ts.discharges),
+           sorted(h[0] for h in ts.hits)) == (2, 2, ["registered-slot"], ["ALLOCATES"])
+          and [d[3] for d in ts.discharges] == ["state.beta"]
+          and [h[3] for h in ts.hits] == ["state.alpha"],
+          "#30 review: a struct type in an anonymous namespace is per-TU too -- b.cc's "
+          "`state.beta` resolves to b.cc's own body, discharges on its own "
+          "rb_gc_register_address, and a.cc's unregistered `state.alpha` is the only hit",
+          "slots %d/%d disch %s hits %s" % (ts.slots, ts.decls,
+                                            [(d[0], d[3]) for d in ts.discharges],
+                                            [(h[0], h[3]) for h in ts.hits]))
 
     # 5. `thread_local VALUE cache;` WITH NO `static`. Thread storage duration: it persists
     #    across calls, which is the whole property. The pattern required the literal
