@@ -686,18 +686,33 @@ _REJECT = {
 # `unparsed_cxx_cases()` pins that boundary the way K&R is pinned: a short list of shapes
 # this family is NOT expected to handle, asserted so that a walk which starts handling one
 # has to come here and say so deliberately.
+# EACH IS A WELL-FORMED DEFINITION, and the first cut of this list was not (#31 review):
+# a fold expression with no enclosing parameter pack, a lambda capturing an undeclared
+# name, and a requires-clause on a PROTOTYPE, which these walkers ignore anyway. Malformed
+# input cannot demonstrate a boundary -- the check stayed green because there was nothing
+# there to parse, which is the same hollow-fixture failure this suite keeps catching.
 _UNPARSED_CXX = {
-    "fold-expression":  "(args + ... + 0);",
-    "requires-clause":  "template <class T> requires (sizeof(T) > 0) void f(T);",
-    "lambda-capture":   "auto f = [p = RSTRING_PTR(str)]() { return p; };",
+    "fold-expression":
+        "template <class... A> static int sum_(A... a) { return (a + ... + 0); }",
+    "requires-clause":
+        "template <class T> requires (sizeof(T) > 0) static T id_(T x) { return x; }",
+    "lambda-capture":
+        "static const char *lam_(VALUE s) { auto f = [p = RSTRING_PTR(s)]() "
+        "{ return p; }; return f(); }",
 }
 
 
 def unparsed_cxx_cases():
-    """{tag: source} -- C++ this family does not parse, by construction and on purpose.
+    """{tag: source} -- valid C++ whose MEANING this family does not read.
 
-    Not a to-do list. See the comment above: these exist so the boundary is a decision with
-    a test behind it rather than the next reviewer's discovery.
+    Not a to-do list, and not "the walker cannot see it". Measured: each of these is
+    indexed as a function, so the walker does read the file; what it does not do is
+    understand the construct. The `lambda-capture` case is the sharp one -- `lam_` returns
+    an interior pointer captured by a lambda, and this family reports nothing for it. That
+    is the recall limit, stated.
+
+    See the comment above: these exist so the boundary is a decision with a test behind it
+    rather than the next reviewer's discovery.
     """
     return dict(_UNPARSED_CXX)
 

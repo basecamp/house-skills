@@ -1772,21 +1772,27 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
     # construct must reach exactly the verdict it reaches without it. That is what "out of
     # recall" has to mean for a pass-1 sweep -- the shape is not understood, and it does
     # not crash the walk or move the answer for the code around it.
-    def _unparsed_hits(prefix):
+    # THE FUNCTION COUNT IS ASSERTED BESIDE THE HITS, and that is what makes this mean
+    # anything: each construct must raise the indexed-function count from 1 to 2, proving
+    # the walker READ the added definition. Without that, a fixture stays green because
+    # the file was skipped, which is exactly how the first cut of this check passed on
+    # malformed C++ that had nothing in it to parse.
+    def _unparsed(prefix):
         body = ("#include <ruby.h>\n%s\nstatic const char *grab(VALUE str)\n{\n"
                 "    StringValue(str);\n    return RSTRING_PTR(str);\n}\n" % prefix)
         r = sweep(Tree(_synth("t_unparsed", {"ext/t.cpp": body})), "unparsed")
-        return sorted(h[0] for h in r.hits)
+        return (r.funcs, sorted(h[0] for h in r.hits))
 
-    baseline = _unparsed_hits("")
-    unparsed = {t: _unparsed_hits(src)
-                for t, src in tu_scope.unparsed_cxx_cases().items()}
-    check(baseline == ["RETURNS-INTERIOR"]
-          and all(v == baseline for v in unparsed.values()),
+    base_n, base_hits = _unparsed("")
+    unparsed = {t: _unparsed(src) for t, src in tu_scope.unparsed_cxx_cases().items()}
+    check(base_hits == ["RETURNS-INTERIOR"]
+          and all(n == base_n + 1 and h == base_hits for n, h in unparsed.values()),
           "the stated C++ recall limit holds: a fold expression, a requires-clause and a "
-          "lambda capture are not parsed by this family, and none of them changes the "
-          "verdict on the known-red function beside it -- see tu_scope.unparsed_cxx_cases",
-          [baseline, unparsed])
+          "lambda capture are each INDEXED as a function -- so the walker reads them -- "
+          "and none changes the verdict on the known-red function beside it. The lambda "
+          "case also escapes an interior pointer and is reported by nothing, which is the "
+          "limit itself; see tu_scope.unparsed_cxx_cases",
+          [(base_n, base_hits), unparsed])
 
     def _index_names(src):
         return {f.name for f in Tree(_synth("t_conform", {"ext/t.cpp": src})).funcs}
