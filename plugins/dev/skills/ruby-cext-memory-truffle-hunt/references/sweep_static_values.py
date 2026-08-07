@@ -785,6 +785,14 @@ class Tree:
         self.all = "\n".join(self.files.values()) + "\n" + self.pasted
         self.structs = {}        # struct/union name -> body text
         self.structs_local = {}  # (path, name) -> body, for internal linkage
+        # `aliases` and `objects` below are STILL KEYED BARE, and that is a recall limit
+        # rather than a decision that they are safe. The #30 review raised the whole family;
+        # only `structs` reproduced a wrong verdict (two TUs, one anonymous-namespace type
+        # each, differing members -- b.cc's slot took a.cc's body, member name and file, and
+        # lost its own registration). A typedef or an object name colliding the same way is
+        # the same argument and wants the same treatment; it is unfixed here because it has
+        # no red, and widening shared keying without one is how the over-clears on this
+        # branch happened.
         self.aliases = {}        # typedef name -> underlying name
         self.dtypes = {}         # rb_data_type_t name -> initialiser body
         self.funcs = {}          # in-tree function name -> body text
