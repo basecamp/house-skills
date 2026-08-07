@@ -1270,15 +1270,54 @@ def alias_reads(body, seeds, exclude=()):
     offsets and can never remove one, so it cannot resurrect the over-clear this same
     function has now shipped twice. Both callers treat a larger read set as a longer window
     or a live carrier -- over-reporting, which is the side each of them fails on.
+
+    AND A RESTORATION MUST PROPAGATE, not merely contribute its own reads (#30 review, the
+    first cut of this pass got that wrong):
+
+        q = p; p = "safe"; p = q; r = p; return r;
+
+    `r` is a fresh local copied from the RESTORED `p`, so unioning `p`'s reads leaves `r`
+    out of the alias set entirely and the return is not seen. Restoration therefore
+    re-enters `alias_map` as a fresh seed set rather than being unioned in place, which is
+    what lets the ordinary copy propagation reach `r` -- and, by the same route, anything
+    copied from `r`. `done` keys on (name, offset) so a name may be live from several
+    offsets without the loop repeating one, and offsets only ever move forward, so it
+    terminates.
+
+    WHAT KEEPS THIS FROM UNDOING ITEM 1 is the liveness test, and only that. The first cut
+    of the propagating version seeded any `lhs` whose right-hand side merely NAMED a
+    carrier, which turned the `kill-copy` arm -- `p = "safe"; q = p; return q;`, where the
+    copy carries the literal -- red in one step. The right-hand side must genuinely READ the
+    pointer at the copy, which is the same question `alias_map` asks of its own propagation
+    and is asked here the same way.
+
+    A guard for "`lhs` must already be a carrier" was written alongside it and then removed:
+    it is unreachable behind the liveness test, no fixture can distinguish it (seeding a
+    fresh name directly and reaching it through `alias_map` give the same read set), and an
+    untested condition beside a tested one is the shape this predicate family has now been
+    burned by twice.
     """
     m = alias_map(body, seeds, exclude)
-    out = set()
-    for nm, since in m.items():
-        out.update(source_reads(body, nm, since, kill=DOMINATING_WRITE))
-    if m:
+    out, done, layer = set(), set(), m
+    while layer:
+        for nm, since in layer.items():
+            if (nm, since) in done:
+                continue
+            done.add((nm, since))
+            out.update(source_reads(body, nm, since, kill=DOMINATING_WRITE))
+        extra = {}
         for off, lhs, rhs in local_copies(body, min(m.values())):
-            if lhs in m and rhs in m and lhs not in exclude and off > m[rhs]:
-                out.update(source_reads(body, lhs, off, kill=DOMINATING_WRITE))
+            if lhs in exclude or rhs not in layer:
+                continue
+            if off <= layer[rhs] or (lhs, off) in done:
+                continue
+            semi = body.find(";", off)
+            semi = len(body) if semi < 0 else semi
+            live = source_reads(body, rhs, layer[rhs], kill=DOMINATING_WRITE)
+            if not any(off < r < semi for r in live):
+                continue        # the right-hand side no longer reads the pointer
+            extra[lhs] = off
+        layer = alias_map(body, extra, exclude) if extra else {}
     return out
 
 

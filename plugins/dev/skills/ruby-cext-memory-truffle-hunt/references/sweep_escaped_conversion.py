@@ -1681,6 +1681,11 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
     #                   after it is killed. One `since` per name cannot say so, so
     #                   alias_reads() unions a second read set from the restoring copy
     #                   rather than moving the seed; see its docstring for why additive.
+    #       restore-copy `... p = q; r = p; return r;`          -- and the restoration has
+    #                   to PROPAGATE. The first cut of that pass only unioned the restored
+    #                   name's own reads, so a fresh local copied from the restored carrier
+    #                   never entered the alias set at all and the return was invisible.
+    #                   This arm returns `r`, not `p`, which is the whole point of it.
     #       qual-write  `Holder::p = "safe"; return p;`        -- a QUALIFIED member is not
     #                   this local. The third spelling of the `->`/`.` rule writes() already
     #                   carries, and the one character that was missing from it.
@@ -1705,6 +1710,7 @@ static const char *grab(VALUE str, const char **out)
     StringValue(str);
     const char *p = RSTRING_PTR(str);
     const char *q;
+    const char *r;
 %s    return %s;
 }
 static VALUE go(VALUE self, VALUE arg)
@@ -1731,6 +1737,8 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
         "for-body":  ('    for (n = 0; n < 3; n++) p = "safe";\n', "p",
                       ["RETURNS-INTERIOR"]),
         "while-body":('    while (out) p = "safe";\n', "p", ["RETURNS-INTERIOR"]),
+        "restore-copy": ('    q = p;\n    p = "safe";\n    p = q;\n    r = p;\n', "r",
+                         ["RETURNS-INTERIOR"]),
     }
     kr = {}
     for tag, (mid, ret, _want) in kill_arms.items():
