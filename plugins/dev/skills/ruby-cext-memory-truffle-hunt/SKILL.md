@@ -348,6 +348,89 @@ Relocate is where it goes wrong: openssl `master` made SSLContext movable and ad
 `dcompact` updating **one** of the **four** places it stashes the same `VALUE`. If a gem is
 movable, enumerate every stored copy.
 
+**Pin is a discharge for Class B, and predicate D now reads it** — an interior pointer into
+a field the owning type's *registered* `dmark` pins is neither collected nor relocated for
+as long as the wrapper is reachable. That rule was written down in round 8 and deliberately
+not built until round 10, because it turns on one token and a version that reads
+`rb_gc_mark_movable` as pinning clears the mobility bug along with the safe case. **The
+corpus has that trap in it:** zstd-ruby's `streaming_decompress_mark` spells *both* marks
+for `sd->buf` across an `#ifdef HAVE_RB_GC_MARK_MOVABLE`, and the `#else` branch is the
+pinning one — dead code, since `have_func('rb_gc_mark_movable')` is yes on 4.0.6 and 3.4.10.
+Treating "a pinning mark names this field somewhere" as the test would clear a live row out
+of source the compiler never sees. **Movable beats pinning, per-field, always** — and the
+same shim appears cross-file as `#define rb_gc_mark_movable(x) rb_gc_mark(x)` in an `#else`
+arm (ffi `compat.h:65`, mysql2 `mysql2_ext.h:43`), which a per-file textual resolver misses
+and a per-call-site grading of the *spelling* gets right in the safe direction.
+
+**Two things "the wrapper is reachable" does not buy you**, both found by review of the
+round-10 build and both now carrying generated reds:
+
+- **It is not "longer than any window".** The pin's lifetime is the *wrapper's*. A `char *`
+  stored into a file static, into a caller's out-parameter, or into a second object reached
+  from the same base outlives the wrapper, and clearing those is a Class B use-after-free
+  cleared by the instrument that exists to find it. An escape discharges only where the
+  destination is storage **inside** the pinned object — and *every* escape on the row must
+  qualify, not any.
+- **A pin that runs only sometimes is not a pin.** `if (w->pins) rb_gc_mark(w->buf);` marks
+  nothing on the other path. Braceless arms, braced arms and early returns are three
+  different shapes and each is one the other two read as unconditional. **The condition can
+  also live on the call edge** — `if (w->pins) mark_fields(w);` where the helper's own body
+  is unconditional — so reachability has to be propagated along edges, not just membership
+  in a closure. Gate `pinned` only: a *movable* mark reached conditionally is still a
+  hazard, and dropping it from the closure lets a sibling unconditional pin answer for it.
+- **A name that is rebound stops denoting what the pin was looked up under.** Two spellings,
+  one mechanism, both a write *after* the derivation: `w->buf = other` makes the dmark pin
+  the replacement while the pointer keeps pointing at the original; `w = other` before
+  `w->held = p` makes the destination a different object of the same type, which can outlive
+  the one holding the String. The first breaks the pin, the second breaks the
+  destination-is-inside argument, and neither is covered by the other. **Ask the alias set,
+  not the spelling** — `alias = w; alias->buf = other;` is the same rebinding one copy out.
+- **Every retained `#ifdef` variant of the data type must register a mark.** A `.dmark = NULL`
+  variant beside a `.dmark = wrap_mark` one is a build where nothing marks; grade registration
+  per variable and let the unsafe variant win. Demote such a registration rather than dropping
+  it, or its *movable* marks leave the index too and a pin from another type answers for the
+  same key.
+
+**The transferable one, and it cost four review rounds to learn: a discharge that clears
+unless it spots a problem cannot be finished.** Each round's fix bought exactly one hop.
+`unconditional_mark` asked whether a mark was conditional *in its own body* — a conditional
+**call** walked past it. `pin_source_stable` asked whether the literal `w->buf` was written —
+an **alias** walked past it, and then a **callee** walked past that. The fourth round
+produced three more bypasses in one pass, which is the count not converging.
+
+The fix is not a better clause list, it is the **polarity**. A discharge must *prove* its
+claim and stay a conservative hit for everything it cannot analyse — an unresolved callee, an
+argument it cannot read, a depth bound, a preprocessor variant it cannot reconcile. Then a
+reviewer's next spelling is already a hit, because the default is "not proven" rather than
+"no problem spotted".
+
+Two diagnostics for when a rule is on the wrong side of this:
+
+- **Count the rounds.** If review keeps finding the same defect one indirection further out,
+  the enumeration is the bug, not the gaps in it.
+- **Ask what silence means.** If "I found nothing" clears the row, every parsing limit is a
+  false negative wearing a clean sheet.
+
+Expect the corpus to move **down** when you invert one, and expect the losses to be
+*over-reports you can name*. For predicate D the 32 lost rows were later settled by execution
+as **known-safe false positives** — 21 carrying a real callee rebind that provably never
+precedes the pointer's last use, 11 carrying only an unresolvable function-like macro. Naming
+them beats clearing them, and *"unproven"* is the honest label only until someone runs it.
+
+**Inverting the polarity does not finish the job — it changes what the bugs look like.** The
+review round after the inversion found two more, and both were the new machinery believing it
+had proven something it had not: a carrier tested by NAME over the whole function when the
+proof needed it tested AT THE MARK (`w = elsewhere;` between the assignment and the mark), and
+`&w` — the address of the pointer variable — modelled as the object itself, so a callee doing
+`*pp = other` rebound the base invisibly. Neither is an enumeration gap; both are the proof
+being flow- or address-blind. So after inverting, audit the proof's own primitives:
+
+- **Is every identity test positional?** "This name has held the pointer" is not "it holds it
+  here". If your alias machinery offers both, using the name-wide one inside a proof is an
+  over-clear waiting to be found.
+- **Is every hand-off kind modelled?** `x`, `&x->m` and `&x` are three different things. The
+  third lets a callee rewrite your base, and it is the one that looks like the first.
+
 ---
 
 ## The Scent
@@ -468,8 +551,8 @@ existing suspects, and `REGISTERED` is a **downgrade, not a clear**, because reg
 per-slot: round 4 measured stackprof's registered `empty_string` pinned while its unregistered
 sibling `objtracer` was not.
 
-**Run `--self-test` before trusting any silence** — A is 56/56 (1 skipped), B 34/34, C 71/71,
-D 54/54. Read the count, not the word: **nineteen** of those checks arrived with #29's five
+**Run `--self-test` before trusting any silence** — A is 60/60 (1 skipped), B 35/35, C 73/73,
+D 68/68. Read the count, not the word: **nineteen** of those checks arrived with #29's five
 follow-ups, and only one of the five moved a corpus row in the end. Four of them are pure
 over-clears — a merged slot, a deduped slot, an unindexed declaration — and every one of those
 reads as a clean sheet, so the self-test count is the only place the fix is visible at all.

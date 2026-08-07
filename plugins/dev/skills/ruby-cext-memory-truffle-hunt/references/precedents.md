@@ -635,13 +635,261 @@ below lose nothing by it.
   excluded, and the row was cleared on a 101,607-compaction run instead. Report compactions next
   to iterations, always.
 
-### The pinning-mark discharge now has three witnesses, and is still deferred
+### The pinning-mark discharge, deferred twice and built in round 10 — and the corpus had the trap
 
-zlib's seven `z->buf` rows have been hand-cleared every round on one line: a true predicate-D shape
-cleared by a **pinning `rb_gc_mark`**. Round 9 found two more of the same disposition — json
-`parser.c:2410` and msgpack `buffer.c:317`/`:340`. Still not built, deliberately: confusing
-`rb_gc_mark` with `rb_gc_mark_movable` would over-clear the corpus in one step, so it needs a
-generated red for **both** marks plus a third for "named in neither".
+zlib's seven `z->buf` rows had been hand-cleared every round on one line: a true predicate-D shape
+cleared by a **pinning `rb_gc_mark`**. Round 9 found more of the same disposition — json
+`parser.c:2410`, msgpack `buffer.c:317`/`:340`, unicorn's registered `httpdate` buffer. It was not
+built in rounds 8 or 9, deliberately: confusing `rb_gc_mark` with `rb_gc_mark_movable` would
+over-clear the corpus in one step, so it needed a generated red for **both** marks plus a third for
+"named in neither".
+
+Round 10 built it, with those three reds plus two more — the same pinning call under a `.dmark` of
+`NULL` (registration is what makes the claim true), and a green for a dmark that delegates to a
+helper. **47 rows off the 99-tree corpus, 459 → 412, 0 added, 0 columns changed, and no other
+discharge's count moved.** Predicate A, B and C output is byte-identical.
+
+**The thing worth carrying is that the deferral was right, and the corpus proved it rather than the
+fixture.** zstd-ruby 2.0.6's `streaming_decompress_mark` spells both marks for the *same field*:
+
+```c
+#ifdef HAVE_RB_GC_MARK_MOVABLE
+    rb_gc_mark_movable(sd->buf);      /* the branch that compiles today */
+#else
+    rb_gc_mark(sd->buf);
+#endif
+```
+
+A sweep keeps the code inside conditionals, so a rule asking "does a pinning mark name this field
+anywhere" answers **yes** — and clears `streaming_decompress.c:133`, `RSTRING_PTR(sd->buf)` with an
+`rb_str_new` before the read. **Movable beats pinning, per field, and the subtraction is asserted on
+that tree and not only on a fixture.**
+
+**Round 11 withdraws the reason round 10 gave for that assertion, and keeps the assertion.** :133
+was described as "one of zstd's confirmed real rows". It is not — it is `TRIAGED["zstd-"]` residue.
+`sd->buf = rb_str_new(NULL, ZSTD_DStreamOutSize())` is 131,072 bytes, 213× the 616-byte embedded
+boundary, so its bytes are a malloc block compaction does not move, and `streaming_decompress.c:42`
+carries a real `dcompact`. That is the complete *relocate* idiom, same regime as `sc->buf`, which
+this file already records as cleared by execution. The assertion survives on the stronger argument:
+`have_func('rb_gc_mark_movable')` is **yes** on 4.0.6 and 3.4.10, so the `#else` arm never reaches
+the compiler, and a rule that let it answer would be clearing a live row out of **dead code**. The
+acceptance criterion is the index, not the row. The same shim also appears **cross-file** —
+`#define rb_gc_mark_movable(x) rb_gc_mark(x)` in an `#else` arm of ffi's `compat.h:65` and mysql2's
+`mysql2_ext.h:43` — which a per-file textual resolver would miss; grading the *spelling* at each
+call site gets it right, and in the safe direction on old Rubies.
+
+Two pin shapes are still hand-cleared and are scoped out by name: the **store side** (msgpack
+writes the source String into a pinned field *after* deriving from a local — a true clear, but it
+needs the store to dominate every window, which is a second rule with its own reds), and
+**`rb_gc_register_mark_object`** (unicorn — pins harder than any dmark, but there is no type, no
+field and no wrapper, and registration is per-*slot*: a later assignment to the same slot leaves the
+new String unregistered while a (type, field) key still matches).
+
+### …and round 10 shipped it too wide in two places. Both are review findings on #32
+
+The rule cleared **every** escape, on the argument that a pin outlasts any window a sweep can
+classify. **It outlasts every window bounded by the frame, and nothing else.** The pin is
+`rb_gc_mark(w->buf)` in the wrapper's own `dmark`; it runs while the wrapper is reachable. So
+`static const char *saved; saved = RSTRING_PTR(w->buf);` was cleared — wrapper collected, mark stops
+running, String freed, `saved` dangles, with a correct pinning mark present the whole time. A Class
+B use-after-free cleared by the instrument that exists to find it, and the reviewer reproduced it
+before the maintainer did.
+
+The fix is not "the destination is a struct field" and not "the base identifier matches": `o->held =
+p` for a pointer **parameter** is the same `STORES-INTERIOR` spelling writing into an aggregate the
+caller owns, and `w->peer->held = p` starts at the same identifier and ends in a different object.
+It is **one pointer hop off the derivation's own base, then in-object member hops** — which is every
+real escape in the corpus, because the shape is a struct caching an interior pointer into a String
+the same struct owns and marks (`z->stream.next_in = RSTRING_PTR(z->input)`, 44 rows). And **all**
+escapes on a row must qualify, not any.
+
+Separately, every syntactic pin call reachable from a registered `dmark` was recorded as
+unconditional. **A pin that runs only sometimes is not one** — `if (w->pins) rb_gc_mark(w->buf);`
+marks nothing on the other path. Three shapes, three rules, and each is one the other two read as
+unconditional: the **braceless** arm (no block of its own, so a brace test sees the whole function),
+the **braced** arm (its head is `{`, so there is nothing for the arm test to read), and the **early
+return** (depth zero, no conditional head — mysql2's `rb_mysql_stmt_mark`). The polarity is inverted
+from every other caller of these rules: elsewhere an unrecognised guard kills a live row, so narrow
+is safe; here it *clears* one, so the composition deliberately over-reports.
+
+**Cost: 412 → 414 over the 99 trees.** The escape tightening returns 2 rows, both over-reports this
+pass accepts (json's `return rb_utf8_str_new(ptr + offset, …)` copies the bytes, but saying so is a
+different rule). The conditional tightening returns **none** — it drops 33 of 148 pin keys and not
+one is a key a discharged row joins on. **It drops 0 of 69 movable keys**, which is what keeps the
+dead-`#else`-arm subtraction above working; gating `movable` on the same test would rebuild the
+round-10 over-clear out of the round-11 fix. A corpus-neutral tightening is exactly the one a green
+suite cannot tell from no tightening, so both ship with generated reds and five mutation modes.
+
+### A tightened rule gets reviewed against its new surface, and three more shapes came back
+
+The second review pass on the same PR found three, all of them ways the *fixed* rule still clears
+what it should not. None moves a corpus row — the fixtures are the entire evidence — and two of the
+three are the previous fix being routed around rather than new territory.
+
+**The condition can live on the call edge.** `if (w->pins) mark_fields(w);` where `mark_fields`
+itself does an unconditional `rb_gc_mark(w->buf)`. The per-body test looks inside the helper, sees
+depth zero, and says unconditional — so the conditional-pin fix is bypassed one scope out. A closure
+that answers "can a mark callback reach this function" is the wrong closure; it has to answer "is
+this function reached on **every** execution", which is reachability propagated along edges. The
+same three tu_scope rules apply, now to the edge instead of to the call, which is the evidence that
+reusing them was right rather than inventing a fourth opinion about "conditional".
+
+**Gate `pinned`, never the closure.** The one-line-shorter version drops conditionally-reached
+helpers from the closure entirely — and then a *movable* mark behind a conditional edge is gone from
+`movable` too, the per-key subtraction stops firing, and a sibling unconditional `rb_gc_mark` on the
+same field answers for it. That is the round-10 over-clear rebuilt out of the round-11 fix, so the
+closure returns two sets.
+
+**A rebound name stops denoting what the rule looked it up under.** Two spellings, one mechanism,
+both a write *after* the derivation:
+
+| | | breaks |
+|---|---|---|
+| `p = RSTRING_PTR(w->buf); w->buf = other;` | the **member path** | the pin — the dmark marks what the field *holds*, so it now pins the replacement while `p` points at the original |
+| `p = RSTRING_PTR(w->buf); w = other; w->held = p;` | the **base** | the destination test, whose base comparison is textual — the same characters now name a different object, which can outlive the one holding the String |
+
+The pin claim survives the second (every `struct wrap` has `buf` pinned), which is exactly why one
+leg does not cover the other. **The shape is in the corpus four times** — json's
+`cResumableParser_feed` rebinds `parser->buffer` four lines after deriving from it, and
+`zstream_discard_input` sets `z->input = Qnil` ten lines on, in all three zlib trees. All four are
+*safe*, and safe for a reason this rule cannot see: the pointer is fully consumed by
+`memcpy`/`memmove` first, so `copies-in-callee` — which runs **ahead** of `pinning-mark` — has
+already cleared them. The discharge order is doing real work, and that is an argument for the order
+rather than for a weaker rebinding test.
+
+### Round 4 ended the sequence by inverting the polarity, and that is the real lesson
+
+The fourth review pass found **three** more bypasses in one go — a rebinding inside a
+**callee**, a mark helper handed a **different instance** than the registered one, and two
+`#ifdef` variants pinning **different fields** while the index unioned their keys. Three
+rounds of one-hop fixes had bought one hop each; this one would have bought three more.
+
+So the discharge was rebuilt to **prove** instead of to search. `instance_pins` walks down
+from each registered callback *carrying the instance*, and returns only keys it can
+demonstrate are marked on every execution for that instance; `source_not_rebound` returns true
+only when it can prove the negative, following callees with the field path **re-based** at each
+hop. Anything unanalysable — an unresolved callee, an unreadable argument, a depth bound — is a
+hit. Two mechanisms from earlier rounds disappeared into the structure: the `pin_reachable` set
+(the walk asks `unconditional_mark` of every edge it descends) and the `trusted` flag (a
+variant naming no callback contributes the empty set and empties the intersection).
+
+**Corpus: 414 → 446, and down is correct.** `pinning-mark` clears 45 → 13. Every one of the 32
+is zlib and there are exactly two causes:
+
+**All 32 are known-safe over-reports**, settled by execution rather than by reading:
+`gzfile_read_header` is written read-the-bytes-then-discard-them, six times, never reversed,
+and `zstream_discard_input` is the *last* statement of every block that derived a pointer.
+Positive control 300/300 with no amplifier on aarch64-linux, against stock zlib and the fork;
+green ran the same paths 140,000 times clean. So the conservative rule costs **32 false
+positives on this corpus, not 32 unknowns** — still the right trade, because the alternative
+was an unsound clear, but worth stating accurately.
+
+**The causes are over-determined, so a single-cause split is a projection, not a partition.**
+Measured order-independently:
+
+| rows | cause |
+|---|---|
+| **21** | carry a **callee rebind** — `gzfile_read_header` (18) derives `RSTRING_PTR(gz->z.input)` then calls `zstream_discard_input(&gz->z, n)`, which ends `if (newlen == 0) { z->input = Qnil; }`; `zstream_sync` (3) is the same shape. The reviewer's synthetic `replace(w, other)` has real instances after all. |
+| **11** | carry **only** an unresolvable function-like macro, `ZSTREAM_BUF_FILLED(z)` (`zstream_shift_buffer` 8, `zstream_append_buffer` 3) — `strip_directives` leaves no body to read. |
+| *(4 of the 21)* | **also** carry unresolvable macros one hop down — `zstream_append_input2` via `gzfile_read_raw_ensure`/`_until_zero`, and `ZSTREAM_IS_GZFILE` via `zstream_run`. Filing those under either heading is equally true. |
+
+By tree: `zlib-3.2.1` 11, `zlib-3.2.3` 11, `zlib-basecamp-patch-1.1.1` 10.
+
+**A named non-fix, and the reason it would be sound in both directions.** Expanding
+function-like macros before the walk — harvesting `(name, params, body)` as `strip_directives`
+blanks each `#define`, at no cost to offsets, and substituting on an unbindable call — drops
+exactly the 11 (`ZSTREAM_BUF_FILLED` is `(NIL_P((z)->buf) ? 0 : RSTRING_LEN((z)->buf))`: no
+assignment, no `++`, no address-of, and its two calls receive the field's *contents*, so by the
+argument test they hand over no storage). What makes it sound rather than a blanket clear is
+that it resolves the question **both ways**: `zstream_append_input2` expands to
+`zstream_append_input`, which does `z->input = rb_str_buf_new(len)`, so those rows reclassify
+from *unresolvable* to *callee-rebind* — still hits, and now for a proven reason. Same
+prove-don't-search polarity, sharing `PIN_PROOF_DEPTH`. Not done here; scoped and priced.
+
+The pin index barely moves: **115 → 109** keys, movable unchanged at 69, and the six lost keys
+are all in one tree — privately routed, so described by shape rather than named — and none of
+them was clearing a row. The shape is a dmark reaching its owned sub-object by a *member read*
+(`struct inner *bonus = (struct inner *)o->bonus; rb_gc_mark(bonus->field);`) rather than by a
+pointer copy, so `alias_map` does not carry the instance to it. A real pin, under-proven, and
+recorded rather than repaired — following a member read is the points-to question this file has
+now declined three times.
+
+**So the corpus's dmarks really do pin what they claim; it is the deriving frames that cannot
+prove the field survives the window.** That is a measurement, and it is the most useful single
+number the four rounds produced.
+
+### …and the round after the inversion found two holes in the proof itself
+
+Worth separating from the four rounds above, because it is a different failure and it is the
+one to expect **after** you invert a rule. The obligations were right; two of them were
+implemented flow- or address-blind, so the code believed it had proven what it had not — and
+both failed in the **unsafe** direction, which is precisely what the inversion existed to stop.
+
+| hole | shape | why the machinery missed it |
+|---|---|---|
+| **temporal** | `struct wrap *w = p; w = elsewhere; rb_gc_mark(w->buf);` | the carrier test answered *"has this name held the instance"* — a fact about the whole body — where the proof needed *"does it hold it here"* |
+| **structural** | `replace(&w)` with `*pp = other` in the callee | `&w` is the address of the pointer **variable** and was read as the object at zero hops, so the callee was searched for member writes and never for a write *through* the parameter |
+
+**These are not one mechanism**, unlike the two earlier pairs, and the fixes do not overlap: a
+positional carrier test leaves the address-of case clearing, and an address-of hop kind leaves
+the rebound carrier proving. Worth stating, because two rounds of "these are the same thing"
+had established a pattern that does not hold here.
+
+The temporal fix needed nothing new. `tu_scope.alias_reads` is the offset-wise answer, carries
+rule 5's kill, and `alias_map`'s own docstring already said which callers want which — *"a name
+in this set has held the pointer, which is not the same claim as every mention of it reads the
+pointer"*. Predicate B shipped that exact defect once, which is why the sentence is there. This
+file then asked the wrong one anyway, inside a proof, where the polarity makes it an over-clear.
+
+**Corpus: 446 → 446.** No row moved, no discharge count moved, pin keys 109 and movable 69 both
+unchanged. Fifth consecutive round where the generated red is the only evidence the fix happened.
+
+**Two audits to run on any rule you have just inverted:**
+
+1. **Is every identity test positional?** If the alias machinery offers a name-wide and an
+   offset-wise answer, using the name-wide one inside a proof is an over-clear waiting to be found.
+2. **Is every hand-off kind modelled?** `x`, `&x->m` and `&x` are three different things. The
+   third lets a callee rewrite your base, and it is the one that looks like the first.
+
+### The lesson that outlived all of them: an exact-path fix gets routed around by one hop
+
+Three review rounds on one rule, and **twice** the accepted fix was bypassed by a single level of
+indirection. Both times the first cut matched a literal path and the bypass added one hop:
+
+| the fix | what walked past it |
+|---|---|
+| `unconditional_mark` — is this mark call conditional *in its own body*? | `if (c) mark_fields(w);` — the condition on the **call edge**, one frame out |
+| `pin_source_stable` — is `w->buf` written after the derivation? | `alias = w; alias->buf = other;` — the write through an **alias**, one copy out |
+
+The third round's answer was deliberately *not* a third exact-path clause. The rebinding leg now
+asks `tu_scope.alias_map` — rule 4, which locals carry the same pointer — because a `struct wrap *`
+copy is exactly its shape, and asking the module that already answers the general question buys its
+three constraints instead of inventing three more. **When a fix is exact-path, the next review finds
+the same defect one hop away; ask the general question or expect to ship the same round again.**
+
+Two shapes to check against that, both cheap and both worth doing before declaring a rule done:
+does the condition/write reach through a **call**, and does it reach through a **copy**?
+
+### One more `#ifdef` level: variants of the data type, not of the mark
+
+`strip_directives` retains both arms of a conditional — load-bearing in *both* directions, and the
+directions are opposite. For predicate A it is what stops a dead `rb_gc_mark` from downgrading a
+live `rb_gc_mark_movable` under `stronger()`. For predicate D it is what lets a dead `#else` pin be
+subtracted by a live movable. But it also means two mutually exclusive initialisers of the *same*
+`rb_data_type_t` are both retained, and a `.dmark = NULL` variant beside a `.dmark = wrap_mark` one
+registered the callback unconditionally — so in builds selecting the NULL variant, derivations
+cleared with **no mark running at all**.
+
+Registration is graded per **variable** now, with the unsafe variant winning, which is the same
+disposition as movable-beats-pinning. And untrusted registrations are **demoted, not dropped** — the
+same trap as gating the whole mark closure, one scope out: removing them takes their *movable* marks
+out of the index too, and then a pin registered by a different type answers for the same key.
+
+**Swept before being called flat:** 329 `rb_data_type_t` initialisers across 274 files in the 99
+trees, **76 of them inside a preprocessor conditional**, and **zero** variables initialised twice.
+The shape is synthetic today. That is the same disposition as the call-level sweep it sits above
+(43 marking primitives inside conditionals, only zstd's three `#else` pins and one msgpack shim
+dead) — enumerate, count, and say the count, rather than asserting the corpus is clean.
 
 ### Coverage is not row count
 
