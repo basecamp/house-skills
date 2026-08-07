@@ -391,13 +391,30 @@ round-10 build and both now carrying generated reds:
   it, or its *movable* marks leave the index too and a pin from another type answers for the
   same key.
 
-**The transferable one, from three review rounds on a single rule:** an exact-path fix gets
-routed around by one hop. `unconditional_mark` asked whether a mark call was conditional *in
-its own body* and a conditional **call** walked past it; `pin_source_stable` asked whether the
-literal `w->buf` was written and an **alias** walked past it. Same defect, one level of
-indirection, twice. Before calling a rule done, ask whether the thing it checks can arrive
-through a call or through a copy — and if so, ask the general question rather than adding a
-clause.
+**The transferable one, and it cost four review rounds to learn: a discharge that clears
+unless it spots a problem cannot be finished.** Each round's fix bought exactly one hop.
+`unconditional_mark` asked whether a mark was conditional *in its own body* — a conditional
+**call** walked past it. `pin_source_stable` asked whether the literal `w->buf` was written —
+an **alias** walked past it, and then a **callee** walked past that. The fourth round
+produced three more bypasses in one pass, which is the count not converging.
+
+The fix is not a better clause list, it is the **polarity**. A discharge must *prove* its
+claim and stay a conservative hit for everything it cannot analyse — an unresolved callee, an
+argument it cannot read, a depth bound, a preprocessor variant it cannot reconcile. Then a
+reviewer's next spelling is already a hit, because the default is "not proven" rather than
+"no problem spotted".
+
+Two diagnostics for when a rule is on the wrong side of this:
+
+- **Count the rounds.** If review keeps finding the same defect one indirection further out,
+  the enumeration is the bug, not the gaps in it.
+- **Ask what silence means.** If "I found nothing" clears the row, every parsing limit is a
+  false negative wearing a clean sheet.
+
+Expect the corpus to move **down** when you invert one, and expect the losses to be
+*over-reports you can name* — for predicate D it was 21 rows where a callee really does rebind
+the field, plus 11 where the instance is passed to a function-like macro the sweep cannot
+resolve. Naming those beats clearing them.
 
 ---
 
@@ -520,7 +537,7 @@ per-slot: round 4 measured stackprof's registered `empty_string` pinned while it
 sibling `objtracer` was not.
 
 **Run `--self-test` before trusting any silence** — A is 60/60 (1 skipped), B 35/35, C 73/73,
-D 65/65. Read the count, not the word: **nineteen** of those checks arrived with #29's five
+D 67/67. Read the count, not the word: **nineteen** of those checks arrived with #29's five
 follow-ups, and only one of the five moved a corpus row in the end. Four of them are pure
 over-clears — a merged slot, a deduped slot, an unindexed declaration — and every one of those
 reads as a clean sheet, so the self-test count is the only place the fix is visible at all.

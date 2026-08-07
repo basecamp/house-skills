@@ -757,6 +757,42 @@ leg does not cover the other. **The shape is in the corpus four times** — json
 already cleared them. The discharge order is doing real work, and that is an argument for the order
 rather than for a weaker rebinding test.
 
+### Round 4 ended the sequence by inverting the polarity, and that is the real lesson
+
+The fourth review pass found **three** more bypasses in one go — a rebinding inside a
+**callee**, a mark helper handed a **different instance** than the registered one, and two
+`#ifdef` variants pinning **different fields** while the index unioned their keys. Three
+rounds of one-hop fixes had bought one hop each; this one would have bought three more.
+
+So the discharge was rebuilt to **prove** instead of to search. `instance_pins` walks down
+from each registered callback *carrying the instance*, and returns only keys it can
+demonstrate are marked on every execution for that instance; `source_not_rebound` returns true
+only when it can prove the negative, following callees with the field path **re-based** at each
+hop. Anything unanalysable — an unresolved callee, an unreadable argument, a depth bound — is a
+hit. Two mechanisms from earlier rounds disappeared into the structure: the `pin_reachable` set
+(the walk asks `unconditional_mark` of every edge it descends) and the `trusted` flag (a
+variant naming no callback contributes the empty set and empties the intersection).
+
+**Corpus: 414 → 446, and down is correct.** `pinning-mark` clears 45 → 13. Every one of the 32
+is zlib and there are exactly two causes:
+
+| rows | cause |
+|---|---|
+| **21** | a callee genuinely rebinds the field — `gzfile_read_header` derives `RSTRING_PTR(gz->z.input)` then calls `zstream_discard_input(&gz->z, n)`, which ends `if (newlen == 0) { z->input = Qnil; }`. The reviewer's synthetic `replace(w, other)` has **21 real instances**. Whether the rebinding precedes the pointer's last use is the stated ordering blind spot, so these are *unproven*, not known-bad. |
+| **11** | `ZSTREAM_BUF_FILLED(z)` is a function-like **macro**; `strip_directives` leaves no body to read, and an unresolvable callee handed the instance is not proven. The macro is read-only, so these are over-reports — named with their cost rather than waved through. |
+
+The pin index barely moves: **115 → 109** keys, movable unchanged at 69, and the six lost keys
+are all in one tree — privately routed, so described by shape rather than named — and none of
+them was clearing a row. The shape is a dmark reaching its owned sub-object by a *member read*
+(`struct inner *bonus = (struct inner *)o->bonus; rb_gc_mark(bonus->field);`) rather than by a
+pointer copy, so `alias_map` does not carry the instance to it. A real pin, under-proven, and
+recorded rather than repaired — following a member read is the points-to question this file has
+now declined three times.
+
+**So the corpus's dmarks really do pin what they claim; it is the deriving frames that cannot
+prove the field survives the window.** That is a measurement, and it is the most useful single
+number the four rounds produced.
+
 ### The lesson that outlived all of them: an exact-path fix gets routed around by one hop
 
 Three review rounds on one rule, and **twice** the accepted fix was bypassed by a single level of
