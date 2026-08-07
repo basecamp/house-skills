@@ -813,7 +813,14 @@ class Tree:
         # bodies at all reports the same 0 as both.
         self.class_bodies = 0
         self.slots = []
-        self.objects = {}        # file-scope object name -> (path, offset)
+        # name -> [(path, offset, scope)], ONE ENTRY PER DECLARATION. Two translation
+        # units may each declare `namespace { Holder state; }`, and those are two objects
+        # (#30 review). A single entry per name kept only the file parsed last, so the
+        # other file's wrap was tested against the wrong scope, `wrapper` never matched,
+        # and its correctly wrapped field reported ALLOCATES. The lookup picks the
+        # candidate whose scope contains the asking site, which is the same question the
+        # single-entry version asked -- it just had one answer to ask it of.
+        self.objects = {}
         for path, src in self.files.items():
             self._index_slots(path, src)
         self.class_members = sum(1 for s in self.slots if "::" in s.key)
@@ -1204,7 +1211,8 @@ class Tree:
                 for decl in split_args(unit[close + 1:].rstrip().rstrip(";")):
                     nm, arr, ptr = declarator(decl)
                     if nm and not ptr:
-                        self.objects[nm] = (path, head_off, scope)
+                        self.objects.setdefault(nm, []).append(
+                            (path, head_off, scope))
                         self._struct_slots(path, head_off, nm + arr, nm,
                                            unit[body_open + 1:close], path,
                                            off + body_open + 1, 0, scope)
@@ -1234,7 +1242,8 @@ class Tree:
             for decl in split_args(d.group(2)):
                 nm, arr, ptr = declarator(decl)
                 if nm and not ptr:
-                    self.objects[nm] = (path, head_off, scope)
+                    self.objects.setdefault(nm, []).append(
+                        (path, head_off, scope))
                     self._struct_slots(path, head_off, nm + arr, nm, *sub, 0, scope)
             return
         # (3) a bare `static VALUE x, y[N];` / `VALUE rb_mVernier;` / `EXTERN VALUE x;`.
@@ -1467,10 +1476,12 @@ class Tree:
                     tk = norm(a.strip())
                     if not a.strip().startswith("&") or tk not in self.objects:
                         continue
-                    _op, _oo, oscope = self.objects[tk]
                     # An object with internal linkage cannot be addressed from another TU,
                     # so a wrap call in a different file is wrapping a different object.
-                    if not oscope.contains(path, s):
+                    # With one declaration per entry, that test also PICKS the declaration.
+                    oscope = next((sc for _op, _oo, sc in self.objects[tk]
+                                   if sc.contains(path, s)), None)
+                    if oscope is None:
                         continue
                     out[(oscope, tk)] = (dtype, self.dmark_of(dtype) if dtype else None,
                                          path, line_at(src, s), wrapper_dest(src, s))
@@ -3503,6 +3514,30 @@ void Init_probe(void) { rb_define_method(rb_cObject, "e", entry, 1); }
           "slots %d/%d disch %s hits %s" % (ts.slots, ts.decls,
                                             [(d[0], d[3]) for d in ts.discharges],
                                             [(h[0], h[3]) for h in ts.hits]))
+
+    # 4c. ...AND SO DOES THE OBJECT INDEX (#30 review). Two TUs each declaring
+    #     `namespace { Holder state; }` and each WRAPPING it correctly: one entry per name
+    #     kept only the file parsed last, so the other file's wrap was tested against the
+    #     wrong scope, `wrapper` never matched, and its correctly wrapped field reported
+    #     ALLOCATES. Both must discharge. This is the red the earlier note asked for.
+    wrap_tu = ("#include <ruby.h>\nnamespace {\nstruct Holder { VALUE held; };\n"
+               "Holder state;\n}\n"
+               "static void h_mark_%(t)s(void *p) { Holder *h = (Holder *)p; "
+               "rb_gc_mark(h->held); }\n"
+               "static const rb_data_type_t h_type_%(t)s = { \"holder_%(t)s\", "
+               "{ h_mark_%(t)s, 0, }, };\n"
+               "extern \"C\" VALUE wrap_%(t)s(VALUE klass) { "
+               "state.held = rb_str_new_cstr(\"%(t)s\"); "
+               "return TypedData_Wrap_Struct(klass, &h_type_%(t)s, &state); }\n")
+    ws = _sweep_sources({"a.cc": wrap_tu % {"t": "a"}, "b.cc": wrap_tu % {"t": "b"}})
+    check((ws.slots, ws.decls, sorted(d[0] for d in ws.discharges), ws.hits)
+          == (2, 2, ["wrapped", "wrapped"], []),
+          "#30 review: two TUs each wrapping their own anonymous-namespace object -- BOTH "
+          "wraps match their own object, so both slots discharge and neither reports "
+          "ALLOCATES",
+          "slots %d/%d disch %s hits %s" % (ws.slots, ws.decls,
+                                            [(d[0], d[3]) for d in ws.discharges],
+                                            [(h[0], h[3]) for h in ws.hits]))
 
     # 5. `thread_local VALUE cache;` WITH NO `static`. Thread storage duration: it persists
     #    across calls, which is the whole property. The pattern required the literal

@@ -1756,6 +1756,12 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
         "re-restore": ('    q = p;\n    p = "safe";\n    p = q;\n'
                        '    if (out) return p;\n    p = "safe";\n    p = q;\n', "p",
                        ["RETURNS-INTERIOR", "RETURNS-INTERIOR"]),
+        # An UNEVALUATED operand never runs, so the write in it cannot kill. All three
+        # dominance tests accept it: it has a block, no transfer token precedes it, and no
+        # conditional operator guards it.
+        "unevaluated": ('    (void)sizeof(p = "safe");\n', "p", ["RETURNS-INTERIOR"]),
+        "unevaluated-noexcept": ('    (void)noexcept(p = "safe");\n', "p",
+                                 ["RETURNS-INTERIOR"]),
     }
     kr = {}
     for tag, (mid, ret, _want) in kill_arms.items():

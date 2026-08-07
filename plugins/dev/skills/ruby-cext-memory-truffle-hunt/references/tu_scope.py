@@ -920,6 +920,40 @@ def _stmt_start(body, off):
     return 0
 
 
+_UNEVALUATED = re.compile(
+    r"\b(?:sizeof|decltype|typeof|__typeof__|noexcept|alignof|_Alignof)\s*$")
+
+
+def _unevaluated(body, off):
+    """Is `off` inside an operand the compiler never evaluates?
+
+        (void)sizeof(p = "safe");        /* the assignment never runs */
+        (void)noexcept(p = "safe");
+
+    `writes()` sees an ordinary `p =`, and all three dominance tests accept it: it has a
+    block, it has no transfer token before it, and no conditional operator guards it. So
+    the alias died on a write that cannot execute (#30 review).
+
+    EVERY enclosing group is checked, not just the innermost, because the assignment may
+    sit further in: `sizeof(f(p = "safe"))`. The scan walks outward through unmatched `(`
+    and stops at a brace, which ends the statement's expression context.
+    """
+    depth = 0
+    for i in range(off - 1, -1, -1):
+        c = body[i]
+        if c == ")":
+            depth += 1
+        elif c == "(":
+            if depth == 0:
+                if _UNEVALUATED.search(body[:i].rstrip()):
+                    return True
+            else:
+                depth -= 1
+        elif c in "{}" and depth == 0:
+            return False
+    return False
+
+
 def _in_control_header(body, off):
     """Is `off` inside the parentheses of an `if`/`for`/`while`/`switch` header?
 
@@ -1253,6 +1287,8 @@ def source_reads(body, name, since, kill=ANY_WRITE):
         for w, end in done:
             if not (lo < w and end <= hi):
                 continue
+            if _unevaluated(body, w):
+                continue      # the operand is never evaluated, so the write never runs
             if kill == DOMINATING_WRITE:
                 if self_derived(body, w):
                     continue  # a pointer walk stores the pointer back into the name
