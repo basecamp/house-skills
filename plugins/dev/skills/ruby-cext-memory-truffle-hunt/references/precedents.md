@@ -662,9 +662,21 @@ fixture.** zstd-ruby 2.0.6's `streaming_decompress_mark` spells both marks for t
 
 A sweep keeps the code inside conditionals, so a rule asking "does a pinning mark name this field
 anywhere" answers **yes** — and clears `streaming_decompress.c:133`, `RSTRING_PTR(sd->buf)` with an
-`rb_str_new` before the read, which is one of zstd's confirmed *real* rows. The over-clear would
-have been performed by the mark that causes the bug. **Movable beats pinning, per field, and the
-subtraction is asserted on that tree and not only on a fixture.**
+`rb_str_new` before the read. **Movable beats pinning, per field, and the subtraction is asserted on
+that tree and not only on a fixture.**
+
+**Round 11 withdraws the reason round 10 gave for that assertion, and keeps the assertion.** :133
+was described as "one of zstd's confirmed real rows". It is not — it is `TRIAGED["zstd-"]` residue.
+`sd->buf = rb_str_new(NULL, ZSTD_DStreamOutSize())` is 131,072 bytes, 213× the 616-byte embedded
+boundary, so its bytes are a malloc block compaction does not move, and `streaming_decompress.c:42`
+carries a real `dcompact`. That is the complete *relocate* idiom, same regime as `sc->buf`, which
+this file already records as cleared by execution. The assertion survives on the stronger argument:
+`have_func('rb_gc_mark_movable')` is **yes** on 4.0.6 and 3.4.10, so the `#else` arm never reaches
+the compiler, and a rule that let it answer would be clearing a live row out of **dead code**. The
+acceptance criterion is the index, not the row. The same shim also appears **cross-file** —
+`#define rb_gc_mark_movable(x) rb_gc_mark(x)` in an `#else` arm of ffi's `compat.h:65` and mysql2's
+`mysql2_ext.h:43` — which a per-file textual resolver would miss; grading the *spelling* at each
+call site gets it right, and in the safe direction on old Rubies.
 
 Two pin shapes are still hand-cleared and are scoped out by name: the **store side** (msgpack
 writes the source String into a pinned field *after* deriving from a local — a true clear, but it
@@ -672,6 +684,41 @@ needs the store to dominate every window, which is a second rule with its own re
 **`rb_gc_register_mark_object`** (unicorn — pins harder than any dmark, but there is no type, no
 field and no wrapper, and registration is per-*slot*: a later assignment to the same slot leaves the
 new String unregistered while a (type, field) key still matches).
+
+### …and round 10 shipped it too wide in two places. Both are review findings on #32
+
+The rule cleared **every** escape, on the argument that a pin outlasts any window a sweep can
+classify. **It outlasts every window bounded by the frame, and nothing else.** The pin is
+`rb_gc_mark(w->buf)` in the wrapper's own `dmark`; it runs while the wrapper is reachable. So
+`static const char *saved; saved = RSTRING_PTR(w->buf);` was cleared — wrapper collected, mark stops
+running, String freed, `saved` dangles, with a correct pinning mark present the whole time. A Class
+B use-after-free cleared by the instrument that exists to find it, and the reviewer reproduced it
+before the maintainer did.
+
+The fix is not "the destination is a struct field" and not "the base identifier matches": `o->held =
+p` for a pointer **parameter** is the same `STORES-INTERIOR` spelling writing into an aggregate the
+caller owns, and `w->peer->held = p` starts at the same identifier and ends in a different object.
+It is **one pointer hop off the derivation's own base, then in-object member hops** — which is every
+real escape in the corpus, because the shape is a struct caching an interior pointer into a String
+the same struct owns and marks (`z->stream.next_in = RSTRING_PTR(z->input)`, 44 rows). And **all**
+escapes on a row must qualify, not any.
+
+Separately, every syntactic pin call reachable from a registered `dmark` was recorded as
+unconditional. **A pin that runs only sometimes is not one** — `if (w->pins) rb_gc_mark(w->buf);`
+marks nothing on the other path. Three shapes, three rules, and each is one the other two read as
+unconditional: the **braceless** arm (no block of its own, so a brace test sees the whole function),
+the **braced** arm (its head is `{`, so there is nothing for the arm test to read), and the **early
+return** (depth zero, no conditional head — mysql2's `rb_mysql_stmt_mark`). The polarity is inverted
+from every other caller of these rules: elsewhere an unrecognised guard kills a live row, so narrow
+is safe; here it *clears* one, so the composition deliberately over-reports.
+
+**Cost: 412 → 414 over the 99 trees.** The escape tightening returns 2 rows, both over-reports this
+pass accepts (json's `return rb_utf8_str_new(ptr + offset, …)` copies the bytes, but saying so is a
+different rule). The conditional tightening returns **none** — it drops 33 of 148 pin keys and not
+one is a key a discharged row joins on. **It drops 0 of 69 movable keys**, which is what keeps the
+dead-`#else`-arm subtraction above working; gating `movable` on the same test would rebuild the
+round-10 over-clear out of the round-11 fix. A corpus-neutral tightening is exactly the one a green
+suite cannot tell from no tightening, so both ship with generated reds and five mutation modes.
 
 ### Coverage is not row count
 

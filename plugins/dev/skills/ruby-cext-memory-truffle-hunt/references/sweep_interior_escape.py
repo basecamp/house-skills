@@ -188,19 +188,24 @@ carry the pointer a derivation produced -- predicate B needed the same closure o
 alias set and neither file states it now. That module is a sibling file and these scripts
 will not run without it; references/ is the unit that ships.
 
-ACCEPTANCE (--self-test): see self_test(). Twelve positive controls, five clean negative
-controls, sixteen pinned-residue trees, a per-rule mutation table, and generated reds rather
-than a green-only suite. Ten of the reds are SYNTHETIC TREES WRITTEN BY THE TEST, because
+ACCEPTANCE (--self-test): see self_test(). Twelve positive controls, four clean negative
+controls, seventeen pinned-residue trees, a per-rule mutation table, and generated reds rather
+than a green-only suite. Twelve of the reds are SYNTHETIC TREES WRITTEN BY THE TEST, because
 the corpus is neutral on those shapes and a corpus-neutral fix is exactly the one a green
 suite cannot tell from no fix at all: `RSTRING_GETMEM`'s output pointer; a definition at
 namespace or `extern "C"` scope; a definition carrying a trailing `__attribute__((...))` or
 `noexcept`; a read through a second pointer local; a rebound guard variable; a store into a
 file-scope scalar; a store into a slot declared in a HEADER and defined in another
 translation unit; an adjusted pointer (`RSTRING_END(str) - 1`) stored into a file static;
-a trailing write to the source mistaken for a use of it; and a `dmark` that marks the
+a trailing write to the source mistaken for a use of it; a `dmark` that marks the
 derivation's own field with the MOVABLE mark instead of the pinning one -- the corpus has
 no such tree, which is precisely why the discharge that reads that token was deferred for
-two rounds rather than shipped against a green corpus. Each pins
+two rounds rather than shipped against a green corpus; a pointer PINNED by that dmark and
+then stored somewhere the WRAPPER does not own, which is the pin outliving nothing; and a
+pinning call that runs only on one arm of an `if`, which is a pin on some executions and a
+dangling `char *` on the rest. The last two are #32's review findings and both are
+corpus-neutral in the direction that matters -- one moves two rows, the other moves none.
+Each pins
 the FUNNEL COUNTERS and not only the hit count -- an untracked pointer and an empty index
 both end in `hit 0`, and they are different failures. The three that narrow a DISCHARGE ship
 with a green as well: a rule that stops clearing has to be shown still clearing the case it
@@ -847,6 +852,73 @@ def mark_callbacks(src):
     return out
 
 
+def unconditional_mark(body, off, within=None):
+    """Does the mark call at `off` run on EVERY execution of this mark function?
+
+    THE DISCHARGE CLAIMS A PIN, AND A PIN THAT RUNS ONLY SOMETIMES IS NOT ONE.
+
+        static void wrap_mark(void *p) {
+            struct wrap *w = p;
+            if (w->pins) rb_gc_mark(w->buf);      /* the String is unmarked otherwise */
+        }
+
+    On the `!w->pins` path `w->buf` is neither marked nor pinned, so it may be collected or
+    relocated while a `char *` into its bytes is live -- both legs of this predicate, from a
+    line that reads as a pin to a scan that only asks whether the primitive's name and the
+    member path match. Recording it in `pinned` clears the row that the branch creates.
+
+    THREE tu_scope RULES ANSWER THIS, AND ALL THREE ARE NEEDED -- each one is a shape the
+    other two pass. They are composed rather than re-derived, for the reason tu_scope exists:
+
+      *  `conditional_stmt` -- the BRACELESS arm. `if (c) rb_gc_mark(x);` has no block of
+         its own, so a brace test sees the whole function and reads it as unconditional.
+         It also covers `switch` arms, `for`/`while` headers, `if constexpr`, statement
+         attributes and the operator forms `c && rb_gc_mark(x);` / `c ? rb_gc_mark(x) : 0;`.
+         date's `d_lite_gc_mark` is the corpus instance and the ONLY key this arm drops.
+      *  `innermost_block` -- the BRACED arm, which `conditional_stmt` cannot see by
+         construction: its head is `{`, so there is nothing for the arm test to read. A mark
+         inside any nested block -- an `if` body, a `while` body, a `for` body -- runs on
+         some executions and not others. msgpack's `msgpack_unpacker_mark_stack` is the
+         honest case: the loop marks `stack->data[0 .. depth)` and the entries past `depth`
+         are marked by nothing.
+      *  `straight_line` -- the EARLY RETURN, which neither of the other two sees because
+         the mark really is at depth zero with no conditional head. mysql2's
+         `rb_mysql_stmt_mark` is `if (!stmt_wrapper) return;` followed by an unindented
+         `rb_gc_mark(stmt_wrapper->client);` (statement.c:15).
+
+    THE POLARITY IS INVERTED FROM conditional_stmt's OTHER CALLERS AND THAT IS THE WHOLE
+    REASON THE OTHER TWO ARE HERE. Everywhere else in this directory an unrecognised guard
+    KILLS a live row, so the recogniser is deliberately narrow and anything it cannot read
+    stays UNCONDITIONAL. Here an unrecognised guard CLEARS a live row instead, so narrow is
+    the dangerous direction and the test is composed to over-report rather than under-report.
+
+    MEASURED COST, arm64-darwin (Darwin 27.0.0, Apple libc), CPython 3.11.11, the 99-tree
+    corpus: 33 of 148 (type, field) pin keys are dropped -- 1 by `conditional_stmt`, 30 more
+    by `innermost_block`, 2 more by `straight_line`, counted by enabling the three
+    cumulatively and re-indexing. NOT ONE of them is a key any discharged row joins on, so
+    the corpus verdicts do not move; what moves is the number of pins the index is willing
+    to claim.
+
+    AND NOT ONE MOVABLE KEY IS DROPPED -- 69 before, 69 after, measured on the same run.
+    That is the half of this asymmetry with teeth. A gem that spells both marks for one
+    field across a feature test presents both to the index (zstd's `#ifdef
+    HAVE_RB_GC_MARK_MOVABLE`, and the cross-file `#define rb_gc_mark_movable(x)
+    rb_gc_mark(x)` in ffi's `compat.h:65` and mysql2's `mysql2_ext.h:43`), and it is the
+    subtraction that keeps the dead arm from answering. Gating `movable` on this test would
+    let a mark inside `if (...)` fall out of `movable`, and the surviving pin would then
+    clear the row -- the round-10 over-clear, rebuilt out of the round-11 fix.
+    The largest single loser is the `if (w) { ... }` null-guard on the struct pointer itself
+    (mysql2, and 7 keys of it), which is a *sound* pin -- a NULL `w` has no instance for a
+    derivation to read either -- and is dropped anyway. Exempting it needs the condition
+    parsed and matched against the marked expression's own base, which is a fourth rule for
+    zero corpus rows, in the round whose subject is discharges that fire when they should
+    not. It is named here so the next round can price it rather than re-derive it.
+    """
+    return (not tu_scope.conditional_stmt(body, off)
+            and tu_scope.innermost_block(body, off, within) is None
+            and tu_scope.straight_line(body, 0, off))
+
+
 KEYWORD_TYPES = {"const", "volatile", "register", "static", "extern", "struct", "union",
                  "enum", "class", "unsigned", "signed", "long", "short", "int", "char",
                  "void", "float", "double", "inline", "typedef", "auto"}
@@ -1134,14 +1206,25 @@ class Tree:
         nothing about that one. Subtracting `movable` from `pinned` is that rule, and it is
         also what makes the movable red (8q) impossible to pass by accident -- a fixture
         that spelled both would otherwise discharge on the pinning half.
+
+        A CONDITIONAL CALL IS A PIN ON THE PINNED SIDE ONLY, and the asymmetry is
+        deliberate. `unconditional_mark` gates what may enter `pinned`, because a pin that
+        runs on some executions clears rows on all of them. It does NOT gate `movable`: a
+        movable mark is a HAZARD, and a hazard that fires on one path is still a hazard, so
+        recording it unconditionally is what keeps the subtraction above from letting an
+        unconditional `rb_gc_mark` answer for a conditional `rb_gc_mark_movable` on the same
+        field. Both dispositions push the same way -- fewer keys in `pinned`.
         """
         pinned, movable = {}, {}
         for fn in self.mark_fns:
             vt = var_types(fn)
             rel = str(fn.path.relative_to(self.root))
+            blks = tu_scope.blocks(fn.body)
             for name, args, s, _e in find_calls(fn.body):
                 kind = prim_kind(name)
                 if kind is None:
+                    continue
+                if kind == "pin" and not unconditional_mark(fn.body, s, blks):
                     continue
                 for a in args:
                     key = member_key(self.structs, vt, a.strip())
@@ -2114,14 +2197,80 @@ def liveness(fn, deriv_off, expr, tree, last_use_off=None):
     return "UNROOTED", "nothing roots %s across the window" % var
 
 
-def pinning_mark(tree, fn, expr):
+# A destination that is STORAGE INSIDE the object the base identifier points at: exactly
+# one pointer hop -- the leading `->` -- and then only in-object member hops. `->` again
+# leaves for another object, and `[` cannot be told apart from indexing a pointer member
+# without resolving the member's type, so both stop the match. See escape_stays_inside.
+OWNED_DEST = re.compile(
+    r"([A-Za-z_]\w*)\s*->\s*[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*\Z")
+
+
+def escape_stays_inside(base, kind, text):
+    """Is this escape a store into the very object `base` points at?
+
+    `text` is what escapes() built for the two store kinds -- `stmt + " =" + rhs` -- so the
+    destination is everything left of the first `=`, and there is no other `=` it could be:
+    the left-hand side of an assignment holds no comparison.
+
+    ONLY THE TWO STORE KINDS CAN EVER QUALIFY. A return has no destination; a file static, a
+    non-copying library and a callee that keeps reading all have destinations whose lifetime
+    has nothing to do with the wrapper's. Listing the two that can rather than the four that
+    cannot is the inversion this family uses everywhere: an escape kind added later is a HIT
+    until someone argues it into this tuple.
+    """
+    if kind not in ("STORES-INTERIOR", "ESCAPES-INTO-CONTAINER"):
+        return False
+    m = OWNED_DEST.fullmatch(text.split("=", 1)[0].strip())
+    return bool(m) and m.group(1) == base
+
+
+def pinning_mark(tree, fn, expr, esc=()):
     """Where the owning type's dmark PINS this derivation's source String, or None.
 
     The one discharge in this file that is a fact about another function entirely, and the
-    only one that clears an ESCAPE. Every other rule here asks what happens inside the
+    only one that can clear an ESCAPE. Every other rule here asks what happens inside the
     deriving frame; this one asks what the GC is told about the object the pointer points
-    into, and the answer holds for as long as the wrapper is reachable -- which is longer
-    than any window this predicate can classify, including an unbounded escape.
+    into, and the answer holds for as long as the wrapper is reachable.
+
+    THE PIN'S LIFETIME IS THE WRAPPER'S, WHICH IS NOT "LONGER THAN ANY WINDOW". The first
+    cut of this rule said it was, and cleared every escape on the strength of it. That is
+    sound for a window BOUNDED BY THE FRAME and false the moment the pointer leaves for
+    somewhere the wrapper does not own. The pin is `rb_gc_mark(w->buf)` inside the wrapper's
+    own `dmark`; it runs only while the wrapper is reachable. So:
+
+        static const char *saved;
+        static VALUE leak(VALUE self) {
+            struct wrap *w;
+            TypedData_Get_Struct(self, struct wrap, &w_type, w);
+            saved = RSTRING_PTR(w->buf);      /* outlives the wrapper */
+            return Qnil;
+        }
+
+    the wrapper becomes unreachable, `w_mark` stops running, the String is collected, and
+    `saved` dangles -- with the pinning mark present and correct the whole time. The rule
+    cleared that, and it is a Class B use-after-free of exactly the kind this file exists
+    to find.
+
+    SO AN ESCAPE IS DISCHARGED ONLY WHEN THE ESCAPED POINTER CANNOT OUTLIVE THE PIN, and
+    what makes that true is that the destination is storage INSIDE the pinned object: same
+    base identifier, one pointer hop, then member hops that stay in the object. Freeing the
+    wrapper frees the destination in the same step, so the dangling window never opens.
+    That is every real escape in the corpus and it is not a coincidence -- the shape is a
+    struct caching an interior pointer into a String the same struct owns and marks:
+
+        z->stream.next_in = (Bytef*)RSTRING_PTR(z->input)      zlib, 44 rows
+        parser->state.start = start                            json, 3 rows
+        gz->orig_name = rb_str_new(RSTRING_PTR(gz->z.input), n) zlib -- a COPY, kept by the
+                                                               same test for a lesser reason
+
+    NOT "the destination is a struct field", which is what a rule keyed on the escape KIND
+    would say: `out->held = p` for a pointer PARAMETER `out` is the same STORES-INTERIOR
+    spelling writing into an aggregate the caller owns and the wrapper does not, and 8t's
+    `caller` arm is the red for it. And not a bare base-name match either: `w->peer->held`
+    starts at the same identifier and ends in a different object, which is 8t's `peer` arm.
+
+    ALL escapes on the row must qualify, not any: a derivation that stores into the wrapper
+    AND hands the pointer to a library has dangled by the second one.
 
     Deliberately NOT asked, and each of these is a row this rule leaves standing:
 
@@ -2143,11 +2292,23 @@ def pinning_mark(tree, fn, expr):
          (buffer_class.c:137, and predicate A's round-5 iteration-order defect is the same
          pair). The join here is (type, field), so a second wrapper with no dmark is
          invisible to it. Reaching that needs A's wrap-site walk; it is a stated limit.
+      *  whether an escape that COPIES the bytes is safe because the pin removes the
+         allocation hazard `copies-immediately` refuses it for. It is -- `return
+         rb_utf8_str_new(ptr + offset, len - offset)` in json's cResumableParser_rest stores
+         no pointer anywhere, only bytes -- but it is a WIDENING, and this pass narrows.
+         That row is a hit now and named in TRIAGED. `copies-immediately` does NOT pick it
+         up instead: that rule requires `not esc`, and here the return IS the escape.
     """
     key = member_key(tree.structs, var_types(fn), expr)
     if key is None:
         return None
-    return tree.pinned.get(key)
+    where = tree.pinned.get(key)
+    if where is None:
+        return None
+    base = MEMBER_PATH.fullmatch(expr).group(1)
+    if any(not escape_stays_inside(base, kind, text) for kind, _o, text, _x in esc):
+        return None
+    return where
 
 
 SIZE_HINT = re.compile(r"\b(\d{3,})\b")
@@ -2343,7 +2504,15 @@ def sweep(tree, name, disabled=(), discharge=True):
             # docstring says so. Placing it here also keeps it out of `no-window`'s way --
             # a pinned derivation with no window at all is still discharged by no-window,
             # which is what the corpus diff has to be able to say.
-            pin = None if "pinning-mark" in off_rule else pinning_mark(tree, fn, expr)
+            #
+            # `esc` IS PASSED, NOT RE-DERIVED. The rule needs the escape's DESTINATION to
+            # decide whether the pin outlives the pointer, and the escape set is already
+            # computed here -- recomputing it inside the rule would put a second copy of
+            # `escapes()`'s recall choices behind a discharge, where a divergence between
+            # the two reads as a clean sheet. The other five rules take no escape argument
+            # because none of them may fire on an escaping row at all.
+            pin = None if "pinning-mark" in off_rule \
+                else pinning_mark(tree, fn, expr, esc)
             if pin:
                 r.discharges.append(("pinning-mark", rel, line_of(fn.src, off),
                                      "%s(%s) in %s -- pinned by %s"
@@ -2481,7 +2650,16 @@ POSITIVES = [
 # registered positionally at :114-120), so the row is discharged by `pinning-mark` rather
 # than merely small. A tree whose zero is produced by a named rule is a stronger control
 # than one whose zero is produced by finding nothing, which is what racc is here for.
-NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-", "stringio-"]
+#
+# ROUND 11 MOVES IT STRAIGHT BACK OUT, and the round trip is the honest record of what the
+# #32 review cost. The row is an ESCAPES-INTO-CALLEE -- `strio_substr(ptr, s -
+# RSTRING_PTR(ptr->string), ...)`, a callee that still reads its argument after allocating --
+# and the pin's lifetime is the WRAPPER's, which says nothing about a pointer the callee may
+# keep past the wrapper. Round 10 cleared it on the blanket claim that a pin outlasts any
+# window, which is exactly the P1 finding. Gaining a clean control on Monday and returning it
+# on Friday is the shape of an over-clear, so it is recorded as one rather than smoothed over:
+# NEGATIVES goes back to four and stringio back into TRIAGED at its round-9 count of 1.
+NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-"]
 
 # The rest of the round-6 negative set does NOT come back clean, and pinning the numbers
 # is more honest than widening a rule until they do. Each entry is the count triaged by
@@ -2739,9 +2917,35 @@ NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-", "stringio-"]
 #     harder than any dmark, but there is no type, no field and no wrapper -- it shares no
 #     machinery with this rule and registration is per-SLOT rather than per-object. Scoped
 #     out by name in pinning_mark()'s docstring. Still hand-cleared.
+#
+# ROUND 11: THE #32 REVIEW TIGHTENS THE DISCHARGE IN TWO PLACES AND TWO ROWS COME BACK
+# (412 -> 414), 0 REMOVED, 0 COLUMNS CHANGED, AND NO OTHER DISCHARGE'S COUNT MOVED. Both
+# returning rows are ESCAPES, both are the P1 finding, and both are OVER-REPORTS that this
+# pass accepts rather than argues away -- over-reporting costs an hour, over-clearing makes a
+# broken gem read as safe, and the rule that told the two apart was the one being fixed.
+#
+#   json      1 -> 2   parser.c:2710 `cResumableParser_rest`, `return rb_utf8_str_new(ptr +
+#                        offset, len - offset)`. ESCAPES-BY-RETURN, which has no destination
+#                        at all, so `escape_stays_inside` cannot qualify it. The row is
+#                        genuinely safe -- the return COPIES the bytes and stores no pointer
+#                        anywhere -- but saying so is `copies-immediately` widened to fire on
+#                        an escaping row, which is a different rule with its own reds. It is
+#                        back where round 9 had it, triaged as `carries()` argument-position
+#                        noise, and named in pinning_mark()'s "deliberately NOT asked" list.
+#                        parser.c:2410, the row this whole discharge was built for, is
+#                        UNAFFECTED: `parser->state.start = start` is a store into the pinned
+#                        object itself and still clears.
+#   stringio  0 -> 1   stringio.c:1388, back out of NEGATIVES; see there.
+#
+# THE CONDITIONAL-MARK TIGHTENING (P2) MOVES NOTHING HERE, and that is measured rather than
+# assumed: forcing `escape_stays_inside` to True with `unconditional_mark` still in place
+# reproduces round 10's output byte for byte over all 99 trees. It drops 33 of 151 (type,
+# field) pin keys and not one of them is a key a discharged row joins on. A corpus-neutral
+# tightening is precisely the one a green suite cannot tell from no tightening at all, which
+# is what 8u is for.
 TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 7, "iconv-": 15, "zstd-": 6,
-           "sqlite3-2.9.5": 3, "websocket-driver-": 2,
-           "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 1, "puma-": 6,
+           "sqlite3-2.9.5": 3, "websocket-driver-": 2, "stringio-": 1,
+           "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 2, "puma-": 6,
            "unicorn-6.1.0": 6, "date-": 18, "openssl-3.3.0": 5, "openssl-3.3.1": 5,
            "openssl-3.3.3": 5, "openssl-4.0.0": 5}
 
@@ -3535,11 +3739,25 @@ def self_test(pool):
     #     same field in the same function and the index sees a pin and a movable mark on one
     #     key. Subtracting `movable` from `pinned` is the only thing that keeps
     #     streaming_decompress.c:133 -- `RSTRING_PTR(sd->buf)` with an `rb_str_new` before
-    #     the read -- standing. That row is one of zstd's REAL ones, `only for sc->buf` in
-    #     round 9's Phase E table; a rule that let the `#else` branch answer would have
-    #     cleared a confirmed mobility finding using the mark that causes it. Asserted on
-    #     the tree rather than only on the fixture, because this is the one over-clear the
-    #     whole two-round deferral was about and the corpus can now speak to it directly.
+    #     the read -- standing.
+    #
+    #     ROUND 11 CORRECTS WHAT THAT ROW IS. Round 10 called it "one of zstd's confirmed
+    #     real rows"; it is not, and the claim is withdrawn rather than left to be cited.
+    #     :133 is `TRIAGED["zstd-"]` residue. `sd->buf = rb_str_new(NULL,
+    #     ZSTD_DStreamOutSize())` and `ZSTD_DStreamOutSize() == ZSTD_BLOCKSIZE_MAX ==
+    #     131,072` bytes -- 213x the 616-byte embedded boundary, so the bytes are a malloc
+    #     block compaction does not move -- and streaming_decompress.c:42 carries a real
+    #     `dcompact` (`sd->buf = rb_gc_location(sd->buf)`). That is the complete *relocate*
+    #     idiom, and it is the same regime as its sibling `sc->buf`, which precedents.md
+    #     records as CLEARED BY EXECUTION (135,000 operations, ~1,700 compactions per run).
+    #
+    #     THE ASSERTION STANDS ON A DIFFERENT AND BETTER ARGUMENT, which is why it is not
+    #     weakened along with the claim: the `#else` arm never reaches the compiler --
+    #     `have_func('rb_gc_mark_movable')` is yes on 4.0.6 and 3.4.10 -- so a rule that let
+    #     it answer would be discharging a live row out of DEAD CODE. "Do not read
+    #     non-compiled source" needs no defect at :133 to be worth asserting, and the
+    #     acceptance criterion is the INDEX (`movable` holds the key, `pinned` does not),
+    #     with the row's survival as the visible consequence rather than as the point.
     zstd = _find(pool, "zstd-")
     if zstd is not None:
         zt = Tree(zstd)
@@ -3562,6 +3780,19 @@ def self_test(pool):
     #     BOTH DIRECTIONS ARE ASSERTED, because agreement alone is satisfied by two files
     #     being wrong together -- which is the failure that matters here, since `movable`
     #     graded as `pin` is the over-clear the whole fixture above exists to prevent.
+    #
+    #     WHAT IS SHARED IS THE TABLE, NOT THE ANSWER, and round 11 had to say so out loud
+    #     because a parallel audit proposed closing the `#ifdef` hole by having this rule
+    #     read predicate A's verdict -- and then found that A cannot grade msgpack's
+    #     `c->mapped_string` at all, since `msgpack_buffer_chunk_t` has no wrap site for A's
+    #     walk to start from. That is a real gap in A and not a state THIS rule can be in:
+    #     `_index_pins` walks REGISTERED MARK FUNCTIONS, not wrap sites, so it grades the
+    #     key directly (`rb_gc_mark(c->mapped_string)`, buffer.c:122 -- measured present in
+    #     `Tree.pinned` for both msgpack trees). It also joins on nothing: msgpack's two
+    #     rows derive from the LOCAL `mapped_string`, which is the store side, so the key is
+    #     in the index and clears no row. Two predicates keying off two different walks is
+    #     what makes them independent; importing A's answer here would trade this rule's own
+    #     coverage for A's, in the direction of clearing MORE rows.
     import sweep_unmarked as _pred_a
     prim_table = ["rb_gc_mark", "rb_gc_mark_movable", "rb_gc_mark_maybe",
                   "rb_gc_mark_and_move", "rb_gc_mark_locations", "RB_GC_MARK",
@@ -3580,6 +3811,211 @@ def self_test(pool):
           "grades the two that matter absolutely -- rb_gc_mark pins, rb_gc_mark_movable "
           "and rb_gc_mark_and_move do not" % len(prim_table),
           disagree or "absolute grades wrong")
+
+    # 8t. GENERATED REDS AND GREENS: THE PIN'S LIFETIME IS THE WRAPPER'S, SO AN ESCAPE IS
+    #     DISCHARGED ONLY WHERE THE POINTER CANNOT OUTLIVE IT. #32's P1 review finding, and
+    #     the one that matters: round 10 shipped `pinning-mark` clearing EVERY escape on the
+    #     strength of "the pin outlasts any window this predicate can classify". It does not.
+    #     `rb_gc_mark(w->buf)` runs while the WRAPPER is reachable; a `char *` written into a
+    #     file static outlives the wrapper, and the reviewer's own synthetic tree -- `saved =
+    #     RSTRING_PTR(w->buf)` -- came back with zero hits under a rule that exists to find
+    #     exactly that. A Class B use-after-free cleared by this file.
+    #
+    #     FIVE arms of one byte-identical tree, four of them red, and each red is a DIFFERENT
+    #     way the destination fails to be storage inside the pinned object:
+    #
+    #       owned    `w->held = p`         same base, one `->`        -> DISCHARGES
+    #       static   `saved = p`           file-scope slot            -> STILL A HIT
+    #       caller   `o->held = p`         `o` is a pointer PARAMETER -> STILL A HIT
+    #       peer     `w->peer->held = p`   same base, TWO `->`        -> STILL A HIT
+    #       both     `w->held = p` AND a non-copying library call     -> STILL A HIT
+    #
+    #     `caller` and `peer` are the two the obvious tightenings would each miss, and they
+    #     are why the rule is neither "the escape stores into a struct field" nor "the base
+    #     identifier matches". `o->held = p` is the SAME `STORES-INTERIOR` spelling as the
+    #     green, writing into an aggregate the caller owns and the wrapper does not; freeing
+    #     the wrapper frees nothing of `*o`. `w->peer->held = p` starts at the same
+    #     identifier the pin does and ends in a different object, whose lifetime is its own.
+    #     `both` is the `all` in `escape_stays_inside`'s caller asserted as a row: a
+    #     derivation that stores into the wrapper AND hands the pointer to a non-copying
+    #     library has already dangled by the second one, and a rule reading `any` clears it.
+    #
+    #     THE GREEN IS ASSERTED WITH THE RULE OFF AS WELL. `owned` must be an ESCAPING row
+    #     that the rule clears, not a row with no escape on it -- otherwise the fixture is
+    #     re-testing round 10's `HELD-ACROSS-WINDOW` case under a new name and the narrowing
+    #     is untested in the direction that matters. `--disable-rule pinning-mark` puts the
+    #     ESCAPES-INTO-CONTAINER row back on every one of the five.
+    esc_c = ("#include <ruby.h>\n\n"
+             "struct peer { const char *held; };\n"
+             "struct wrap { VALUE buf; const char *held; struct peer *peer; };\n"
+             "struct out { const char *held; };\n\n"
+             "static const char *saved;\n\n"
+             "static void\n"
+             "wrap_mark(void *p)\n"
+             "{\n"
+             "    struct wrap *w = p;\n"
+             "    rb_gc_mark(w->buf);\n"
+             "}\n\n"
+             "static const rb_data_type_t wrap_type = {\n"
+             "    \"wrap\",\n"
+             "    { wrap_mark, 0, 0, },\n"
+             "    0, 0, RUBY_TYPED_FREE_IMMEDIATELY\n"
+             "};\n\n"
+             "static void\n"
+             "feed(VALUE self, struct out *o)\n"
+             "{\n"
+             "    struct wrap *w;\n"
+             "    const char *p;\n"
+             "    TypedData_Get_Struct(self, struct wrap, &wrap_type, w);\n"
+             "    p = RSTRING_PTR(w->buf);\n"
+             "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+             "%s"
+             "}\n\n"
+             "static VALUE\n"
+             "entry(VALUE self)\n"
+             "{\n"
+             "    struct out o;\n"
+             "    feed(self, &o);\n"
+             "    return Qnil;\n"
+             "}\n\n"
+             "void Init_probe(void)\n"
+             "{\n"
+             "    rb_define_method(rb_cObject, \"f\", entry, 0);\n"
+             "}\n")
+    esc_arms = {
+        "owned":  "    w->held = p;\n",
+        "static": "    saved = p;\n",
+        "caller": "    o->held = p;\n",
+        "peer":   "    w->peer->held = p;\n",
+        "both":   "    w->held = p;\n"
+                  "    xmlReaderForMemory(p, 4, NULL, NULL, 0);\n",
+    }
+    def _esc_arm(tag, arm):
+        root = _synth("fx-esc-%s" % tag, {"ext/probe.c": esc_c % arm})
+        return _sweep(root), _hits(root, disabled=("pinning-mark",))
+    er = {t: _esc_arm(t, a) for t, a in esc_arms.items()}
+    esc_green, esc_red = ("owned",), ("static", "caller", "peer", "both")
+    check(all((er[t][0].funcs, len(er[t][0].derivations), len(er[t][0].with_window))
+              == (4, 1, 1) and er[t][1] for t in esc_arms)
+          and all(not er[t][0].hits
+                  and [d[0] for d in er[t][0].discharges] == ["pinning-mark"]
+                  for t in esc_green)
+          and all(len(er[t][0].hits) == 1 and not er[t][0].discharges
+                  for t in esc_red),
+          "pinning-mark escape lifetime red/green: a pin discharges an ESCAPE only where the "
+          "destination is storage inside the pinned object -- `w->held = p` clears, while a "
+          "file static, a pointer PARAMETER's field, a field of a SECOND object reached from "
+          "the same base, and a qualifying store paired with a non-copying library call all "
+          "leave the row standing. Every arm is an escaping row with the rule off; the pin's "
+          "lifetime is the wrapper's, and round 10 cleared all four",
+          [(t, er[t][0].funcs, len(er[t][0].derivations), len(er[t][0].with_window),
+            [h[0] for h in er[t][0].hits], sorted(d[0] for d in er[t][0].discharges),
+            [h[0] for h in er[t][1]])
+           for t in sorted(esc_arms)])
+
+    # ...AND THE DESTINATION TEST ITSELF, asserted directly rather than only through a row,
+    # in the shape 8i/8j's minus-split table uses. Five spellings the row fixture cannot
+    # reach without five more arms, and the two kinds that can never qualify however the
+    # destination is spelled. `w->st.held` is the in-object member hop the corpus needs --
+    # zlib's `z->stream.next_in` is that shape and is 44 of the 47 rows round 10 moved --
+    # and `w->buf[0]` is refused because `[` cannot be told from indexing a POINTER member
+    # without resolving the member's type, which is the recall this rule declines to spend.
+    dest = {
+        "own-field":   escape_stays_inside("w", "STORES-INTERIOR", "w->held = p"),
+        "own-nested":  escape_stays_inside("w", "STORES-INTERIOR", "w->st.held = p"),
+        "other-base":  escape_stays_inside("w", "STORES-INTERIOR", "o->held = p"),
+        "second-hop":  escape_stays_inside("w", "STORES-INTERIOR", "w->peer->held = p"),
+        "indexed":     escape_stays_inside("w", "STORES-INTERIOR", "w->buf[0] = p"),
+        "bare-base":   escape_stays_inside("w", "STORES-INTERIOR", "w = p"),
+        "by-return":   escape_stays_inside("w", "ESCAPES-BY-RETURN", "w->held = p"),
+        "into-static": escape_stays_inside("w", "ESCAPES-INTO-STATIC", "w->held = p"),
+    }
+    check(dest == {"own-field": True, "own-nested": True, "other-base": False,
+                   "second-hop": False, "indexed": False, "bare-base": False,
+                   "by-return": False, "into-static": False},
+          "owned-destination table: one pointer hop off the derivation's own base and then "
+          "in-object member hops stay inside the pinned object; a second `->`, a `[`, a "
+          "different base and a bare assignment do not -- and the four escape kinds that "
+          "are not stores cannot qualify however the destination is spelled",
+          sorted(dest.items()))
+
+    # 8u. GENERATED REDS AND GREEN: A PIN THAT RUNS ONLY SOMETIMES IS NOT A PIN. #32's P2
+    #     review finding. The index recorded every syntactic pin call reachable from a
+    #     registered `dmark` as unconditional, so `if (w->pins) rb_gc_mark(w->buf);` entered
+    #     `pinned` and cleared the row on the `!w->pins` path too -- where the String is
+    #     marked by nothing and may be collected or relocated under a live `char *`.
+    #
+    #     FOUR arms, and the three reds are the three tu_scope rules `unconditional_mark`
+    #     composes, one each, because each is a shape the other two pass:
+    #
+    #       always     `rb_gc_mark(w->buf);`                    -> DISCHARGES
+    #       braceless  `if (w->pins) rb_gc_mark(w->buf);`       -> STILL A HIT  conditional_stmt
+    #       braced     `if (w->pins) { rb_gc_mark(w->buf); }`   -> STILL A HIT  innermost_block
+    #       returned   `if (!w->pins) return;` then the mark    -> STILL A HIT  straight_line
+    #
+    #     `braceless` is the reviewer's shape and the one a brace test cannot see: the arm has
+    #     no block of its own, so the innermost enclosing block is the whole function and the
+    #     mark reads as unconditional. `braced` is the mirror -- its head is `{`, so there is
+    #     nothing for the arm test to read. `returned` is at depth zero with no conditional
+    #     head at all, which is why neither of the other two sees it, and it is not synthetic:
+    #     mysql2's `rb_mysql_stmt_mark` is `if (!stmt_wrapper) return;` followed by an
+    #     unindented `rb_gc_mark(stmt_wrapper->client);` at statement.c:15.
+    #
+    #     ALL THREE ARE CORPUS-NEUTRAL, which is the whole reason they are here. The 33 pin
+    #     keys the composition drops over the 99 trees are not keys any discharged row joins
+    #     on, so a green corpus says nothing about whether the tightening happened -- the
+    #     generated red is the only thing that does.
+    cond_c = ("#include <ruby.h>\n\n"
+              "struct wrap { VALUE buf; int pins; };\n\n"
+              "static void\n"
+              "wrap_mark(void *p)\n"
+              "{\n"
+              "    struct wrap *w = p;\n"
+              "%s"
+              "}\n\n"
+              "static const rb_data_type_t wrap_type = {\n"
+              "    \"wrap\",\n"
+              "    { wrap_mark, 0, 0, },\n"
+              "    0, 0, RUBY_TYPED_FREE_IMMEDIATELY\n"
+              "};\n\n"
+              "static VALUE\n"
+              "feed(VALUE self)\n"
+              "{\n"
+              "    struct wrap *w;\n"
+              "    const char *p;\n"
+              "    VALUE out;\n"
+              "    TypedData_Get_Struct(self, struct wrap, &wrap_type, w);\n"
+              "    p = RSTRING_PTR(w->buf);\n"
+              "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+              "    out = rb_str_new(p, 4);\n"
+              "    return out;\n"
+              "}\n\n"
+              "void Init_probe(void)\n"
+              "{\n"
+              "    rb_define_method(rb_cObject, \"f\", feed, 0);\n"
+              "}\n")
+    cond_arms = {
+        "always":    "    rb_gc_mark(w->buf);\n",
+        "braceless": "    if (w->pins) rb_gc_mark(w->buf);\n",
+        "braced":    "    if (w->pins) {\n        rb_gc_mark(w->buf);\n    }\n",
+        "returned":  "    if (!w->pins) return;\n    rb_gc_mark(w->buf);\n",
+    }
+    cn = {t: _sweep(_synth("fx-cond-%s" % t, {"ext/probe.c": cond_c % a}))
+          for t, a in cond_arms.items()}
+    cond_red = ("braceless", "braced", "returned")
+    check(all((cn[t].funcs, len(cn[t].derivations), len(cn[t].with_window)) == (3, 1, 1)
+              for t in cond_arms)
+          and not cn["always"].hits
+          and [d[0] for d in cn["always"].discharges] == ["pinning-mark"]
+          and all(len(cn[t].hits) == 1 and not cn[t].discharges for t in cond_red),
+          "conditional-pin red/green: a mark that runs on EVERY execution of the dmark "
+          "pins, and the same call behind a braceless `if`, inside a braced `if`, and after "
+          "an early `return` does not -- three shapes, three tu_scope rules, each one a "
+          "shape the other two read as unconditional. Corpus-neutral, so this fixture is "
+          "the only thing that can tell the tightening from no tightening",
+          [(t, cn[t].funcs, len(cn[t].derivations), len(cn[t].with_window),
+            [h[0] for h in cn[t].hits], sorted(d[0] for d in cn[t].discharges))
+           for t in sorted(cond_arms)])
 
     # 8l/8m. GENERATED RED: A BARE STORE INTO STATIC STORAGE IS AN ESCAPE.
     #
