@@ -1744,6 +1744,18 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
                       ["RETURNS-INTERIOR"]),
         "restore-copy": ('    q = p;\n    p = "safe";\n    p = q;\n    r = p;\n', "r",
                          ["RETURNS-INTERIOR"]),
+        # The copy sits in a CONTROL EXPRESSION, so the next `;` is after the return.
+        # `copy-stmt` is the same copy written as its own statement, and it was correct
+        # all along -- the pair is what names the cause instead of the symptom.
+        "copy-cond": ('    if ((q = p) != NULL) return q;\n', "p",
+                      ["RETURNS-INTERIOR", "RETURNS-INTERIOR"]),
+        "copy-stmt": ('    q = p;\n    if (q != NULL) return q;\n', "p",
+                      ["RETURNS-INTERIOR", "RETURNS-INTERIOR"]),
+        # The SAME carrier restored twice: the reads between the two restorations must
+        # survive. A {name: offset} seed map kept only the last and lost them.
+        "re-restore": ('    q = p;\n    p = "safe";\n    p = q;\n'
+                       '    if (out) return p;\n    p = "safe";\n    p = q;\n', "p",
+                       ["RETURNS-INTERIOR", "RETURNS-INTERIOR"]),
     }
     kr = {}
     for tag, (mid, ret, _want) in kill_arms.items():

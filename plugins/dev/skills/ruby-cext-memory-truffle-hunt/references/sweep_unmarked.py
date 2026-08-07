@@ -3298,6 +3298,20 @@ def self_test(base, siblings=()):
           "ctor_local present=%s, held present=%s"
           % ("ctor_local" in nested, "VALUE held" in nested))
 
+    # A NON-TYPE template argument may contain a RELATIONAL OPERATOR (#30 review):
+    # `Base<(N > 0)>`. A depth counter that reads every `>` as a closing bracket stops at
+    # the comparison and rejects the constructor. The parentheses are what distinguish the
+    # two, so the walk tracks them.
+    relational = blank_method_bodies(RED_CXX_PACK_INIT.replace(
+        "PBox(T... t) : T(t)...",
+        "PBox(T... t) : Base<(1 > 0)>()"))
+    check("ctor_local" not in relational and "VALUE held" in relational,
+          "green (c++ relational template argument) `Base<(1 > 0)>()` is a template-id "
+          "whose argument contains a comparison: the `>` inside the parentheses does not "
+          "close the template-id, so the constructor is still recognised and blanked",
+          "ctor_local present=%s, held present=%s"
+          % ("ctor_local" in relational, "VALUE held" in relational))
+
     packed = blank_method_bodies(RED_CXX_PACK_INIT)
     check("ctor_local" not in packed and "VALUE held" in packed,
           "green (c++ pack ctor-init) `PBox(T... t) : T(t)...` is a constructor: the pack "

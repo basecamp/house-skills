@@ -491,10 +491,18 @@ def _skip_template_args(src, k):
     file: `a < b` never closes, and this returns -1, which `_skip_member_init` treats as a
     reject exactly as it treats every other failure.
     """
-    depth, n = 0, len(src)
+    depth, paren, n = 0, 0, len(src)
     while k < n:
         c = src[k]
-        if c == "<":
+        if c in "([":
+            paren += 1
+        elif c in ")]":
+            if paren == 0:
+                return -1       # a group this template-id never opened
+            paren -= 1
+        elif paren:
+            pass                # `Base<(N > 0)>` -- a relational operator, not a bracket
+        elif c == "<":
             depth += 1
         elif c == ">":
             depth -= 1
@@ -793,7 +801,7 @@ def local_copies(body, after=0):
             continue
         stmt = statement_before(body, m.start())
         d = _LHS_TAIL.search(stmt)
-        semi = body.find(";", m.end())
+        semi = rhs_end(body, m.end() - 1)
         if not d or semi < 0:
             continue
         rhs = body[m.end():semi].strip()
@@ -1046,6 +1054,38 @@ def straight_line(body, a, b):
     return True
 
 
+def rhs_end(body, eq):
+    """Offset one past the right-hand side of the assignment whose `=` is at `eq`.
+
+    AN ASSIGNMENT IS AN EXPRESSION, AND ITS RIGHT-HAND SIDE ENDS BEFORE THE NEXT `;` MORE
+    OFTEN THAN NOT. Two rules in this module bounded it by `body.find(";")` and both were
+    wrong in the same way, so the bound is one function now:
+
+        if ((q = p) != NULL) return q;     /* the first `;` is after the RETURN */
+        for (i = 0; i < n; p = q) ++i;     /* the first `;` is a clause separator */
+
+    A `;`-bounded right-hand side swallows the rest of the condition and whatever follows
+    it. `self_derived` then found its own name in that text and called an unrelated write
+    self-derived; `local_copies` then failed `COPY_RHS.fullmatch` and dropped a real alias.
+    One reports, the other discharges, and both came from this one line.
+
+    So the scan stops at the `;`, at a `,` outside brackets, or at the closing bracket of a
+    group this right-hand side never opened.
+    """
+    depth = 0
+    for i in range(eq + 1, len(body)):
+        c = body[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif depth == 0 and c in ";,":
+            return i
+    return len(body)
+
+
 def self_derived(body, off):
     """Does the write at `off` re-derive the name from ITSELF? `p = p + 1`.
 
@@ -1114,20 +1154,8 @@ def self_derived(body, off):
     name = re.match(r"\s*([A-Za-z_]\w*)", body[off:])
     if not name:
         return False
-    depth, end = 0, len(body)
-    for i in range(eq + 1, len(body)):
-        c = body[i]
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            if depth == 0:
-                end = i
-                break
-            depth -= 1
-        elif depth == 0 and c in ";,":
-            end = i
-            break
-    return re.search(r"\b%s\b" % re.escape(name.group(1)), body[eq + 1:end]) is not None
+    return re.search(r"\b%s\b" % re.escape(name.group(1)),
+                     body[eq + 1:rhs_end(body, eq)]) is not None
 
 
 def source_reads(body, name, since, kill=ANY_WRITE):
@@ -1372,19 +1400,40 @@ def alias_reads(body, seeds, exclude=()):
                 continue
             done.add((nm, since))
             out.update(source_reads(body, nm, since, kill=DOMINATING_WRITE))
-        extra = {}
+        # ONE NAME MAY BE RESTORED MORE THAN ONCE, and a {name: offset} map keeps only
+        # the last of them (#30 review):
+        #
+        #     p = "safe"; p = q; if (c) return p; p = "safe"; p = q; return NULL;
+        #
+        # The second restoration overwrote the first seed, so the reads BETWEEN them --
+        # the conditional `return p` -- disappeared. Each (name, offset) is its own seed
+        # set, and `done` already keys on the pair, so they are collected as a list and
+        # each is propagated on its own.
+        extra = []
         for off, lhs, rhs in local_copies(body, min(m.values())):
             if lhs in exclude or rhs not in layer:
                 continue
             if off <= layer[rhs] or (lhs, off) in done:
                 continue
-            semi = body.find(";", off)
-            semi = len(body) if semi < 0 else semi
             live = source_reads(body, rhs, layer[rhs], kill=DOMINATING_WRITE)
-            if not any(off < r < semi for r in live):
+            if not any(off < r < rhs_end(body, off) for r in live):
                 continue        # the right-hand side no longer reads the pointer
-            extra[lhs] = off
-        layer = alias_map(body, extra, exclude) if extra else {}
+            extra.append((lhs, off))
+        nxt = {}
+        for lhs, off in extra:
+            for nm, since in alias_map(body, {lhs: off}, exclude).items():
+                if (nm, since) not in done:
+                    nxt[(nm, since)] = None
+        layer = {}
+        for nm, since in nxt:
+            # a later seed for the same name does not cancel an earlier one; process the
+            # earliest here and let the loop pick up the rest on its next pass
+            if nm not in layer or since < layer[nm]:
+                layer[nm] = since
+        for nm, since in nxt:
+            if (nm, since) not in done and layer.get(nm) != since:
+                out.update(source_reads(body, nm, since, kill=DOMINATING_WRITE))
+                done.add((nm, since))
     return out
 
 
