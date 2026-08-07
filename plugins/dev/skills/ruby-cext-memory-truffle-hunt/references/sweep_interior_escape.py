@@ -1060,11 +1060,16 @@ def instance_pins(tree, fn, pname, depth=0, seen=()):
                 continue
             if i >= len(spans) or not _carries_at(fn, pname, *spans[i]):
                 continue
-            for callee in tu_scope.bind(tree.by_name.get(name, ()), fn.path,
-                                        fn.bstart + s):
-                if i < len(callee.params):
-                    out |= instance_pins(tree, callee, callee.params[i][1],
-                                         depth + 1, seen)
+            # ALTERNATE DEFINITIONS ARE INTERSECTED, not unioned. `tu_scope.bind` returns
+            # several candidates for two reasons -- `#ifdef` variants of one function, and
+            # C++ overloads -- and BOTH answer the same way here: the walk cannot tell which
+            # body runs, so a key is proven only if every candidate proves it. Unioning them
+            # discharged on the build whose `#else` body marks nothing.
+            defs = tu_scope.bind(tree.by_name.get(name, ()), fn.path, fn.bstart + s)
+            if defs:
+                out |= set.intersection(*[
+                    instance_pins(tree, c, c.params[i][1], depth + 1, seen)
+                    if i < len(c.params) else set() for c in defs])
     return out
 
 
@@ -1476,14 +1481,22 @@ class Tree:
             for name, off in regs:
                 if name is None:
                     continue
-                for fn in tu_scope.bind(self.by_name.get(name, ()), path, off):
-                    for key in instance_pins(
-                            self, fn, fn.params[0][1] if fn.params else None):
-                        proven.add(key)
-                        where.setdefault(key, "%s marks it for the registered instance "
-                                              "at %s:%d"
-                                         % (fn.name, str(path.relative_to(self.root)),
-                                            line_of(fn.src, off)))
+                # ...AND THE SAME OPERATOR ONE LEVEL UP. One `.dmark = wrap_mark` whose
+                # DEFINITION varies across `#ifdef` binds to both bodies; the build selecting
+                # the one that marks nothing must not be discharged by the one that does.
+                # Same argument as the variant INITIALISERS intersected below, second site.
+                defs = tu_scope.bind(self.by_name.get(name, ()), path, off)
+                if not defs:
+                    continue
+                per_def = [instance_pins(self, fn,
+                                         fn.params[0][1] if fn.params else None)
+                           for fn in defs]
+                for key in set.intersection(*per_def):
+                    proven.add(key)
+                    where.setdefault(key, "%s marks it for the registered instance "
+                                          "at %s:%d"
+                                     % (defs[0].name, str(path.relative_to(self.root)),
+                                        line_of(defs[0].src, off)))
             by_var.setdefault((path, var), []).append((proven, where))
         pinned = {}
         for (_path, _var), variants in by_var.items():
@@ -2227,17 +2240,25 @@ def copied_in_callee(fn, start_off, base, field, tree, depth=0, seen=None):
             # tu_scope.bind is the same rule predicates A, B and C resolve names by. The
             # tree-wide fall-back is kept where C keeps it: a non-static callee, or one
             # defined in a header, genuinely is visible from here.
+            # EVERY CANDIDATE MUST COPY, NOT ANY -- the fourth site of the operator #32's
+            # sixth review round found in the pin proof, and the same argument in a
+            # different discharge. `tu_scope.bind` returns several definitions for `#ifdef`
+            # variants and for C++ overloads; this rule cannot tell which body runs, so
+            # clearing on the first one that copies clears the build, or the overload,
+            # where nothing does. Measured exposure: 4,353 call sites across 33 corpus trees
+            # bind to more than one definition.
+            chains = []
             for callee in tu_scope.bind(tree.by_name[name], fn.path, fn.bstart + s):
                 if callee is fn:
                     continue
                 mapped = _map_carrier(args, base, field, callee)
                 if mapped is None:
                     continue
-                inner = copied_in_callee(callee, callee.bstart, mapped[0], mapped[1],
-                                         tree, depth + 1, seen)
-                if inner:
-                    return "%s() at %s:%d -> %s" % (name, fn.path.name,
-                                                    line_of(fn.src, fn.bstart + s), inner)
+                chains.append(copied_in_callee(callee, callee.bstart, mapped[0],
+                                               mapped[1], tree, depth + 1, seen))
+            if chains and all(chains):
+                return "%s() at %s:%d -> %s" % (name, fn.path.name,
+                                                line_of(fn.src, fn.bstart + s), chains[0])
             # Handed to an in-tree callee that does not copy it. Keep scanning: the callee
             # may only be reading it. The window check below still bounds us.
         if classify_window(name, args):
@@ -2483,6 +2504,44 @@ def DEREF_WRITE_RE(name):
                       % (re.escape(name), re.escape(name)))
 
 
+def _declares_at(body, off):
+    """Is the `*` at `off` a DECLARATOR rather than a dereference?
+
+    `struct wrap **alias = pp;` contains the exact characters of `*alias = pp`, so a bare
+    deref-write pattern reads a pointer-to-pointer DECLARATION as a rebinding of the
+    caller's base -- which turned the address-of control red the moment the fixture declared
+    an alias at all. `tu_scope.DECL_PREFIX` is the file's existing answer to "does this
+    statement lead with a type": everything between the last statement boundary and the `*`
+    may then hold only identifiers, `*`, `&`, commas and brackets.
+    """
+    lead = statement_before(body, off).strip()
+    return bool(lead) and bool(tu_scope.DECL_PREFIX.match(lead)) \
+        and lead.split()[0] not in tu_scope.NOT_DECL_LEAD
+
+
+def _deref_writes(body, name, members=None):
+    """Offsets of genuine writes THROUGH `name` -- `*name =`, `name[0] =`, and with
+    `members`, `(*name)->m =` / `name[0]->m =`. Declarations are excluded."""
+    pats = [DEREF_WRITE_RE(name)] if members is None else \
+        [_deref_member_write_re(name, members)]
+    return [m.start() for pat in pats for m in pat.finditer(body)
+            if not _declares_at(body, m.start())]
+
+
+def _deref_member_write_re(name, members):
+    """`(*name)->m = ...` or `name[0]->m = ... ` -- a member write through the address.
+
+    The other half of what a callee handed `&w` can do. `*pp = other` rebinds the caller's
+    base; `(*pp)->buf = Qnil` rebinds the FIELD of the very object the pin covers, and
+    neither spelling is a member write on `pp` itself, so the ordinary path scan sees
+    neither.
+    """
+    sep = r"\s*(?:->|\.)\s*"
+    head = r"(?:\(\s*\*\s*%s\s*\)|%s\s*\[\s*0\s*\])" % (re.escape(name),
+                                                                 re.escape(name))
+    return re.compile(head + "".join(sep + re.escape(m) for m in members) + r"\s*=(?!=)")
+
+
 def _members(rest):
     """`->z.input` -> ('z', 'input'). The hops of a member path, separator-independent."""
     return tuple(re.findall(r"[A-Za-z_]\w*", rest or ""))
@@ -2571,15 +2630,21 @@ def _no_rebind_below(tree, fn, carriers, members, lo, depth, seen):
                 if i >= len(callee.params) or not callee.params[i][1]:
                     return False
                 pn = callee.params[i][1]
-                # HANDED THE POINTER VARIABLE ITSELF: `*pp = other` and `pp[0] = other`
-                # rebind the caller's base from another frame, and neither is a member
-                # write, so the scan below cannot see them.
-                if addr_of_local and next(
-                        DEREF_WRITE_RE(pn).finditer(callee.body), None):
-                    return False
                 sub = _instance_carriers(callee, pn)
                 if not sub:
                     return False
+                # HANDED THE POINTER VARIABLE ITSELF. `*pp = other` and `pp[0] = other`
+                # rebind the caller's base from another frame; `(*pp)->buf = Qnil` rebinds
+                # the field of the very object the pin covers. Neither is a member write on
+                # `pp`, so the ordinary scan below sees neither -- and BOTH have to be asked
+                # of every ALIAS of the address parameter, because `struct wrap **alias =
+                # pp; *alias = other;` is one copy further out and `_instance_carriers` is
+                # already the closure that answers it.
+                if addr_of_local:
+                    for nm in sub:
+                        if _deref_writes(callee.body, nm) or \
+                                _deref_writes(callee.body, nm, sub_members):
+                            return False
                 for nm in sub:
                     if next(_path_write_re(nm, sub_members).finditer(callee.body), None):
                         return False
@@ -5266,6 +5331,166 @@ def self_test(pool):
           [(t, pf[t].funcs, len(pf[t].derivations), len(pf[t].with_window),
             [h[0] for h in pf[t].hits], sorted(d[0] for d in pf[t].discharges), pf_pin[t])
            for t in sorted(pf_arms)])
+
+    # 8ab. GENERATED REDS AND GREENS: ONE OPERATOR, EVERY SITE IT BELONGS TO. #32's sixth
+    #      review round. Round 5 chose INTERSECTION for variant dtype INITIALISERS; the
+    #      reviewer found the same loop still UNIONING variant DEFINITIONS, and asked whether
+    #      helper calls are a third site. They are, and `copies-in-callee` is a fourth --
+    #      8ac below. All four are fixed here rather than one per round.
+    #
+    #      `tu_scope.bind` returns several candidates for TWO reasons -- `#ifdef` variants of
+    #      one function, and C++ overloads -- and both answer the same way inside a proof:
+    #      the walk cannot tell which body runs, so a key is proven only if EVERY candidate
+    #      proves it. That is the same sentence as "every retained variant must pin", one
+    #      scope down, and there is no reason for the two to differ.
+    #
+    #        defn-varies    one `.dmark = wrap_mark`, two `#ifdef` BODIES   -> STILL A HIT
+    #        defn-both-pin  ...both bodies pinning                          -> DISCHARGES
+    #        helper-varies  `mark_fields(w)` binding to two bodies          -> STILL A HIT
+    #        helper-both    ...both pinning                                 -> DISCHARGES
+    #        addr-alias     `struct wrap **alias = pp; *alias = other;`     -> STILL A HIT
+    #        addr-deref     `(*pp)->buf = Qnil;`                            -> STILL A HIT
+    #        addr-control   an alias that is only READ                      -> DISCHARGES
+    #
+    #      THE ADDRESS-OF ARMS ARE THE OTHER FINDING and needed no new closure: the names a
+    #      `struct wrap **` parameter reaches are `_instance_carriers(callee, pn)`, the same
+    #      rule-4 closure the object hand-off uses, asked of the address parameter instead.
+    #      What was missing is that both DEREF spellings have to be asked of every name in
+    #      it -- `*alias = other` rebinds the caller's base, and `(*pp)->buf = Qnil` rebinds
+    #      the pinned field itself, and neither is a member write on `pp`.
+    #
+    #      `addr-control` is the green that cost a debugging round: `struct wrap **alias =
+    #      pp;` CONTAINS the characters of `*alias = pp`, so the deref pattern read a
+    #      pointer-to-pointer DECLARATION as a rebinding and turned the control red the
+    #      moment the fixture declared an alias at all. `_declares_at` uses
+    #      `tu_scope.DECL_PREFIX`, which is this file family's existing answer to "does this
+    #      statement lead with a type".
+    dv_c = ("#include <ruby.h>\n\n"
+            "struct wrap { VALUE buf; };\n\n"
+            "%s"
+            "static const rb_data_type_t wrap_type = {\n"
+            "    \"wrap\", { wrap_mark, 0, 0, }, 0, 0, RUBY_TYPED_FREE_IMMEDIATELY\n"
+            "};\n\n"
+            "static VALUE\n"
+            "feed(VALUE self)\n"
+            "{\n"
+            "    struct wrap *w;\n"
+            "    const char *p;\n"
+            "    VALUE out;\n"
+            "    TypedData_Get_Struct(self, struct wrap, &wrap_type, w);\n"
+            "    p = RSTRING_PTR(w->buf);\n"
+            "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+            "    out = rb_str_new(p, 4);\n"
+            "    return out;\n"
+            "}\n\n"
+            "void Init_probe(void)\n{\n"
+            "    rb_define_method(rb_cObject, \"f\", feed, 0);\n}\n")
+
+    def _two_defs(sig, first, second):
+        return ("#ifdef HAVE_PINNING\n" + sig % first + "#else\n" + sig % second
+                + "#endif\n\n")
+    cb_sig = ("static void\nwrap_mark(void *p)\n{\n%s}\n")
+    hl_sig = ("static void\nmark_fields(struct wrap *w)\n{\n%s}\n")
+    pin_body = "    struct wrap *w = p;\n    rb_gc_mark(w->buf);\n"
+    hl_pin = "    rb_gc_mark(w->buf);\n"
+    delegate = ("static void\nwrap_mark(void *p)\n{\n"
+                "    struct wrap *w = p;\n    mark_fields(w);\n}\n\n")
+    addr_c = ("#include <ruby.h>\n\n"
+              "struct wrap { VALUE buf; const char *held; };\n\n"
+              "static struct wrap *other;\n\n"
+              "static void\nwrap_mark(void *p)\n{\n"
+              "    struct wrap *w = p;\n    rb_gc_mark(w->buf);\n}\n\n"
+              "static const rb_data_type_t wrap_type = {\n"
+              "    \"wrap\", { wrap_mark, 0, 0, }, 0, 0, RUBY_TYPED_FREE_IMMEDIATELY\n"
+              "};\n\n"
+              "static void\nreplace(struct wrap **pp)\n{\n%s}\n\n"
+              "static VALUE\n"
+              "feed(VALUE self)\n"
+              "{\n"
+              "    struct wrap *w;\n"
+              "    const char *p;\n"
+              "    TypedData_Get_Struct(self, struct wrap, &wrap_type, w);\n"
+              "    p = RSTRING_PTR(w->buf);\n"
+              "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+              "    replace(&w);\n"
+              "    w->held = p;\n"
+              "    return Qnil;\n"
+              "}\n\n"
+              "void Init_probe(void)\n{\n"
+              "    rb_define_method(rb_cObject, \"f\", feed, 0);\n}\n")
+    op_arms = {
+        "defn-varies":   dv_c % _two_defs(cb_sig, pin_body, "    (void)p;\n"),
+        "defn-both-pin": dv_c % _two_defs(cb_sig, pin_body, pin_body),
+        "helper-varies": dv_c % (_two_defs(hl_sig, hl_pin, "    (void)w;\n") + delegate),
+        "helper-both":   dv_c % (_two_defs(hl_sig, hl_pin, hl_pin) + delegate),
+        "addr-alias":    addr_c % "    struct wrap **alias = pp;\n    *alias = other;\n",
+        "addr-deref":    addr_c % "    (*pp)->buf = Qnil;\n",
+        "addr-control":  addr_c % "    struct wrap **alias = pp;\n    (void)alias;\n",
+    }
+    op_root = {t: _synth("fx-op-%s" % t, {"ext/probe.c": c}) for t, c in op_arms.items()}
+    op = {t: _sweep(r) for t, r in op_root.items()}
+    op_pin = {t: sorted(Tree(r).pinned) for t, r in op_root.items()}
+    op_red = ("defn-varies", "helper-varies", "addr-alias", "addr-deref")
+    op_green = ("defn-both-pin", "helper-both", "addr-control")
+    check(all(len(op[t].derivations) == 1 and len(op[t].with_window) == 1 for t in op_arms)
+          and all(len(op[t].hits) == 1 and not op[t].discharges for t in op_red)
+          and all(not op[t].hits
+                  and [d[0] for d in op[t].discharges] == ["pinning-mark"]
+                  for t in op_green)
+          and op_pin["defn-varies"] == [] and op_pin["helper-varies"] == []
+          and op_pin["addr-alias"] == [("wrap", "buf")],
+          "alternate-definition intersection and address-of alias closure: a callback whose "
+          "DEFINITION varies across `#ifdef`, and a helper CALL binding to two bodies, both "
+          "prove nothing -- the same operator round 5 applied to variant initialisers, at "
+          "the two sites that still unioned. And a callee handed `&w` rebinds through every "
+          "ALIAS of the address parameter and through `(*pp)->field`, neither of which is a "
+          "member write on `pp`; an alias that is only read still discharges",
+          [(t, len(op[t].hits), sorted(d[0] for d in op[t].discharges), op_pin[t])
+           for t in sorted(op_arms)])
+
+    # 8ac. ...AND THE FOURTH SITE, IN A DIFFERENT DISCHARGE. `copies-in-callee` returned on
+    #      the FIRST bound definition that copies, so a build whose `#else` body keeps the
+    #      pointer instead was cleared by the one that copies. Same operator, same argument,
+    #      and it is fixed in the same commit rather than left for a seventh round to name.
+    #
+    #      ASSERTED ON THE RULE NAME, NOT ON THE HIT, and the reason is worth recording: with
+    #      the copy gone the row falls to `no-window` -- an EARLIER and independently sound
+    #      rule -- so both arms come back with zero hits and only the named rule differs.
+    #      Adding an escape to force a hit does not work either: `carrier_copy_chain` takes
+    #      the escape set and declines an escaping row, so the control stops clearing too.
+    #      A check that can only see hits would read this as "nothing to test".
+    cic_c = ("#include <ruby.h>\n\n"
+             "static char dst[64];\n"
+             "static const char *keep;\n\n"
+             "%s"
+             "static VALUE\n"
+             "feed(VALUE self, VALUE str)\n"
+             "{\n"
+             "    const char *p;\n"
+             "    Check_Type(str, T_STRING);\n"
+             "    p = RSTRING_PTR(str);\n"
+             "    take(p);\n"
+             "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+             "    return Qnil;\n"
+             "}\n\n"
+             "void Init_probe(void)\n{\n"
+             "    rb_define_method(rb_cObject, \"f\", feed, 1);\n}\n")
+    take_sig = "static void\ntake(const char *s)\n{\n%s}\n"
+    cic_arms = {
+        "copy-varies": _two_defs(take_sig, "    memcpy(dst, s, 4);\n", "    keep = s;\n"),
+        "copy-both":   _two_defs(take_sig, "    memcpy(dst, s, 4);\n",
+                                 "    memcpy(dst, s, 4);\n"),
+    }
+    cic = {t: _sweep(_synth("fx-cic-%s" % t, {"ext/probe.c": cic_c % a}))
+           for t, a in cic_arms.items()}
+    check(all(len(cic[t].derivations) == 1 for t in cic_arms)
+          and "copies-in-callee" not in [d[0] for d in cic["copy-varies"].discharges]
+          and [d[0] for d in cic["copy-both"].discharges] == ["copies-in-callee"],
+          "copies-in-callee intersects alternate definitions too: a callee whose `#else` "
+          "body KEEPS the pointer instead of copying it must not be cleared by the body "
+          "that copies. Asserted on the rule NAME because the unproven row then falls to "
+          "`no-window`, an earlier and sound rule, so both arms show zero hits",
+          [(t, sorted(d[0] for d in cic[t].discharges)) for t in sorted(cic_arms)])
 
     # 8l/8m. GENERATED RED: A BARE STORE INTO STATIC STORAGE IS AN ESCAPE.
     #
