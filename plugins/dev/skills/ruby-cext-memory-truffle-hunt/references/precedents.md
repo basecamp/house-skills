@@ -720,6 +720,43 @@ dead-`#else`-arm subtraction above working; gating `movable` on the same test wo
 round-10 over-clear out of the round-11 fix. A corpus-neutral tightening is exactly the one a green
 suite cannot tell from no tightening, so both ship with generated reds and five mutation modes.
 
+### A tightened rule gets reviewed against its new surface, and three more shapes came back
+
+The second review pass on the same PR found three, all of them ways the *fixed* rule still clears
+what it should not. None moves a corpus row — the fixtures are the entire evidence — and two of the
+three are the previous fix being routed around rather than new territory.
+
+**The condition can live on the call edge.** `if (w->pins) mark_fields(w);` where `mark_fields`
+itself does an unconditional `rb_gc_mark(w->buf)`. The per-body test looks inside the helper, sees
+depth zero, and says unconditional — so the conditional-pin fix is bypassed one scope out. A closure
+that answers "can a mark callback reach this function" is the wrong closure; it has to answer "is
+this function reached on **every** execution", which is reachability propagated along edges. The
+same three tu_scope rules apply, now to the edge instead of to the call, which is the evidence that
+reusing them was right rather than inventing a fourth opinion about "conditional".
+
+**Gate `pinned`, never the closure.** The one-line-shorter version drops conditionally-reached
+helpers from the closure entirely — and then a *movable* mark behind a conditional edge is gone from
+`movable` too, the per-key subtraction stops firing, and a sibling unconditional `rb_gc_mark` on the
+same field answers for it. That is the round-10 over-clear rebuilt out of the round-11 fix, so the
+closure returns two sets.
+
+**A rebound name stops denoting what the rule looked it up under.** Two spellings, one mechanism,
+both a write *after* the derivation:
+
+| | | breaks |
+|---|---|---|
+| `p = RSTRING_PTR(w->buf); w->buf = other;` | the **member path** | the pin — the dmark marks what the field *holds*, so it now pins the replacement while `p` points at the original |
+| `p = RSTRING_PTR(w->buf); w = other; w->held = p;` | the **base** | the destination test, whose base comparison is textual — the same characters now name a different object, which can outlive the one holding the String |
+
+The pin claim survives the second (every `struct wrap` has `buf` pinned), which is exactly why one
+leg does not cover the other. **The shape is in the corpus four times** — json's
+`cResumableParser_feed` rebinds `parser->buffer` four lines after deriving from it, and
+`zstream_discard_input` sets `z->input = Qnil` ten lines on, in all three zlib trees. All four are
+*safe*, and safe for a reason this rule cannot see: the pointer is fully consumed by
+`memcpy`/`memmove` first, so `copies-in-callee` — which runs **ahead** of `pinning-mark` — has
+already cleared them. The discharge order is doing real work, and that is an argument for the order
+rather than for a weaker rebinding test.
+
 ### Coverage is not row count
 
 The C++ `namespace` / `extern "C"` brace dispositions, ported from predicate C into B and D, moved

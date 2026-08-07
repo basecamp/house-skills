@@ -201,11 +201,14 @@ a trailing write to the source mistaken for a use of it; a `dmark` that marks th
 derivation's own field with the MOVABLE mark instead of the pinning one -- the corpus has
 no such tree, which is precisely why the discharge that reads that token was deferred for
 two rounds rather than shipped against a green corpus; a pointer PINNED by that dmark and
-then stored somewhere the WRAPPER does not own, which is the pin outliving nothing; and a
+then stored somewhere the WRAPPER does not own, which is the pin outliving nothing; a
 pinning call that runs only on one arm of an `if`, which is a pin on some executions and a
-dangling `char *` on the rest. The last two are #32's review findings and both are
-corpus-neutral in the direction that matters -- one moves two rows, the other moves none.
-Each pins
+dangling `char *` on the rest; the same condition moved onto the CALL EDGE of an
+unconditional mark helper, which is that fix routed around one scope out; and a source
+field or destination base REBOUND after the derivation, where the name the discharge looked
+up no longer denotes what it looked up. Those last four are #32's five review findings and
+every one of them is corpus-neutral except the escape rule, which moves two rows -- so the
+generated reds are the entire evidence that four of the five fixes happened at all. Each pins
 the FUNNEL COUNTERS and not only the hit count -- an untracked pointer and an empty index
 both end in `hit 0`, and they are different failures. The three that narrow a DISCHARGE ship
 with a green as well: a rule that stops clearing has to be shown still clearing the case it
@@ -1168,11 +1171,11 @@ class Tree:
         # loops above build. See the pinning-mark section: `structs` is the join, `pinned`
         # and `movable` are what the join is asked about.
         self.structs = struct_index(self.files)
-        self.mark_fns = self._index_mark_fns()
+        self.mark_fns, self.pin_reachable = self._index_mark_fns()
         self.pinned, self.movable = self._index_pins()
 
     def _index_mark_fns(self):
-        """Every function a mark callback can reach, registration first then callees.
+        """(every function a mark callback reaches, ids of those reached UNCONDITIONALLY).
 
         THE CLOSURE IS NOT DECORATION. zlib's `zstream_mark` is registered directly, but
         `gzfile_mark` reaches the same fields a second way -- `zstream_mark(&gz->z)` -- and
@@ -1181,21 +1184,58 @@ class Tree:
         at the registered function would make the discharge fire on whichever gems happen
         not to use it. Bound through tu_scope.bind, so a call in b.c does not reach a.c's
         `static` mark helper of the same name.
+
+        TWO REACHABILITIES, NOT ONE, AND THE SECOND ONE IS #32's THIRD REVIEW FINDING. The
+        closure used to answer a single question -- can a mark callback reach this function
+        -- and `unconditional_mark` then asked whether each mark call is conditional
+        *inside its own body*. That routes around the conditional-pin fix one level up:
+
+            static void mark_fields(struct wrap *w) { rb_gc_mark(w->buf); }
+            static void wrap_mark(void *p) {
+                struct wrap *w = p;
+                if (w->pins) mark_fields(w);      /* the condition lives HERE */
+            }
+
+        `rb_gc_mark(w->buf)` is at depth zero in `mark_fields`, so the body test says
+        unconditional and the row cleared on the `!w->pins` path exactly as before. The
+        condition is a property of the CALL EDGE, and an edge is not somewhere a per-body
+        test can look.
+
+        So `uncond` is propagated along the edges: a registered callback is entered
+        unconditionally by the GC, and a callee inherits that only across a call the SAME
+        test would accept in the caller. One conditional edge anywhere on the path is
+        enough to drop it -- `pinned` wants an unconditional path, not an unconditional
+        function, and a function reachable both ways keeps the stronger answer.
+
+        BOTH SETS ARE RETURNED BECAUSE `movable` MUST NOT BE GATED. Narrowing the whole
+        closure would have been the smaller edit and it rebuilds the round-10 over-clear:
+        a movable mark reached only through `if (c) helper(w)` would fall out of `movable`,
+        the subtraction in `_index_pins` would stop firing, and a surviving unconditional
+        pin on the same key would answer for it. A hazard on one path is still a hazard.
         """
-        frontier, seen, out = [], set(), []
+        frontier, seen, out, uncond = [], set(), [], set()
         for path, src in self.files.items():
             for name, off in mark_callbacks(src):
-                frontier += tu_scope.bind(self.by_name.get(name, ()), path, off)
+                frontier += [(fn, True) for fn in
+                             tu_scope.bind(self.by_name.get(name, ()), path, off)]
         while frontier:
-            fn = frontier.pop()
-            if id(fn) in seen:
+            fn, u = frontier.pop()
+            # Revisit only to UPGRADE a function to unconditional reachability; `uncond`
+            # only ever grows, so this terminates.
+            if id(fn) in seen and not (u and id(fn) not in uncond):
                 continue
-            seen.add(id(fn))
-            out.append(fn)
+            if id(fn) not in seen:
+                seen.add(id(fn))
+                out.append(fn)
+            if u:
+                uncond.add(id(fn))
+            blks = tu_scope.blocks(fn.body)
             for cname, _a, s, _e in find_calls(fn.body):
-                frontier += tu_scope.bind(self.by_name.get(cname, ()), fn.path,
-                                          fn.bstart + s)
-        return out
+                edge = u and unconditional_mark(fn.body, s, blks)
+                frontier += [(c, edge) for c in
+                             tu_scope.bind(self.by_name.get(cname, ()), fn.path,
+                                           fn.bstart + s)]
+        return out, uncond
 
     def _index_pins(self):
         """({(type, field): where}, {(type, field): where}) -- pinned, then movable.
@@ -1214,17 +1254,25 @@ class Tree:
         recording it unconditionally is what keeps the subtraction above from letting an
         unconditional `rb_gc_mark` answer for a conditional `rb_gc_mark_movable` on the same
         field. Both dispositions push the same way -- fewer keys in `pinned`.
+
+        THE GATE IS NOW TWO TESTS AND BOTH ARE THE SAME QUESTION at different scales: is
+        this call reached on EVERY execution of the registered callback. `pin_reachable`
+        answers it for the path of call edges that got here (#32's third finding -- a
+        conditional call to an unconditional helper), `unconditional_mark` answers it for
+        the position of the call inside this body. Either one failing drops the pin.
         """
         pinned, movable = {}, {}
         for fn in self.mark_fns:
             vt = var_types(fn)
             rel = str(fn.path.relative_to(self.root))
             blks = tu_scope.blocks(fn.body)
+            reached = id(fn) in self.pin_reachable
             for name, args, s, _e in find_calls(fn.body):
                 kind = prim_kind(name)
                 if kind is None:
                     continue
-                if kind == "pin" and not unconditional_mark(fn.body, s, blks):
+                if kind == "pin" and not (reached
+                                          and unconditional_mark(fn.body, s, blks)):
                     continue
                 for a in args:
                     key = member_key(self.structs, vt, a.strip())
@@ -2205,6 +2253,66 @@ OWNED_DEST = re.compile(
     r"([A-Za-z_]\w*)\s*->\s*[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*\Z")
 
 
+def _path_write(expr):
+    """A regex matching an assignment to the whole member path `expr` spells.
+
+    `gz->z.input` -> `gz\\s*->\\s*z\\s*\\.\\s*input\\s*=(?!=)`. The separators are kept from
+    the split so the two hops cannot be confused with each other, and the same lookbehind
+    tu_scope.writes carries excludes a LONGER path ending in this one: `x->w->buf = p` is a
+    write to some other object's `buf` and must not read as a write to `w->buf`.
+    """
+    parts = re.split(r"\s*(->|\.)\s*", expr.strip())
+    return re.compile(r"(?<![=!<>+\-*/%&|^.:])\b"
+                      + r"\s*".join(re.escape(p) for p in parts) + r"\s*=(?!=)")
+
+
+def pin_source_stable(fn, deriv_off, expr):
+    """Does `expr` still denote, after the derivation, what it denoted at it?
+
+    #32's FIRST AND SECOND REVIEW FINDINGS, and they are ONE MECHANISM SPELLED TWICE. Both
+    reviewer cases are a write, after the derivation, to a name the discharge's reasoning
+    depends on -- and the discharge reads that name at two different moments, so there are
+    two spellings and one rule:
+
+        p = RSTRING_PTR(w->buf);  w->buf = other;   /* the MEMBER PATH is rebound */
+        p = RSTRING_PTR(w->buf);  w = other;  w->held = p;   /* the BASE is rebound */
+
+    THE MEMBER-PATH LEG breaks the pin itself. `pinning_mark` joins on `(type, field)` and
+    the dmark marks whatever the field HOLDS at collection time -- so after `w->buf = other`
+    the mark pins the REPLACEMENT, and the String `p` points into is referenced by nothing.
+    A plain use-after-free, and the row does not need an escape to have it: the reviewer's
+    case is `HELD-ACROSS-WINDOW`.
+
+    THE BASE LEG breaks `escape_stays_inside`, which compares the destination's base
+    IDENTIFIER against the derivation's. That comparison is textual, and after `w = other`
+    the same six characters name a different object. The pin claim survives -- every
+    `struct wrap` has `buf` pinned, so the SOURCE String is still fine -- but the argument
+    that made the escape safe does not: `w->held = p` now stores into W2 while the String
+    lives in W1, W2 outlives W1, W1 is collected, and the pointer dangles. The destination
+    has to be inside the object whose lifetime bounds the pointer, not inside any object of
+    the same TYPE.
+
+    ANY WRITE AFTER THE DERIVATION COUNTS, on any path, and that is deliberate. This is the
+    file's stated ORDERING blind spot -- no CFG -- and everywhere else in this file it is
+    accepted in the direction that keeps a row. Here it is accepted in the direction that
+    keeps a row too, because for THIS rule an unrecognised rebinding CLEARS one. A write on
+    a branch the derivation cannot reach costs recall; a write missed costs a use-after-free
+    reported clean. The other rules' polarity argument, applied to the rule that inverts it.
+
+    THE BASE LEG FIRES EVEN WITH NO ESCAPE ON THE ROW, where strictly only the member-path
+    leg is load-bearing. Measured cost over the 99 trees: zero. Keeping it unconditional is
+    a rule with one clause rather than two, in the round whose whole subject is this
+    discharge firing where it should not.
+    """
+    rel = deriv_off - fn.bstart
+    m = MEMBER_PATH.fullmatch(expr)
+    if m is None:
+        return True
+    later = [o for o in tu_scope.writes(fn.body, m.group(1)) if o > rel]
+    later += [w.start() for w in _path_write(expr).finditer(fn.body) if w.start() > rel]
+    return not later
+
+
 def escape_stays_inside(base, kind, text):
     """Is this escape a store into the very object `base` points at?
 
@@ -2224,7 +2332,7 @@ def escape_stays_inside(base, kind, text):
     return bool(m) and m.group(1) == base
 
 
-def pinning_mark(tree, fn, expr, esc=()):
+def pinning_mark(tree, fn, expr, deriv_off, esc=()):
     """Where the owning type's dmark PINS this derivation's source String, or None.
 
     The one discharge in this file that is a fact about another function entirely, and the
@@ -2304,6 +2412,8 @@ def pinning_mark(tree, fn, expr, esc=()):
         return None
     where = tree.pinned.get(key)
     if where is None:
+        return None
+    if not pin_source_stable(fn, deriv_off, expr):
         return None
     base = MEMBER_PATH.fullmatch(expr).group(1)
     if any(not escape_stays_inside(base, kind, text) for kind, _o, text, _x in esc):
@@ -2512,7 +2622,7 @@ def sweep(tree, name, disabled=(), discharge=True):
             # the two reads as a clean sheet. The other five rules take no escape argument
             # because none of them may fire on an escaping row at all.
             pin = None if "pinning-mark" in off_rule \
-                else pinning_mark(tree, fn, expr, esc)
+                else pinning_mark(tree, fn, expr, off, esc)
             if pin:
                 r.discharges.append(("pinning-mark", rel, line_of(fn.src, off),
                                      "%s(%s) in %s -- pinned by %s"
@@ -2939,10 +3049,33 @@ NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-"]
 #
 # THE CONDITIONAL-MARK TIGHTENING (P2) MOVES NOTHING HERE, and that is measured rather than
 # assumed: forcing `escape_stays_inside` to True with `unconditional_mark` still in place
-# reproduces round 10's output byte for byte over all 99 trees. It drops 33 of 151 (type,
+# reproduces round 10's output byte for byte over all 99 trees. It drops 33 of 148 (type,
 # field) pin keys and not one of them is a key a discharged row joins on. A corpus-neutral
 # tightening is precisely the one a green suite cannot tell from no tightening at all, which
 # is what 8u is for.
+#
+# ROUND 11, SECOND REVIEW PASS: THREE MORE OVER-CLEARS IN THE SAME DISCHARGE, AND THE CORPUS
+# DOES NOT MOVE AT ALL -- 414 -> 414, 0 added, 0 removed, 0 columns changed, every discharge
+# rule's count identical including `pinning-mark` at 45. Stated as the headline rather than
+# buried, because it is the whole reason 8v and 8w exist: with the corpus flat, the fixtures
+# are the ONLY evidence any of these three fixes happened.
+#
+#   the call edge     `if (c) helper(w)` where `helper` marks unconditionally. 18 mark
+#                       functions across the 99 trees are NOT unconditionally reachable, and
+#                       gating them costs zero pin keys -- every key they carry is reached a
+#                       second way, unconditionally. So the corpus cannot distinguish the
+#                       fixed rule from the broken one, and 8w is the entire test.
+#   the rebound path  `w->buf = other` after deriving from `w->buf`. FOUR corpus instances,
+#                       and this is the one place the round has something real to point at:
+#                       json parser.c:2393 (`parser->buffer = new_buffer` four lines on) and
+#                       zlib's `zstream_discard_input` in all three trees (`z->input = Qnil`
+#                       ten lines on). All four are SAFE and all four were ALREADY cleared,
+#                       by `copies-in-callee`, because the pointer is consumed by
+#                       memcpy/memmove before the rebinding. That rule runs ahead of this one,
+#                       so the verdicts never depended on the broken test.
+#   the rebound base  `w = other` before `w->held = p`. ZERO corpus instances. Measured, not
+#                       assumed: the base leg alone declines 0 of the pinned-key derivations
+#                       in the 99 trees, which is why keeping it unconditional costs nothing.
 TRIAGED = {"mysql2-0.5.6": 14, "zlib-basecamp-patch-": 7, "iconv-": 15, "zstd-": 6,
            "sqlite3-2.9.5": 3, "websocket-driver-": 2, "stringio-": 1,
            "msgpack-1.8.4": 3, "msgpack-1.8.3": 3, "json-": 2, "puma-": 6,
@@ -4016,6 +4149,201 @@ def self_test(pool):
           [(t, cn[t].funcs, len(cn[t].derivations), len(cn[t].with_window),
             [h[0] for h in cn[t].hits], sorted(d[0] for d in cn[t].discharges))
            for t in sorted(cond_arms)])
+
+    # 8v. GENERATED REDS AND GREENS: A NAME THAT IS REBOUND STOPS DENOTING WHAT THE
+    #     DISCHARGE LOOKED IT UP UNDER. #32's first and second review findings, and they
+    #     are ONE mechanism -- a write, after the derivation, to a name the clearance
+    #     depends on -- which is why this is one fixture and one function and not two.
+    #
+    #       stable       nothing rebound                        -> DISCHARGES
+    #       field        `w->buf = other;`                      -> STILL A HIT  (path leg)
+    #       base         `w = twin;` before `w->held = p`       -> STILL A HIT  (base leg)
+    #       other-field  `w->spare = other;`                    -> DISCHARGES
+    #       longer-path  `h->w->buf = other;`                   -> DISCHARGES
+    #
+    #     THE TWO LEGS FAIL DIFFERENT HALVES OF THE ARGUMENT AND BOTH ARE NEEDED. `field`
+    #     breaks the PIN: the join is `(type, field)` and the dmark marks whatever the field
+    #     HOLDS, so after the rebinding it pins the replacement and the String `p` points
+    #     into is referenced by nothing. It needs no escape -- the arm is a hit whether or
+    #     not the row escapes. `base` breaks `escape_stays_inside`, whose base comparison is
+    #     TEXTUAL: after `w = twin` the same six characters name a different object, so
+    #     `w->held = p` stores into an object that can outlive the one holding the String.
+    #     The pin claim itself survives there -- every `struct wrap` has `buf` pinned -- and
+    #     that is exactly why the base leg is not covered by the path leg.
+    #
+    #     THE TWO GREENS ARE THE REGEX ASSERTED IN THE DIRECTION THAT COSTS ROWS.
+    #     `other-field` is a rebinding of a DIFFERENT member of the same struct, which must
+    #     not count, or the rule degenerates into "any write to any member of the base".
+    #     `longer-path` is `h->w->buf = other` -- a write to a longer path ENDING in the
+    #     same three tokens, which is a different object's `buf`; without the lookbehind
+    #     _path_write carries it would read as a write to `w->buf` and clear nothing that
+    #     should be cleared. Both are the "narrowed, not deleted" halves this file requires
+    #     of any rule that stops discharging.
+    #
+    #     THE SHAPE IS IN THE CORPUS FOUR TIMES and none of the four moves a verdict, which
+    #     is worth stating precisely because it is the reason the corpus is flat: json's
+    #     `cResumableParser_feed` (parser.c:2393, `parser->buffer = new_buffer` four lines
+    #     on) and `zstream_discard_input` in all three zlib trees (`z->input = Qnil` ten
+    #     lines on) both really do rebind the field they derived from. Both are SAFE, for a
+    #     reason this rule cannot see and an earlier one can: the pointer is fully consumed
+    #     by `memcpy`/`memmove` before the rebinding, so `copies-in-callee` -- which runs
+    #     ahead of `pinning-mark` -- has already cleared all four. The ordering is doing the
+    #     work, and that is an argument for the order, not for a weaker rebinding test.
+    reb_c = ("#include <ruby.h>\n\n"
+             "struct wrap { VALUE buf; VALUE spare; const char *held; };\n"
+             "struct holder { struct wrap *w; };\n\n"
+             "static void\n"
+             "wrap_mark(void *p)\n"
+             "{\n"
+             "    struct wrap *w = p;\n"
+             "    rb_gc_mark(w->buf);\n"
+             "    rb_gc_mark(w->spare);\n"
+             "}\n\n"
+             "static const rb_data_type_t wrap_type = {\n"
+             "    \"wrap\",\n"
+             "    { wrap_mark, 0, 0, },\n"
+             "    0, 0, RUBY_TYPED_FREE_IMMEDIATELY\n"
+             "};\n\n"
+             "static VALUE\n"
+             "feed(VALUE self, VALUE peer, VALUE other, struct holder *h)\n"
+             "{\n"
+             "    struct wrap *w;\n"
+             "    struct wrap *twin;\n"
+             "    const char *p;\n"
+             "    TypedData_Get_Struct(self, struct wrap, &wrap_type, w);\n"
+             "    TypedData_Get_Struct(peer, struct wrap, &wrap_type, twin);\n"
+             "    p = RSTRING_PTR(w->buf);\n"
+             "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+             "%s"
+             "    w->held = p;\n"
+             "    return Qnil;\n"
+             "}\n\n"
+             "void Init_probe(void)\n"
+             "{\n"
+             "    rb_define_method(rb_cObject, \"f\", feed, 0);\n"
+             "}\n")
+    reb_arms = {
+        "stable":      "",
+        "field":       "    w->buf = other;\n",
+        "base":        "    w = twin;\n",
+        "other-field": "    w->spare = other;\n",
+        "longer-path": "    h->w->buf = other;\n",
+    }
+
+    def _reb_arm(tag, arm):
+        root = _synth("fx-reb-%s" % tag, {"ext/probe.c": reb_c % arm})
+        return _sweep(root), _hits(root, disabled=("pinning-mark",))
+    rb = {t: _reb_arm(t, a) for t, a in reb_arms.items()}
+    reb_green, reb_red = ("stable", "other-field", "longer-path"), ("field", "base")
+    check(all((rb[t][0].funcs, len(rb[t][0].derivations), len(rb[t][0].with_window))
+              == (3, 1, 1) and rb[t][1] for t in reb_arms)
+          and all(not rb[t][0].hits
+                  and [d[0] for d in rb[t][0].discharges] == ["pinning-mark"]
+                  for t in reb_green)
+          and all(len(rb[t][0].hits) == 1 and not rb[t][0].discharges for t in reb_red),
+          "pin-rebinding red/green: rebinding the SOURCE MEMBER PATH leaves the row standing "
+          "-- the dmark then pins the replacement -- and so does rebinding the destination "
+          "base local, whose name the escape test compares textually. Rebinding a DIFFERENT "
+          "field, and a write to a longer path ending in the same tokens, both still "
+          "discharge: the rule is one write to one name, not any write to anything nearby",
+          [(t, rb[t][0].funcs, len(rb[t][0].derivations), len(rb[t][0].with_window),
+            [h[0] for h in rb[t][0].hits], sorted(d[0] for d in rb[t][0].discharges),
+            [h[0] for h in rb[t][1]])
+           for t in sorted(reb_arms)])
+
+    # 8w. GENERATED REDS AND GREEN: THE CONDITION CAN LIVE ON THE CALL EDGE. #32's third
+    #     review finding, and it is the P2 fix being routed around one level up: the closure
+    #     indexed `mark_fields` without keeping the CALL-SITE condition, so
+    #     `unconditional_mark` looked inside the helper, found `rb_gc_mark(w->buf)` at depth
+    #     zero, and cleared the row on the `!w->pins` path exactly as before the fix.
+    #
+    #       uncond-call   `mark_fields(w);`                        -> DISCHARGES
+    #       cond-call     `if (w->pins) mark_fields(w);`           -> STILL A HIT
+    #       braced-call   `if (w->pins) { mark_fields(w); }`       -> STILL A HIT
+    #       return-call   `if (!w->pins) return;` then the call    -> STILL A HIT
+    #       movable-edge  an unconditional PIN plus a CONDITIONAL
+    #                     call to a movable helper                 -> STILL A HIT
+    #
+    #     The three conditional spellings are 8u's three all over again, one scope out --
+    #     the same three tu_scope rules now applied to the EDGE rather than to the call --
+    #     which is the evidence that `unconditional_mark` was the right function to reuse
+    #     rather than a fourth opinion about what "conditional" means.
+    #
+    #     `movable-edge` IS THE LOAD-BEARING ARM AND IT GUARDS THE SMALLER EDIT. Narrowing
+    #     the whole closure to unconditional edges is one line shorter and it rebuilds the
+    #     round-10 over-clear: `move_fields` would leave `mark_fns` entirely, `movable`
+    #     would lose `(wrap, buf)`, the subtraction in `_index_pins` would stop firing, and
+    #     the unconditional `rb_gc_mark(w->buf)` in the same dmark would answer for it. So
+    #     the closure returns BOTH sets and only `pinned` is gated. Measured on this arm:
+    #     `pinned` empty, `movable` holds the key, `pin_reachable` holds `wrap_mark` alone.
+    edge_c = ("#include <ruby.h>\n\n"
+              "struct wrap { VALUE buf; int pins; };\n\n"
+              "static void\n"
+              "mark_fields(struct wrap *w)\n"
+              "{\n"
+              "    rb_gc_mark(w->buf);\n"
+              "}\n\n"
+              "static void\n"
+              "move_fields(struct wrap *w)\n"
+              "{\n"
+              "    rb_gc_mark_movable(w->buf);\n"
+              "}\n\n"
+              "static void\n"
+              "wrap_mark(void *p)\n"
+              "{\n"
+              "    struct wrap *w = p;\n"
+              "%s"
+              "}\n\n"
+              "static const rb_data_type_t wrap_type = {\n"
+              "    \"wrap\",\n"
+              "    { wrap_mark, 0, 0, },\n"
+              "    0, 0, RUBY_TYPED_FREE_IMMEDIATELY\n"
+              "};\n\n"
+              "static VALUE\n"
+              "feed(VALUE self)\n"
+              "{\n"
+              "    struct wrap *w;\n"
+              "    const char *p;\n"
+              "    VALUE out;\n"
+              "    TypedData_Get_Struct(self, struct wrap, &wrap_type, w);\n"
+              "    p = RSTRING_PTR(w->buf);\n"
+              "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+              "    out = rb_str_new(p, 4);\n"
+              "    return out;\n"
+              "}\n\n"
+              "void Init_probe(void)\n"
+              "{\n"
+              "    rb_define_method(rb_cObject, \"f\", feed, 0);\n"
+              "}\n")
+    edge_arms = {
+        "uncond-call":  "    mark_fields(w);\n",
+        "cond-call":    "    if (w->pins) mark_fields(w);\n",
+        "braced-call":  "    if (w->pins) {\n        mark_fields(w);\n    }\n",
+        "return-call":  "    if (!w->pins) return;\n    mark_fields(w);\n",
+        "movable-edge": "    rb_gc_mark(w->buf);\n"
+                        "    if (w->pins) move_fields(w);\n",
+    }
+    eg = {t: _synth("fx-edge-%s" % t, {"ext/probe.c": edge_c % a})
+          for t, a in edge_arms.items()}
+    es = {t: _sweep(r) for t, r in eg.items()}
+    edge_red = ("cond-call", "braced-call", "return-call", "movable-edge")
+    mv = Tree(eg["movable-edge"])
+    check(all((es[t].funcs, len(es[t].derivations), len(es[t].with_window)) == (5, 1, 1)
+              for t in edge_arms)
+          and not es["uncond-call"].hits
+          and [d[0] for d in es["uncond-call"].discharges] == ["pinning-mark"]
+          and all(len(es[t].hits) == 1 and not es[t].discharges for t in edge_red)
+          and not mv.pinned and ("wrap", "buf") in mv.movable,
+          "conditional-EDGE red/green: a pin reached only through `if (c) helper(w)` does "
+          "not clear, in all three spellings of the condition, although the helper's own "
+          "body is unconditional -- the closure carries reachability, not just membership. "
+          "And a CONDITIONAL edge to a MOVABLE helper still registers the hazard: gating "
+          "the whole closure instead of just `pinned` would drop it from `movable` and let "
+          "the sibling unconditional pin answer for it",
+          [(t, es[t].funcs, len(es[t].derivations), len(es[t].with_window),
+            [h[0] for h in es[t].hits], sorted(d[0] for d in es[t].discharges))
+           for t in sorted(edge_arms)]
+          + [("movable-edge index", sorted(mv.pinned), sorted(mv.movable))])
 
     # 8l/8m. GENERATED RED: A BARE STORE INTO STATIC STORAGE IS AN ESCAPE.
     #

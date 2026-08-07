@@ -373,7 +373,17 @@ round-10 build and both now carrying generated reds:
   qualify, not any.
 - **A pin that runs only sometimes is not a pin.** `if (w->pins) rb_gc_mark(w->buf);` marks
   nothing on the other path. Braceless arms, braced arms and early returns are three
-  different shapes and each is one the other two read as unconditional.
+  different shapes and each is one the other two read as unconditional. **The condition can
+  also live on the call edge** — `if (w->pins) mark_fields(w);` where the helper's own body
+  is unconditional — so reachability has to be propagated along edges, not just membership
+  in a closure. Gate `pinned` only: a *movable* mark reached conditionally is still a
+  hazard, and dropping it from the closure lets a sibling unconditional pin answer for it.
+- **A name that is rebound stops denoting what the pin was looked up under.** Two spellings,
+  one mechanism, both a write *after* the derivation: `w->buf = other` makes the dmark pin
+  the replacement while the pointer keeps pointing at the original; `w = other` before
+  `w->held = p` makes the destination a different object of the same type, which can outlive
+  the one holding the String. The first breaks the pin, the second breaks the
+  destination-is-inside argument, and neither is covered by the other.
 
 ---
 
@@ -495,8 +505,8 @@ existing suspects, and `REGISTERED` is a **downgrade, not a clear**, because reg
 per-slot: round 4 measured stackprof's registered `empty_string` pinned while its unregistered
 sibling `objtracer` was not.
 
-**Run `--self-test` before trusting any silence** — A is 60/60 (1 skipped), B 34/34, C 73/73,
-D 61/61. Read the count, not the word: **nineteen** of those checks arrived with #29's five
+**Run `--self-test` before trusting any silence** — A is 60/60 (1 skipped), B 35/35, C 73/73,
+D 63/63. Read the count, not the word: **nineteen** of those checks arrived with #29's five
 follow-ups, and only one of the five moved a corpus row in the end. Four of them are pure
 over-clears — a merged slot, a deduped slot, an unindexed declaration — and every one of those
 reads as a clean sheet, so the self-test count is the only place the fix is visible at all.
