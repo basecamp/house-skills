@@ -1,0 +1,21 @@
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/sweep_escaped_conversion.py
+  s_7f3f0e6f0e91af::t_9982bf0b58f5e9 1775-1780,1784,1786-1789,1791-1795
+plugins/dev/skills/ruby-cext-memory-truffle-hunt/references/tu_scope.py
+  s_7f3f0e6f0e91af::t_9982bf0b58f5e9 689-693,695-701,706,708-715
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "7c1ec087f54e1596d3ed6157debd57b8f0915701",
+  "prompts": {},
+  "sessions": {
+    "s_7f3f0e6f0e91af": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c8e61efb-34f6-40cd-a60f-e0a4ef99e3b4",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
