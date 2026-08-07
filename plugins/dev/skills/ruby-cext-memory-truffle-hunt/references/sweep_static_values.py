@@ -659,6 +659,9 @@ TYPE_KW = {"const", "volatile", "register", "struct", "union", "enum", "unsigned
 # Storage/type qualifiers that may sit between `static` and `VALUE` in a function-local
 # declaration -- `static volatile VALUE cache;` is one slot, not zero.
 LOCAL_QUAL = r"(?:(?:const|volatile|_Atomic|register|thread_local|_Thread_local|__thread)\s+)*"
+# The storage-class specifiers that give a BLOCK-scope declaration a lifetime longer than
+# its call. `thread_local` alone is one of them -- see the fourth note in _index_slots.
+STATIC_DURATION = r"(?:static|thread_local|_Thread_local|__thread)"
 
 
 def unwrap(expr):
@@ -781,10 +784,23 @@ class Tree:
         self.pasted = self._expand_pastes()
         self.all = "\n".join(self.files.values()) + "\n" + self.pasted
         self.structs = {}        # struct/union name -> body text
+        self.structs_local = {}  # (path, name) -> body, for internal linkage
+        # `aliases` and `objects` below are STILL KEYED BARE, and that is a recall limit
+        # rather than a decision that they are safe. The #30 review raised the whole family;
+        # only `structs` reproduced a wrong verdict (two TUs, one anonymous-namespace type
+        # each, differing members -- b.cc's slot took a.cc's body, member name and file, and
+        # lost its own registration). A typedef or an object name colliding the same way is
+        # the same argument and wants the same treatment; it is unfixed here because it has
+        # no red, and widening shared keying without one is how the over-clears on this
+        # branch happened.
         self.aliases = {}        # typedef name -> underlying name
         self.dtypes = {}         # rb_data_type_t name -> initialiser body
         self.funcs = {}          # in-tree function name -> body text
         self.func_spans = {}     # path -> [(body start, body end)] for top-level functions
+        # path -> anonymous-namespace body spans. Internal linkage with no `static` on the
+        # declaration; see _unit_slots.
+        self.anon = {p: tu_scope.anonymous_namespace_spans(t)
+                     for p, t in self.files.items()}
         for path, src in self.files.items():
             self._index_structs(path, src)
             self._index_aliases(src)
@@ -797,7 +813,14 @@ class Tree:
         # bodies at all reports the same 0 as both.
         self.class_bodies = 0
         self.slots = []
-        self.objects = {}        # file-scope object name -> (path, offset)
+        # name -> [(path, offset, scope)], ONE ENTRY PER DECLARATION. Two translation
+        # units may each declare `namespace { Holder state; }`, and those are two objects
+        # (#30 review). A single entry per name kept only the file parsed last, so the
+        # other file's wrap was tested against the wrong scope, `wrapper` never matched,
+        # and its correctly wrapped field reported ALLOCATES. The lookup picks the
+        # candidate whose scope contains the asking site, which is the same question the
+        # single-entry version asked -- it just had one answer to ask it of.
+        self.objects = {}
         for path, src in self.files.items():
             self._index_slots(path, src)
         self.class_members = sum(1 for s in self.slots if "::" in s.key)
@@ -867,6 +890,14 @@ class Tree:
     # -- types --------------------------------------------------------------
 
     def _index_structs(self, path, src):
+        # A TYPE IN AN ANONYMOUS NAMESPACE IS PER-TRANSLATION-UNIT, and the bare-name index
+        # cannot say so (#30 review). Two `.cc` files may each declare
+        # `namespace { struct Holder { ... }; Holder state; }` with DIFFERENT members;
+        # `setdefault` gives the second file the first file's body, so its slot is labelled
+        # with the wrong file, the wrong member, and loses its own registration. Item 4
+        # made the SLOT scope-aware and left this companion index behind, which turned one
+        # merged row into two rows of which one is fabricated.
+        anon = tu_scope.anonymous_namespace_spans(src)
         for m in re.finditer(r"\b(?:typedef\s+)?(struct|union)\s+(\w+)?\s*\{", src):
             open_idx = src.index("{", m.end() - 1)
             close = match_brace(src, open_idx)
@@ -882,8 +913,11 @@ class Tree:
                     d = decl.strip().lstrip("*").strip()
                     if d.isidentifier():
                         names.append(d)
+            local = any(a <= open_idx < b for a, b in anon)
             for nm in names:
                 self.structs.setdefault(nm, (body, path, open_idx + 1))
+                if local:
+                    self.structs_local[(path, nm)] = (body, path, open_idx + 1)
 
     def _index_aliases(self, src):
         for m in re.finditer(
@@ -891,10 +925,17 @@ class Tree:
             if m.group(1) != m.group(2):
                 self.aliases.setdefault(m.group(2), m.group(1))
 
-    def struct_body(self, name, depth=4):
-        """(body, path, offset) for a struct/union type name, resolving typedefs."""
+    def struct_body(self, name, path=None, depth=4):
+        """(body, path, offset) for a struct/union type name, resolving typedefs.
+
+        `path` names the translation unit asking. A type declared in that file's anonymous
+        namespace wins over the tree-wide entry of the same name, because it IS a different
+        type -- see _index_structs.
+        """
         n = name
         for _ in range(depth):
+            if path is not None and (path, n) in self.structs_local:
+                return self.structs_local[(path, n)]
             if n in self.structs:
                 return self.structs[n]
             if n in self.aliases:
@@ -1044,7 +1085,16 @@ class Tree:
         # a function pointer and not a slot, while `static VALUE c = rb_str_new_cstr("x");`
         # is a slot whose initialiser happens to call something. The old character class
         # rejected both by refusing to cross a `(` at all.
-        pat = re.compile(r"\b" + LOCAL_QUAL + r"static\s+" + LOCAL_QUAL + r"VALUE\b")
+        #   AND THE FOURTH: `static` WAS REQUIRED LITERALLY. `thread_local VALUE cache;`
+        #   in a block has THREAD storage duration -- it outlives the call exactly as a
+        #   `static` does, which is the whole property this predicate is about -- and the
+        #   pattern could not see it, so a file whose only slot is spelled that way
+        #   reported `slots 0/0, HITS 0`. Round 8 accepted `thread_local` as a QUALIFIER
+        #   alongside `static` (it is in LOCAL_QUAL); this is the case where it appears
+        #   alone. `register` deliberately stays out of STATIC_DURATION: it is the one
+        #   storage-class specifier here that means automatic.
+        pat = re.compile(r"\b" + LOCAL_QUAL + STATIC_DURATION + r"\s+"
+                         + LOCAL_QUAL + r"VALUE\b")
         for a, b in self.func_spans.get(path, ()):
             for m in pat.finditer(src, a, b):
                 # An INDENTED class member matches this pattern too -- which is how the
@@ -1071,16 +1121,28 @@ class Tree:
                         # functions in one TU may each declare `static VALUE cache;` and
                         # they are two objects: keyed `(file, "cache")` they merged, and a
                         # `rb_global_variable(&cache)` in the first discharged the second's
-                        # unrooted store. The span is the function body the scan is already
-                        # iterating, so the identity costs nothing to carry.
+                        # unrooted store.
+                        #
+                        # AND THE FUNCTION IS STILL ONE SCOPE TOO WIDE. Two DISJOINT nested
+                        # blocks in one function may each declare `static VALUE cache`, and
+                        # they are two objects for the same reason two functions are: the
+                        # name is not visible outside the braces it was declared in.
+                        # Registering the first block's and allocating into the second gave
+                        # `slots 1/2`, one `registered-slot` discharge and HITS 0 -- an
+                        # over-clear reached by a dedupe, which is the shape this file keeps
+                        # having to fix. `innermost_block` is tu_scope's, and the same one
+                        # `source_reads` asks for its shadowing rule: which braces own this
+                        # offset is one question, not two.
                         #
                         # Still gated on TU_EXT, for the header reason in that constant's
                         # comment -- a `static inline` helper in a .h is one object per
                         # INCLUDER, and this pass cannot resolve includes. Those stay
                         # tree-wide keyed, the same residual as a header file static.
+                        blk = tu_scope.innermost_block(src[a:b], m.start() - a)
+                        span = (a + blk[0], a + blk[1] + 1) if blk else (a, b)
                         self.slots.append(Slot(path, m.start(), nm + arr, nm, "scalar",
                                                decl_text,
-                                               scope=Scope(path, (a, b))
+                                               scope=Scope(path, span)
                                                if path.suffix in TU_EXT else TREE))
 
     def _class_member_slots(self, path, qual, boff, body):
@@ -1121,13 +1183,23 @@ class Tree:
         head = unit.strip()
         if not head or head.startswith("typedef") or re.match(r"^\s*extern\b", head):
             return
-        # INTERNAL LINKAGE, decided on the storage-class specifier and nothing else. `static`
-        # anywhere ahead of the declarator makes this object private to the file, so it is
-        # scoped; `EXTERN VALUE x;` and a bare `VALUE rb_mVernier;` are one object tree-wide
-        # and stay unscoped. The declarator itself is cut off first, or an initialiser
-        # mentioning `static` in a nested expression would flip the linkage.
+        # INTERNAL LINKAGE, and it has TWO SPELLINGS. `static` anywhere ahead of the
+        # declarator makes this object private to the file, so it is scoped; `EXTERN VALUE
+        # x;` and a bare `VALUE rb_mVernier;` are one object tree-wide and stay unscoped.
+        # The declarator itself is cut off first, or an initialiser mentioning `static` in
+        # a nested expression would flip the linkage.
+        #
+        # THE SECOND SPELLING CARRIES NO `static` AT ALL. `namespace { VALUE cache; }` takes
+        # internal linkage from the NAMESPACE, so a decision that reads only the declaration
+        # text gave two translation units ONE tree-scoped slot and let one file's
+        # `rb_global_variable(&cache)` discharge the other file's unregistered allocating
+        # one. That is the same over-clear the round-8 `static` split was extracted to end,
+        # reached through different syntax -- so it is asked of tu_scope.internal_linkage
+        # rather than answered again here, and predicate D asks the same function of the
+        # same spans for its own file-scope sinks.
         scope = tu_scope.declared_scope(
-            path, re.search(r"\bstatic\b", split_top_off(unit, "=")[0][1]))
+            path, tu_scope.internal_linkage(split_top_off(unit, "=")[0][1],
+                                            head_off, self.anon.get(path, ())))
         body_open = unit.find("{")
         # (1) `static struct { ... } _stackprof;` / `static struct tag { ... } x;`
         if body_open >= 0:
@@ -1139,7 +1211,8 @@ class Tree:
                 for decl in split_args(unit[close + 1:].rstrip().rstrip(";")):
                     nm, arr, ptr = declarator(decl)
                     if nm and not ptr:
-                        self.objects[nm] = (path, head_off, scope)
+                        self.objects.setdefault(nm, []).append(
+                            (path, head_off, scope))
                         self._struct_slots(path, head_off, nm + arr, nm,
                                            unit[body_open + 1:close], path,
                                            off + body_open + 1, 0, scope)
@@ -1164,12 +1237,13 @@ class Tree:
         # point of the `sub is not None` guard. `EXTERN VALUE Module_Magick;` matches this
         # pattern with type=EXTERN, name=`VALUE Module_Magick`; returning here swallowed
         # every rmagick global and the gem measured 1 slot across 15 files.
-        sub = self.struct_body(d.group(1)) if d and d.group(1) != "VALUE" else None
+        sub = self.struct_body(d.group(1), path) if d and d.group(1) != "VALUE" else None
         if sub is not None:
             for decl in split_args(d.group(2)):
                 nm, arr, ptr = declarator(decl)
                 if nm and not ptr:
-                    self.objects[nm] = (path, head_off, scope)
+                    self.objects.setdefault(nm, []).append(
+                        (path, head_off, scope))
                     self._struct_slots(path, head_off, nm + arr, nm, *sub, 0, scope)
             return
         # (3) a bare `static VALUE x, y[N];` / `VALUE rb_mVernier;` / `EXTERN VALUE x;`.
@@ -1249,7 +1323,7 @@ class Tree:
                                  "ptr" if ptr else "field", s.strip(), opath, ooff,
                                  scope))
                 continue
-            sub = self.struct_body(tname)
+            sub = self.struct_body(tname, bpath)
             if sub is not None:
                 for decl in split_args(rest):
                     nm, arr, ptr = declarator(decl)
@@ -1402,10 +1476,12 @@ class Tree:
                     tk = norm(a.strip())
                     if not a.strip().startswith("&") or tk not in self.objects:
                         continue
-                    _op, _oo, oscope = self.objects[tk]
                     # An object with internal linkage cannot be addressed from another TU,
                     # so a wrap call in a different file is wrapping a different object.
-                    if not oscope.contains(path, s):
+                    # With one declaration per entry, that test also PICKS the declaration.
+                    oscope = next((sc for _op, _oo, sc in self.objects[tk]
+                                   if sc.contains(path, s)), None)
+                    if oscope is None:
                         continue
                     out[(oscope, tk)] = (dtype, self.dmark_of(dtype) if dtype else None,
                                          path, line_at(src, s), wrapper_dest(src, s))
@@ -3316,6 +3392,203 @@ def self_test(pool):
         sup += len({h[3] for h in _sweep(p, ()).hits} - {h[3] for h in _sweep(p).hits})
     check(sup > 0, "--no-discharge exposes %d suppressed slot(s) across the %d controls; "
                    "each is named by rule in -v output" % (sup, len(controls)))
+
+    # ------------------------------------ #29 items 3, 4 and 5: three storage-scope holes
+    #
+    # All three are OVER-CLEARS, all three read as a clean sheet, and each ships its green
+    # as well as its red -- a rule that stops clearing needs a fixture proving it still
+    # clears what it should, or the fix is a deletion.
+
+    # 3. LOCAL STATICS ARE SCOPED TO THE BLOCK, NOT THE FUNCTION. Two DISJOINT nested
+    #    blocks in one function may each declare `static VALUE cache`; keyed by the
+    #    enclosing function's span they dedupe to one slot, and the first block's
+    #    `rb_global_variable(&cache)` then discharges the second block's unrooted
+    #    allocation. Measured unfixed: `slots 1/2`, one registered-slot discharge, HITS 0.
+    #    THE COUNTER IS THE FLAG: the fix is visible as 2 decls surviving the dedupe, which
+    #    is not something the hit list alone can show.
+    two_block = """#include <ruby.h>
+
+static VALUE
+entry(VALUE self, VALUE arg)
+{
+    if (RTEST(arg)) {
+        static VALUE cache;
+        if (!cache) {
+            cache = rb_str_new_cstr("a");
+            rb_global_variable(&cache);
+        }
+        return cache;
+    } else {
+        static VALUE cache;
+        if (!cache) {
+            cache = rb_str_new_cstr("b");
+        }
+        return cache;
+    }
+}
+
+void Init_probe(void) { rb_define_method(rb_cObject, "e", entry, 1); }
+"""
+    tb = _sweep_sources({"probe.c": two_block})
+    check((tb.slots, tb.decls, sorted(d[0] for d in tb.discharges),
+           sorted(h[0] for h in tb.hits)) == (2, 2, ["registered-slot"], ["ALLOCATES"]),
+          "#29 item 3 RED: two disjoint blocks in one function are two slots -- one "
+          "registered, one allocating and unrooted. Unfixed they merged to `slots 1/2` "
+          "and the registration discharged both",
+          "slots %d/%d disch %s hits %s" % (tb.slots, tb.decls,
+                                            [(d[0], d[3]) for d in tb.discharges],
+                                            [(h[0], h[3]) for h in tb.hits]))
+    ob = _sweep_sources({"probe.c": two_block[:two_block.index("    } else {")]
+                         + "    }\n    return Qnil;\n}\n\n"
+                         + "void Init_probe(void) { rb_define_method(rb_cObject, \"e\", "
+                           "entry, 1); }\n"})
+    check((ob.slots, ob.decls, sorted(d[0] for d in ob.discharges), ob.hits)
+          == (1, 1, ["registered-slot"], []),
+          "#29 item 3 GREEN: a genuine SINGLE-block static registered in its own block "
+          "still discharges -- the scope was narrowed, not broken",
+          "slots %d/%d disch %s hits %s" % (ob.slots, ob.decls,
+                                            [(d[0], d[3]) for d in ob.discharges],
+                                            [(h[0], h[3]) for h in ob.hits]))
+
+    # 4. AN ANONYMOUS NAMESPACE IS INTERNAL LINKAGE WITH NO `static` ON THE DECLARATION.
+    #    Two TUs each spelling `namespace { VALUE cache; }` are two objects. Scoped on the
+    #    declaration text alone they merged into one tree-wide slot and a.cc's registration
+    #    discharged b.cc's allocating one: `slots 1/2`, HITS 0.
+    anon_head = "#include <ruby.h>\n\nnamespace {\n    VALUE cache;\n}\n"
+    named_head = "#include <ruby.h>\n\nnamespace prof {\n    VALUE cache;\n}\n"
+    reg_tail = "\nvoid reg_a(void) { rb_global_variable(&%scache); }\n"
+    use_tail = ("\nextern \"C\" VALUE mk_b(VALUE self) { %(q)scache = "
+                "rb_str_new_cstr(\"b\"); return %(q)scache; }\n"
+                "void Init_probe(void) { rb_define_method(rb_cObject, \"b\", mk_b, 0); }\n")
+    an = _sweep_sources({"a.cc": anon_head + reg_tail % "",
+                         "b.cc": anon_head + use_tail % {"q": ""}})
+    check((an.slots, an.decls, sorted(d[0] for d in an.discharges),
+           sorted(h[0] for h in an.hits)) == (2, 2, ["registered-slot"], ["ALLOCATES"]),
+          "#29 item 4 RED: `namespace { VALUE cache; }` in two translation units is two "
+          "slots -- one registered, one not. Unfixed the scope decision read only the "
+          "declaration text, merged them and discharged the unregistered one",
+          "slots %d/%d disch %s hits %s" % (an.slots, an.decls,
+                                            [(d[0], d[3]) for d in an.discharges],
+                                            [(h[0], h[3]) for h in an.hits]))
+    nm = _sweep_sources({"a.cc": named_head + reg_tail % "prof::",
+                         "b.cc": named_head + use_tail % {"q": "prof::"}})
+    st = _sweep_sources(
+        {"a.cc": "#include <ruby.h>\n\nstatic VALUE cache;\n" + reg_tail % "",
+         "b.cc": "#include <ruby.h>\n\nstatic VALUE cache;\n" + use_tail % {"q": ""}})
+    check((nm.slots, nm.decls) == (1, 2)
+          and (st.slots, st.decls, sorted(d[0] for d in st.discharges),
+               sorted(h[0] for h in st.hits)) == (2, 2, ["registered-slot"],
+                                                  ["ALLOCATES"]),
+          "#29 item 4 GREEN, both directions: a NAMED namespace is external linkage and "
+          "still merges tree-wide (slots 1/2), while a plain `static` in one TU still "
+          "does not reach another (slots 2/2, one discharged one hit)",
+          "named %d/%d, static %d/%d %s" % (nm.slots, nm.decls, st.slots, st.decls,
+                                            [(h[0], h[3]) for h in st.hits]))
+
+    # 4b. ...AND THE COMPANION TYPE INDEX HAS TO BE SCOPED WITH IT (#30 review). Item 4
+    #     scoped the SLOT and left `Tree.structs` keyed by bare name, so two TUs each
+    #     declaring `namespace { struct Holder {...}; Holder state; }` with DIFFERENT
+    #     members both resolved to the FIRST file's body. b.cc's slot was then labelled
+    #     with a.cc's path and a.cc's member name, lost its own registration, and reported
+    #     as a second, fabricated row. Item 4 turned one merged row into two rows of which
+    #     one was invented, so this is the half of that fix that was missing.
+    #
+    #     a.cc allocates and never registers -- a REAL hit, and the green half. b.cc
+    #     registers its own member -- it must discharge, at ITS OWN file and member.
+    tu_a = ("#include <ruby.h>\nnamespace {\nstruct Holder { VALUE alpha; };\n"
+            "Holder state;\n}\nextern \"C\" VALUE mk_a(VALUE self) { "
+            "state.alpha = rb_str_new_cstr(\"a\"); return state.alpha; }\n"
+            "void Init_probe(void) { rb_define_method(rb_cObject, \"a\", mk_a, 0); }\n")
+    tu_b = ("#include <ruby.h>\nnamespace {\nstruct Holder { VALUE beta; };\n"
+            "Holder state;\n}\nvoid reg_b(void) { rb_gc_register_address(&state.beta); }\n"
+            "extern \"C\" VALUE mk_b(VALUE self) { state.beta = rb_str_new_cstr(\"b\"); "
+            "return state.beta; }\n")
+    ts = _sweep_sources({"a.cc": tu_a, "b.cc": tu_b})
+    check((ts.slots, ts.decls, sorted(d[0] for d in ts.discharges),
+           sorted(h[0] for h in ts.hits)) == (2, 2, ["registered-slot"], ["ALLOCATES"])
+          and [d[3] for d in ts.discharges] == ["state.beta"]
+          and [h[3] for h in ts.hits] == ["state.alpha"],
+          "#30 review: a struct type in an anonymous namespace is per-TU too -- b.cc's "
+          "`state.beta` resolves to b.cc's own body, discharges on its own "
+          "rb_gc_register_address, and a.cc's unregistered `state.alpha` is the only hit",
+          "slots %d/%d disch %s hits %s" % (ts.slots, ts.decls,
+                                            [(d[0], d[3]) for d in ts.discharges],
+                                            [(h[0], h[3]) for h in ts.hits]))
+
+    # 4c. ...AND SO DOES THE OBJECT INDEX (#30 review). Two TUs each declaring
+    #     `namespace { Holder state; }` and each WRAPPING it correctly: one entry per name
+    #     kept only the file parsed last, so the other file's wrap was tested against the
+    #     wrong scope, `wrapper` never matched, and its correctly wrapped field reported
+    #     ALLOCATES. Both must discharge. This is the red the earlier note asked for.
+    wrap_tu = ("#include <ruby.h>\nnamespace {\nstruct Holder { VALUE held; };\n"
+               "Holder state;\n}\n"
+               "static void h_mark_%(t)s(void *p) { Holder *h = (Holder *)p; "
+               "rb_gc_mark(h->held); }\n"
+               "static const rb_data_type_t h_type_%(t)s = { \"holder_%(t)s\", "
+               "{ h_mark_%(t)s, 0, }, };\n"
+               "extern \"C\" VALUE wrap_%(t)s(VALUE klass) { "
+               "state.held = rb_str_new_cstr(\"%(t)s\"); "
+               "return TypedData_Wrap_Struct(klass, &h_type_%(t)s, &state); }\n")
+    ws = _sweep_sources({"a.cc": wrap_tu % {"t": "a"}, "b.cc": wrap_tu % {"t": "b"}})
+    check((ws.slots, ws.decls, sorted(d[0] for d in ws.discharges), ws.hits)
+          == (2, 2, ["wrapped", "wrapped"], []),
+          "#30 review: two TUs each wrapping their own anonymous-namespace object -- BOTH "
+          "wraps match their own object, so both slots discharge and neither reports "
+          "ALLOCATES",
+          "slots %d/%d disch %s hits %s" % (ws.slots, ws.decls,
+                                            [(d[0], d[3]) for d in ws.discharges],
+                                            [(h[0], h[3]) for h in ws.hits]))
+
+    # 5. `thread_local VALUE cache;` WITH NO `static`. Thread storage duration: it persists
+    #    across calls, which is the whole property. The pattern required the literal
+    #    `static`, so the declaration was never indexed -- `slots 0/0, HITS 0`, a file with
+    #    a live slot reading exactly like a file with none.
+    tl_c = """#include <ruby.h>
+
+static VALUE
+entry(VALUE self)
+{
+    %s VALUE cache;
+    cache = rb_str_new_cstr("x");
+    return cache;
+}
+
+void Init_probe(void) { rb_define_method(rb_cObject, "e", entry, 0); }
+"""
+    tl = {q: _sweep_sources({"probe.c": tl_c % q})
+          for q in ("thread_local", "_Thread_local", "__thread", "static", "register")}
+    check(all((tl[q].slots, sorted(h[0] for h in tl[q].hits)) == (1, ["ALLOCATES"])
+              for q in ("thread_local", "_Thread_local", "__thread", "static"))
+          and (tl["register"].slots, tl["register"].hits) == (0, []),
+          "#29 item 5 RED and GREEN: a block-local `thread_local` (and `_Thread_local`, "
+          "and `__thread`) is indexed on its own, exactly as `static` is -- and `register`, "
+          "the one storage-class specifier here that means AUTOMATIC, still is not",
+          {q: (tl[q].slots, [h[0] for h in tl[q].hits]) for q in tl})
+
+    def _index_names(src):
+        return set(Tree(_write_sources({"probe.cpp": src})).funcs)
+
+
+    # ------------------------------------------------- #29 item 2: the caller-coverage
+    #
+    # Four of the five follow-ups were a rule generalised once and then not applied at every
+    # site that needs it, so the question "which callers need this rule, and do they all
+    # call it" is asserted rather than reasoned about. Two assertions, catching different
+    # omissions: the BEHAVIOURAL one drives this predicate's own function index through
+    # tu_scope's accept table AND its rejection table (opening the crossing up is what once
+    # made a sweep invent four functions out of X-macro lists), and the SOURCE one is a lint
+    # for the shape every one of the six historical appearances had -- a hand-rolled
+    # whitespace skip two lines above a `== "{"`.
+    check(not tu_scope.declarator_conformance(_index_names),
+          "#29 item 2: predicate C's function index conforms to tu_scope's declarator table "
+          "-- every accepted spelling indexed, every rejected one refused, K&R indexing "
+          "nothing (the stated recall limit shared by all four predicates)",
+          tu_scope.declarator_conformance(_index_names))
+    check(tu_scope.unshared_declarator_crossings(
+              pathlib.Path(__file__).read_text()) == [],
+          "#29 item 2: no hand-rolled `)`-to-`{` crossing left in this file -- the walk is "
+          "tu_scope.skip_post_declarator at every site that crosses one",
+          tu_scope.unshared_declarator_crossings(pathlib.Path(__file__).read_text()))
 
     print("\n".join(log))
     print("\nmutation table (rule -> controls that break when it is disabled):")

@@ -681,21 +681,28 @@ def escapes_by_return(fn, param, statics=()):
     # file-scope slot are the two SINKS this function reports, and a sink that is also
     # pointer-typed reads as a copy. Swallowing `*out = p` into the alias set would delete
     # the STORES-INTERIOR row it exists to produce.
-    aliases = set(tu_scope.alias_set(body, seeds, exclude=ptr_params | statics))
+    #
+    # AND A NAME THAT WAS AN ALIAS IS NOT ONE FOR EVER. `alias_set` names the carriers;
+    # matching the NAME anywhere after that reported `p = RSTRING_PTR(str); p = "safe";
+    # return p;` as RETURNS-INTERIOR on a string literal -- a false positive in the
+    # propagation this file gained in the same review. The kill is tu_scope's fifth rule
+    # applied to the alias set, so what comes back here is OFFSETS of occurrences that still
+    # evaluate to the interior, not a name soup that can never be unlearned.
+    alias_reads = tu_scope.alias_reads(body, seeds, exclude=ptr_params | statics)
 
-    def derives(expr):
-        """Does `expr` evaluate to the converted String's interior?"""
+    def derives(expr, base):
+        """Does `expr`, taken at offset `base` in the body, evaluate to the interior?"""
         if any(name in INTERIOR
                and param in re.findall(r"[A-Za-z_]\w*", " ".join(args))
                for name, args, _s, _e in find_calls(expr)):
             return True
-        return bool(aliases & set(re.findall(r"[A-Za-z_]\w*", expr)))
+        return any(base <= o < base + len(expr) for o in alias_reads)
 
     for m in re.finditer(r"\breturn\b", body):
         semi = body.find(";", m.end())
         if semi < 0:
             continue
-        if derives(body[m.end():semi]):
+        if derives(body[m.end():semi], m.end()):
             found.append(("RETURNS-INTERIOR", fn.bstart + m.start(),
                           body[m.start():semi + 1].strip(), "the return value"))
     # Stores into memory the frame does not own. Two sinks, one shape:
@@ -726,7 +733,7 @@ def escapes_by_return(fn, param, statics=()):
         if semi < 0:
             continue
         rhs = body[m.end():semi]
-        if derives(rhs):
+        if derives(rhs, m.end()):
             found.append(("STORES-INTERIOR", fn.bstart + m.start(),
                           (stmt + " =" + rhs).strip(), sink))
     return found
@@ -1622,6 +1629,176 @@ void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
           "of what was stored through it -- `return out[1]` is not the buffer",
           "funnel fn=%d conv=%d non-cfunc=%d hits=%s"
           % (r.funcs, len(r.conversions), len(r.non_cfunc), sorted(h[0] for h in r.hits)))
+
+    # ---------------------------------------------------------- round-9 follow-up thread
+    #
+    # 14. AN ALIAS IS NOT AN ALIAS FOR EVER (#29 item 1). The propagation added as item 13
+    #     tracked copies and never KILLS, so a local stayed a carrier after it had been
+    #     overwritten and this predicate reported RETURNS-INTERIOR on a string literal --
+    #     a FALSE POSITIVE in the code item 13 had just landed. Four arms, because the
+    #     fix has to kill without unlearning:
+    #
+    #       kill        the defect: `p = "safe"; return p;`  -- must NOT report
+    #       live        the same function without the kill   -- must still report
+    #       kill-copy   `p = "safe"; q = p; return q;`       -- the copy carries the
+    #                                                           literal, not the interior
+    #       cond-kill   `if (out) { p = "safe"; } return p;` -- a write that need not run
+    #                                                           must NOT discharge; this is
+    #                                                           the whole reason the kill
+    #                                                           mode is DOMINATING_WRITE and
+    #                                                           not source_reads' default
+    #       late-kill   `q = p; p = "safe"; return q;`       -- `q` was already a carrier
+    #
+    #     AND THE THIRD HOLE, FOUND BY CODEX ON THE #29 PR ITSELF: a write whose right-hand
+    #     side still READS the name stores the pointer back, so it must not kill. The other
+    #     two holes (`conditional_stmt`, `straight_line`) ask whether the write RUNS; this
+    #     one asks what it STORES, and a pointer walk is the commonest thing C does to an
+    #     interior pointer:
+    #
+    #       walk        `p = p + 1; return p;`                -- must STILL report
+    #       walk-call   `p = strchr(p, 47); return p;`        -- ditto, spelled as a call
+    #
+    #     Measured against `54fc3f2`: rmagick's `rm_str2cstr` with one walk inserted is RED
+    #     before the alias kill and CLEAN after it, which is a real defect going silent. The
+    #     `kill` arm is what keeps this from being a way to switch the kill off -- it shares
+    #     every line with `walk` except the right-hand side.
+    #
+    #     AND THE FOURTH, ALSO FROM THE #30 REVIEW: a write guarded by a conditional
+    #     OPERATOR rather than a conditional STATEMENT. There is no `if` here at all, so the
+    #     block test, `straight_line` and the braceless-arm test all agreed it dominates:
+    #
+    #       and-write   `out && (p = "safe"); return p;`      -- must STILL report
+    #       or-write    `out || (p = "safe"); return p;`      -- ditto
+    #       tern-write  `out ? (p = "safe") : 0; return p;`   -- ditto
+    #
+    #     On the path where the guard is false `p` still carries the interior, and both
+    #     spellings silently dropped rmagick's row when measured. `kill` remains the arm
+    #     that proves the kill is narrowed rather than switched off.
+    #
+    #     AND TWO MORE FROM THE SAME REVIEW, both measured on rmagick before being fixed:
+    #
+    #       restore     `q = p; p = "safe"; p = q; return p;`  -- a carrier can be RESTORED
+    #                   after it is killed. One `since` per name cannot say so, so
+    #                   alias_reads() unions a second read set from the restoring copy
+    #                   rather than moving the seed; see its docstring for why additive.
+    #       restore-copy `... p = q; r = p; return r;`          -- and the restoration has
+    #                   to PROPAGATE. The first cut of that pass only unioned the restored
+    #                   name's own reads, so a fresh local copied from the restored carrier
+    #                   never entered the alias set at all and the return was invisible.
+    #                   This arm returns `r`, not `p`, which is the whole point of it.
+    #       qual-write  `Holder::p = "safe"; return p;`        -- a QUALIFIED member is not
+    #                   this local. The third spelling of the `->`/`.` rule writes() already
+    #                   carries, and the one character that was missing from it.
+    #
+    #     AND ONE MORE, WHOSE CONTROL NAMED ITS OWN CAUSE:
+    #
+    #       for-body    `for (n = 0; n < 3; n++) p = "safe"; return p;`  -- must STILL report
+    #       while-body  `while (out) p = "safe"; return p;`              -- ditto, and this
+    #                   one was ALREADY right
+    #
+    #     The `for` header holds two semicolons that are not statement separators, so the
+    #     statement-boundary scan took the last of them and measured the head as `n++)`
+    #     rather than `for (n = 0; n < 3; n++)`. `while`, whose head has no semicolon at
+    #     all, was correct the whole time -- the pair is what identified the cause rather
+    #     than merely the symptom, and it is why both spellings are kept here.
+    #
+    #     THE FUNNEL IS ASSERTED IN EVERY ARM. A regression that empties the index prints
+    #     `0 fn(s), 0 conversions` and would otherwise read as four passing greens.
+    kill_src = """#include <ruby.h>
+static const char *grab(VALUE str, const char **out)
+{
+    StringValue(str);
+    const char *p = RSTRING_PTR(str);
+    const char *q;
+    const char *r;
+%s    return %s;
+}
+static VALUE go(VALUE self, VALUE arg)
+{
+    const char *sink = 0;
+    return rb_str_new2(grab(arg, &sink));
+}
+void Init_t(void) { rb_define_method(rb_cObject, "go", go, 1); }
+"""
+    kill_arms = {
+        "live":      ("", "p", ["RETURNS-INTERIOR"]),
+        "kill":      ('    p = "safe";\n', "p", []),
+        "kill-copy": ('    p = "safe";\n    q = p;\n', "q", []),
+        "cond-kill": ('    if (out) { p = "safe"; }\n', "p", ["RETURNS-INTERIOR"]),
+        "late-kill": ('    q = p;\n    p = "safe";\n', "q", ["RETURNS-INTERIOR"]),
+        "walk":      ('    p = p + 1;\n', "p", ["RETURNS-INTERIOR"]),
+        "walk-call": ('    p = strchr(p, 47);\n', "p", ["RETURNS-INTERIOR"]),
+        "and-write": ('    out && (p = "safe");\n', "p", ["RETURNS-INTERIOR"]),
+        "or-write":  ('    out || (p = "safe");\n', "p", ["RETURNS-INTERIOR"]),
+        "tern-write":('    out ? (p = "safe") : 0;\n', "p", ["RETURNS-INTERIOR"]),
+        "restore":   ('    q = p;\n    p = "safe";\n    p = q;\n', "p",
+                      ["RETURNS-INTERIOR"]),
+        "qual-write":('    Holder::p = "safe";\n', "p", ["RETURNS-INTERIOR"]),
+        "for-body":  ('    for (n = 0; n < 3; n++) p = "safe";\n', "p",
+                      ["RETURNS-INTERIOR"]),
+        "while-body":('    while (out) p = "safe";\n', "p", ["RETURNS-INTERIOR"]),
+        "constexpr": ('    if constexpr (0) p = "safe";\n', "p", ["RETURNS-INTERIOR"]),
+        "for-incr":  ('    for (n = 0; n < 3; p = "safe") ++n;\n', "p",
+                      ["RETURNS-INTERIOR"]),
+        "attr-arm":  ('    if (out) [[unlikely]] p = "safe";\n', "p",
+                      ["RETURNS-INTERIOR"]),
+        "restore-copy": ('    q = p;\n    p = "safe";\n    p = q;\n    r = p;\n', "r",
+                         ["RETURNS-INTERIOR"]),
+        # The copy sits in a CONTROL EXPRESSION, so the next `;` is after the return.
+        # `copy-stmt` is the same copy written as its own statement, and it was correct
+        # all along -- the pair is what names the cause instead of the symptom.
+        "copy-cond": ('    if ((q = p) != NULL) return q;\n', "p",
+                      ["RETURNS-INTERIOR", "RETURNS-INTERIOR"]),
+        "copy-stmt": ('    q = p;\n    if (q != NULL) return q;\n', "p",
+                      ["RETURNS-INTERIOR", "RETURNS-INTERIOR"]),
+        # The SAME carrier restored twice: the reads between the two restorations must
+        # survive. A {name: offset} seed map kept only the last and lost them.
+        "re-restore": ('    q = p;\n    p = "safe";\n    p = q;\n'
+                       '    if (out) return p;\n    p = "safe";\n    p = q;\n', "p",
+                       ["RETURNS-INTERIOR", "RETURNS-INTERIOR"]),
+        # An UNEVALUATED operand never runs, so the write in it cannot kill. All three
+        # dominance tests accept it: it has a block, no transfer token precedes it, and no
+        # conditional operator guards it.
+        "unevaluated": ('    (void)sizeof(p = "safe");\n', "p", ["RETURNS-INTERIOR"]),
+        "unevaluated-noexcept": ('    (void)noexcept(p = "safe");\n', "p",
+                                 ["RETURNS-INTERIOR"]),
+    }
+    kr = {}
+    for tag, (mid, ret, _want) in kill_arms.items():
+        r = sweep(Tree(_synth("t_kill_%s" % tag, {"ext/t.c": kill_src % (mid, ret)})), tag)
+        kr[tag] = (r.funcs, len(r.conversions), len(r.non_cfunc),
+                   sorted(h[0] for h in r.hits))
+    check(all(kr[t] == (3, 1, 1, want) for t, (_m, _r, want) in kill_arms.items()),
+          "14 RED (#29 item 1): a reassigned alias stops carrying the interior -- "
+          "`p = \"safe\"; return p;` is not RETURNS-INTERIOR, while the same function "
+          "without the reassignment still is, a conditional reassignment still is, and a "
+          "write that re-derives from the name (`p = p + 1`) still is",
+          kr)
+
+    def _index_names(src):
+        return {f.name for f in Tree(_synth("t_conform", {"ext/t.cpp": src})).funcs}
+
+
+    # ------------------------------------------------- #29 item 2: the caller-coverage
+    #
+    # Four of the five follow-ups were a rule generalised once and then not applied at every
+    # site that needs it, so the question "which callers need this rule, and do they all
+    # call it" is asserted rather than reasoned about. Two assertions, catching different
+    # omissions: the BEHAVIOURAL one drives this predicate's own function index through
+    # tu_scope's accept table AND its rejection table (opening the crossing up is what once
+    # made a sweep invent four functions out of X-macro lists), and the SOURCE one is a lint
+    # for the shape every one of the six historical appearances had -- a hand-rolled
+    # whitespace skip two lines above a `== "{"`.
+    check(not tu_scope.declarator_conformance(_index_names),
+          "#29 item 2: predicate B's function index conforms to tu_scope's declarator table "
+          "-- every accepted spelling indexed, every rejected one refused, K&R indexing "
+          "nothing (the stated recall limit shared by all four predicates)",
+          tu_scope.declarator_conformance(_index_names))
+    check(tu_scope.unshared_declarator_crossings(
+              pathlib.Path(__file__).read_text()) == [],
+          "#29 item 2: no hand-rolled `)`-to-`{` crossing left in this file -- the walk is "
+          "tu_scope.skip_post_declarator at every site that crosses one",
+          tu_scope.unshared_declarator_crossings(pathlib.Path(__file__).read_text()))
 
     print("\n".join(log))
     print("\nself-test: %s" % ("PASS" if ok else "FAIL"))

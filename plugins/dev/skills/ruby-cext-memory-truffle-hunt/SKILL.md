@@ -468,8 +468,12 @@ existing suspects, and `REGISTERED` is a **downgrade, not a clear**, because reg
 per-slot: round 4 measured stackprof's registered `empty_string` pinned while its unregistered
 sibling `objtracer` was not.
 
-**Run `--self-test` before trusting any silence** — A is 53/53 (1 skipped), B 31/31, C 64/64,
-D 48/48. The pool argument differs, and not symmetrically — measured, because a looser version of
+**Run `--self-test` before trusting any silence** — A is 56/56 (1 skipped), B 34/34, C 71/71,
+D 54/54. Read the count, not the word: **nineteen** of those checks arrived with #29's five
+follow-ups, and only one of the five moved a corpus row in the end. Four of them are pure
+over-clears — a merged slot, a deduped slot, an unindexed declaration — and every one of those
+reads as a clean sheet, so the self-test count is the only place the fix is visible at all.
+The pool argument differs, and not symmetrically — measured, because a looser version of
 this sentence shipped once and was wrong:
 
 | | `$CORPUS` (parent) | `$CORPUS/*/` (gem dirs) |
