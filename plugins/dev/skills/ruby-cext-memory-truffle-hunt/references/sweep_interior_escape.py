@@ -905,14 +905,40 @@ PIN_PROOF_DEPTH = 4
 
 
 def _instance_carriers(fn, pname):
-    """Locals in `fn` that carry the instance arriving as the parameter named `pname`.
+    """Locals in `fn` that HAVE CARRIED the instance arriving as parameter `pname`.
 
-    `tu_scope.alias_map` again -- rule 4, which locals carry the same pointer -- because
+    `tu_scope.alias_map` -- rule 4, which locals carry the same pointer -- because
     `static void wrap_mark(void *p) { struct wrap *w = p; ... }` is a pointer copy and the
     marks are written through `w`, not through `p`. Seeded at 0: a mark function's whole
     body runs after its parameter exists.
+
+    A NAME, NOT A POSITION, and every caller has to know which of the two it needs.
+    `alias_map`'s own docstring says it: a name in this set HAS held the pointer, which is
+    not the claim that every mention of it still does. The REBINDING side wants the names,
+    because a wider carrier set finds more writes and declines more often; the PROOF side
+    wants `_carries_at` below, because a wider set proves more.
     """
     return set(tu_scope.alias_map(fn.body, {pname: 0})) if pname else set()
+
+
+def _carries_at(fn, pname, lo, hi):
+    """Does some occurrence in [lo, hi) still EVALUATE to the instance from `pname`?
+
+    The positional half, and its absence was a hole in the proof rather than in its
+    obligations. `struct wrap *w = p; w = elsewhere; rb_gc_mark(w->buf);` leaves `w` a
+    carrier by NAME for the whole body, so the mark on an unrelated object was credited to
+    the registered instance and `(wrap, buf)` entered `pinned` -- clearing derivations from
+    the real wrapper whose String nothing pins. That is the unsafe direction, in the
+    machinery the inversion added.
+
+    `tu_scope.alias_reads` is the offset-wise answer and carries rule 5's kill, so a carrier
+    that has been overwritten stops reading as one at exactly the right point. `arg_spans`
+    exists for the matching reason -- an argument slot has to be identified by offset,
+    because a reassigned name still matches its own spelling.
+    """
+    if not pname:
+        return False
+    return any(lo <= o < hi for o in tu_scope.alias_reads(fn.body, {pname: 0}))
 
 
 def _strip_casts(arg):
@@ -965,8 +991,8 @@ def _arg_passes_instance(arg, carriers):
     return t in carriers
 
 
-def instance_pins(tree, fn, carriers, depth=0, seen=()):
-    """{(type, field)} that `fn` PROVES pinned for the instance held in `carriers`.
+def instance_pins(tree, fn, pname, depth=0, seen=()):
+    """{(type, field)} that `fn` PROVES pinned for the instance arriving as `pname`.
 
     THE POLARITY OF THIS FILE'S PIN INDEX, INVERTED. Rounds 10 and 11 built the index by
     SEARCHING -- every pinning call in every function a registered callback could reach
@@ -1000,9 +1026,12 @@ def instance_pins(tree, fn, carriers, depth=0, seen=()):
     mark the walk did see. Under-proving costs recall and over-proving costs a
     use-after-free, so the whole function is written to under-prove.
     """
-    if depth > PIN_PROOF_DEPTH or id(fn) in seen or not carriers:
+    if depth > PIN_PROOF_DEPTH or id(fn) in seen or not pname:
         return set()
     seen = seen + (id(fn),)
+    carriers = _instance_carriers(fn, pname)
+    if not carriers:
+        return set()
     out = set()
     vt = var_types(fn)
     blks = tu_scope.blocks(fn.body)
@@ -1010,11 +1039,15 @@ def instance_pins(tree, fn, carriers, depth=0, seen=()):
         if not unconditional_mark(fn.body, s, blks):
             continue
         kind = prim_kind(name)
+        spans = arg_spans(fn.body, s + len(name))
         if kind == "pin":
-            for a in args:
+            for i, a in enumerate(args):
                 a = a.strip()
                 m = MEMBER_PATH.fullmatch(a)
                 if m is None or m.group(1) not in carriers:
+                    continue
+                # POSITIONAL: the name has carried the instance, but does it carry it HERE?
+                if i >= len(spans) or not _carries_at(fn, pname, *spans[i]):
                     continue
                 key = member_key(tree.structs, vt, a)
                 if key is not None:
@@ -1022,16 +1055,16 @@ def instance_pins(tree, fn, carriers, depth=0, seen=()):
             continue
         if kind is not None:
             continue
-        idxs = [i for i, a in enumerate(args)
-                if _arg_reaches_object(a, carriers)]
-        if not idxs:
-            continue
-        for callee in tu_scope.bind(tree.by_name.get(name, ()), fn.path, fn.bstart + s):
-            for i in idxs:
-                if i >= len(callee.params):
-                    continue
-                sub = _instance_carriers(callee, callee.params[i][1])
-                out |= instance_pins(tree, callee, sub, depth + 1, seen)
+        for i, a in enumerate(args):
+            if not _arg_reaches_object(a, carriers):
+                continue
+            if i >= len(spans) or not _carries_at(fn, pname, *spans[i]):
+                continue
+            for callee in tu_scope.bind(tree.by_name.get(name, ()), fn.path,
+                                        fn.bstart + s):
+                if i < len(callee.params):
+                    out |= instance_pins(tree, callee, callee.params[i][1],
+                                         depth + 1, seen)
     return out
 
 
@@ -1444,9 +1477,8 @@ class Tree:
                 if name is None:
                     continue
                 for fn in tu_scope.bind(self.by_name.get(name, ()), path, off):
-                    carriers = _instance_carriers(
-                        fn, fn.params[0][1] if fn.params else None)
-                    for key in instance_pins(self, fn, carriers):
+                    for key in instance_pins(
+                            self, fn, fn.params[0][1] if fn.params else None):
                         proven.add(key)
                         where.setdefault(key, "%s marks it for the registered instance "
                                               "at %s:%d"
@@ -2445,6 +2477,12 @@ def _path_write(expr):
                       + r"\s*".join(re.escape(p) for p in parts) + r"\s*=(?!=)")
 
 
+def DEREF_WRITE_RE(name):
+    """`*name = ...` or `name[0] = ...` -- a write THROUGH the parameter, not to a member."""
+    return re.compile(r"(?:\*\s*%s|%s\s*\[\s*0\s*\])\s*=(?!=)"
+                      % (re.escape(name), re.escape(name)))
+
+
 def _members(rest):
     """`->z.input` -> ('z', 'input'). The hops of a member path, separator-independent."""
     return tuple(re.findall(r"[A-Za-z_]\w*", rest or ""))
@@ -2464,21 +2502,29 @@ def _path_write_re(base, members):
 
 
 def _arg_prefix(arg, carriers):
-    """(carrier, hops) this argument hands to a callee, or None if it hands no storage.
+    """(carrier, hops, addr_of_local) handed to a callee, or None if no storage is handed.
 
     `zstream_discard_input(&gz->z, len)` hands storage at hops `('z',)` of `gz`, so a write
     to the callee parameter's `->input` is a write to `gz->z.input`. A bare `gz` hands the
     whole object, hops `()`. `RSTRING_PTR(z->buf)` hands the field's CONTENTS -- a `VALUE`,
     not a route back to the field -- and hands no storage at all.
+
+    `&w` IS A THIRD THING AND WAS READ AS THE SECOND. Taking the address of the base LOCAL
+    hands the callee the pointer variable itself, so `replace(&w)` with `*pp = other` rebinds
+    the base from another frame -- and the caller then searched the callee for member writes
+    like `pp->buf`, found none, and called it proven. `w->held = p` afterwards stores into a
+    different object, which can outlive the pin. So address-of-a-local is flagged, and the
+    callee has to be shown not to write THROUGH the parameter as well as not through its
+    members.
     """
     a = _strip_casts(arg)
     if a.startswith("&"):
         a = a[1:].strip()
         m = MEMBER_PATH.fullmatch(a)
         if m and m.group(1) in carriers:
-            return m.group(1), _members(m.group(2))
-        return (a, ()) if a in carriers else None
-    return (a, ()) if a in carriers else None
+            return m.group(1), _members(m.group(2)), False
+        return (a, (), True) if a in carriers else None
+    return (a, (), False) if a in carriers else None
 
 
 def _no_rebind_below(tree, fn, carriers, members, lo, depth, seen):
@@ -2507,12 +2553,12 @@ def _no_rebind_below(tree, fn, carriers, members, lo, depth, seen):
             pre = _arg_prefix(a, carriers)
             if pre is None:
                 continue
-            _c, hops = pre
+            _c, hops, addr_of_local = pre
             # Disjoint storage: the callee was handed a sibling sub-object, which cannot
             # alias the field. `hops` must be a PREFIX of the field's own path.
             if hops and members[:len(hops)] != hops:
                 continue
-            handed.append((i, members[len(hops):]))
+            handed.append((i, members[len(hops):], addr_of_local))
         if not handed:
             continue
         defs = tu_scope.bind(tree.by_name.get(name, ()), fn.path, fn.bstart + s)
@@ -2521,10 +2567,17 @@ def _no_rebind_below(tree, fn, carriers, members, lo, depth, seen):
         for callee in defs:
             if id(callee) in seen:
                 return False
-            for i, sub_members in handed:
+            for i, sub_members, addr_of_local in handed:
                 if i >= len(callee.params) or not callee.params[i][1]:
                     return False
-                sub = _instance_carriers(callee, callee.params[i][1])
+                pn = callee.params[i][1]
+                # HANDED THE POINTER VARIABLE ITSELF: `*pp = other` and `pp[0] = other`
+                # rebind the caller's base from another frame, and neither is a member
+                # write, so the scan below cannot see them.
+                if addr_of_local and next(
+                        DEREF_WRITE_RE(pn).finditer(callee.body), None):
+                    return False
+                sub = _instance_carriers(callee, pn)
                 if not sub:
                     return False
                 for nm in sub:
@@ -3359,6 +3412,31 @@ NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-"]
 #                       indirection -- unconditional_mark went the same way, via a mark
 #                       helper -- which is why the answer here is the general question asked
 #                       of the module that already answers it, and not a third clause.
+# ROUND 11, FIFTH REVIEW PASS: TWO HOLES IN THE PROOF, AND THE CORPUS DOES NOT MOVE.
+# 446 -> 446, no row moved, no discharge count moved, pin keys 109 and movable keys 69 both
+# unchanged. A DIFFERENT CLASS from the four rounds below: those were the old polarity being
+# out-spelled one hop at a time, these are the INVERTED machinery believing it had proven
+# something it had not. Both failed in the unsafe direction and both are corpus-neutral, so
+# 8aa is the only evidence either was ever wrong.
+#
+#   the temporal one   `struct wrap *w = p; w = elsewhere; rb_gc_mark(w->buf);`.
+#                        `_instance_carriers` answers "has this name held the instance",
+#                        which is a fact about the whole body; the proof needed "does it
+#                        hold it HERE". `tu_scope.alias_reads` and `arg_spans` already
+#                        existed for exactly this, and alias_map's docstring already said
+#                        which callers want which -- this file asked the wrong one, the
+#                        same defect predicate B shipped once.
+#   the structural one `replace(&w)` with `*pp = other` in the callee. `&w` is the address
+#                        of the pointer VARIABLE and was read as the object at zero hops, so
+#                        the callee was searched for member writes and never for a write
+#                        THROUGH the parameter. No positional test can see it: there is no
+#                        syntactic write to `w` in the deriving frame at all.
+#
+# THEY ARE NOT ONE MECHANISM, unlike rounds 2 and 3's pairs, and the fixes do not overlap:
+# a positional carrier test leaves the address-of case clearing, and an address-of hop kind
+# leaves the rebound carrier proving. Recorded because the previous two rounds established a
+# pattern that does not hold here.
+#
 # ROUND 11, FOURTH REVIEW PASS: THE DISCHARGE IS INVERTED AND THE CORPUS MOVES DOWN.
 # 414 -> 446, +32 rows, 0 removed, 0 columns changed, `pinning-mark` clears 45 -> 13. Every
 # other discharge rule is unchanged. DOWN IS THE CORRECT DIRECTION: the rule now clears only
@@ -3367,20 +3445,31 @@ NEGATIVES = ["erb-", "bcrypt-", "ed25519-", "racc-"]
 # `zlib-basecamp-patch-` 7 -> 17 is the only pinned entry that moves. All 32 rows are zlib,
 # and there are exactly two causes:
 #
-#   21 rows  REBOUND IN A CALLEE, and this is the fourth round's first finding occurring FOR
-#            REAL rather than synthetically. `gzfile_read_header` derives
-#            `RSTRING_PTR(gz->z.input)` and then calls `zstream_discard_input(&gz->z, n)`,
-#            whose body ends `if (newlen == 0) { z->input = Qnil; }`. `zstream_sync` is the
-#            same shape. The reviewer's `replace(w, other)` has 21 instances in three zlib
-#            trees. Whether the rebinding precedes the pointer's LAST USE is this file's
-#            stated ORDERING blind spot -- no CFG -- so these are UNPROVEN rather than
-#            known-bad, and unproven is a hit.
-#   11 rows  AN UNRESOLVABLE FUNCTION-LIKE MACRO receives the instance.
-#            `ZSTREAM_BUF_FILLED(z)` is `#define`d, so `strip_directives` leaves the sweep
-#            no body to read, and a callee that is handed the instance and cannot be
-#            resolved is not proven. The macro is in fact read-only, so these 11 are
-#            over-reports -- named here with their cost rather than waved through, and see
-#            the found-and-not-fixed note.
+# ALL 32 ARE KNOWN-SAFE OVER-REPORTS, settled by execution and not by reading. A separate
+# investigation drove the paths: `gzfile_read_header` is written read-the-bytes-then-discard-
+# them, six times, never reversed, and `zstream_discard_input` is the LAST statement of every
+# block that derived a pointer. Positive control 300/300 with no amplifier on aarch64-linux,
+# against stock zlib and the fork; green ran the same paths 140,000 times clean. So the cost
+# of the conservative rule on this corpus is 32 FALSE POSITIVES, not 32 unknowns -- still the
+# right trade, because the alternative was an unsound clear, but state it accurately.
+#
+# THE CAUSES ARE OVER-DETERMINED AND A SINGLE-CAUSE SPLIT IS A PROJECTION. Most rows are
+# unproven for more than one reason at once, so any "N of this, M of that" depends on which
+# cause the classifier reports first. Measured, order-independently:
+#
+#   21 rows  carry a CALLEE-REBIND -- the fourth round's first finding occurring FOR REAL.
+#            `gzfile_read_header` (18) derives `RSTRING_PTR(gz->z.input)` and calls
+#            `zstream_discard_input(&gz->z, n)`, whose body ends `if (newlen == 0) { z->input
+#            = Qnil; }`; `zstream_sync` (3) is the same shape.
+#   11 rows  carry ONLY an unresolvable function-like macro, `ZSTREAM_BUF_FILLED(z)`
+#            (`zstream_shift_buffer` 8, `zstream_append_buffer` 3). `strip_directives` leaves
+#            no body to read and an unresolvable callee handed the instance is not proven.
+#   ...and FOUR of the 21 ALSO carry unresolvable macros at depth 1 -- `zstream_append_input2`
+#            via `gzfile_read_raw_ensure`/`_until_zero`, and `ZSTREAM_IS_GZFILE` via
+#            `zstream_run`. Reporting those four under either heading is equally true, which
+#            is why the two headings above are a tally of causes and NOT a partition of rows.
+#
+# By tree: zlib-3.2.1 11, zlib-3.2.3 11, zlib-basecamp-patch-1.1.1 10.
 #
 # THE PIN INDEX MOVES 115 -> 109 KEYS, movable unchanged at 69, and the six lost keys are
 # all in ONE tree, which is routed privately and so is described by shape rather than named
@@ -5034,18 +5123,149 @@ def self_test(pool):
                         _arg_prefix("(void *)w", carriers)),
         "stranger":    (_arg_reaches_object("other", carriers),
                         _arg_prefix("other", carriers)),
+        "addr-local":  (_arg_reaches_object("&w", carriers),
+                        _arg_prefix("&w", carriers)),
     }
-    check(argtests == {"bare": (True, ("w", ())),
-                       "addr-member": (True, ("gz", ("z",))),
+    check(argtests == {"bare": (True, ("w", (), False)),
+                       "addr-member": (True, ("gz", ("z",), False)),
                        "member-read": (True, None),
-                       "cast-bare": (True, ("w", ())),
-                       "stranger": (False, None)},
-          "the proof's two argument tests are different questions: the pin side follows any "
-          "expression naming an object reachable from the instance, the rebinding side "
-          "follows only storage it could be written through -- so a plain member READ is an "
-          "object for one and no storage at all for the other, and `&gz->z` carries the hop "
-          "list that re-bases the field path in the callee",
+                       "cast-bare": (True, ("w", (), False)),
+                       "stranger": (False, None),
+                       "addr-local": (True, ("w", (), True))},
+          "the proof's two argument tests are different questions, over THREE hand-off "
+          "kinds: the pin side follows any expression naming an object reachable from the "
+          "instance, the rebinding side follows only storage it could be written through -- "
+          "so a plain member READ is an object for one and no storage at all for the other; "
+          "`&gz->z` carries the hop list that re-bases the field path in the callee; and "
+          "`&w` is the pointer VARIABLE, flagged apart from the object at zero hops because "
+          "only it lets a callee rebind the caller's base",
           sorted(argtests.items()))
+
+    # 8aa. GENERATED REDS AND GREENS: TWO HOLES IN THE PROOF ITSELF, NOT IN ITS OBLIGATIONS.
+    #      #32's fifth review round, and a DIFFERENT CLASS from the first four. Those were
+    #      "clear unless a problem is spotted", and each fix bought one hop until the
+    #      polarity was inverted. These two are the inverted machinery believing it has
+    #      proven something it has not -- both in the unsafe direction, both flow- or
+    #      address-blind:
+    #
+    #        carrier-rebound  `struct wrap *w = p; w = elsewhere;
+    #                          rb_gc_mark(w->buf);`                    -> PROVES NOTHING
+    #        carrier-clean    ...without the reassignment              -> proves (wrap, buf)
+    #        addr-rebind      `replace(&w)` where the callee does
+    #                         `*pp = other`, then `w->held = p`        -> STILL A HIT
+    #        addr-clean       ...the same call rebinding nothing       -> DISCHARGES
+    #
+    #      THEY ARE NOT ONE MECHANISM, and saying so matters because the previous two rounds
+    #      genuinely were. They share a CONSEQUENCE -- a name stops denoting what the proof
+    #      looked it up under -- but nothing else:
+    #
+    #        *  `carrier-rebound` is TEMPORAL. `_instance_carriers` answers "has this name
+    #           held the instance", which is a fact about the whole body, and the proof
+    #           needed "does it hold it HERE". `tu_scope.alias_reads` is that answer and
+    #           carries rule 5's kill; `arg_spans` supplies the offsets. Both already
+    #           existed, and `alias_map`'s own docstring says which callers want which --
+    #           this file asked the wrong one, which is the same defect predicate B shipped
+    #           once and the reason that sentence is in tu_scope at all.
+    #        *  `addr-rebind` is STRUCTURAL. `&w` is the address of the pointer VARIABLE, a
+    #           third hand-off kind that was being read as the second (the object itself, at
+    #           zero hops) -- so the callee was searched for member writes like `pp->buf`
+    #           and never for `*pp = other`. A positional carrier test does not see it: the
+    #           rebinding is not a syntactic write to `w` in this frame at all.
+    #
+    #      A positional fix alone leaves `addr-rebind` clearing, and an address-of fix alone
+    #      leaves `carrier-rebound` proving. Both are needed, and the two probes are the
+    #      evidence rather than the argument.
+    #
+    #      CORPUS-NEUTRAL, both of them: 446 -> 446, no row moved, no discharge count moved,
+    #      pin keys 109 and movable 69 unchanged. So this fixture is the only thing that can
+    #      tell either fix from no fix -- the fifth round in a row where that is true.
+    carr_c = ("#include <ruby.h>\n\n"
+              "struct wrap { VALUE buf; };\n\n"
+              "static struct wrap *elsewhere;\n\n"
+              "static void\n"
+              "wrap_mark(void *p)\n"
+              "{\n"
+              "    struct wrap *w = p;\n"
+              "%s"
+              "    rb_gc_mark(w->buf);\n"
+              "}\n\n"
+              "static const rb_data_type_t wrap_type = {\n"
+              "    \"wrap\", { wrap_mark, 0, 0, }, 0, 0, RUBY_TYPED_FREE_IMMEDIATELY\n"
+              "};\n\n"
+              "static VALUE\n"
+              "feed(VALUE self)\n"
+              "{\n"
+              "    struct wrap *w;\n"
+              "    const char *p;\n"
+              "    VALUE out;\n"
+              "    TypedData_Get_Struct(self, struct wrap, &wrap_type, w);\n"
+              "    p = RSTRING_PTR(w->buf);\n"
+              "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+              "    out = rb_str_new(p, 4);\n"
+              "    return out;\n"
+              "}\n\n"
+              "void Init_probe(void)\n{\n"
+              "    rb_define_method(rb_cObject, \"f\", feed, 0);\n}\n")
+    addr_c = ("#include <ruby.h>\n\n"
+              "struct wrap { VALUE buf; const char *held; };\n\n"
+              "static struct wrap *other;\n\n"
+              "static void\n"
+              "wrap_mark(void *p)\n"
+              "{\n"
+              "    struct wrap *w = p;\n"
+              "    rb_gc_mark(w->buf);\n"
+              "}\n\n"
+              "static const rb_data_type_t wrap_type = {\n"
+              "    \"wrap\", { wrap_mark, 0, 0, }, 0, 0, RUBY_TYPED_FREE_IMMEDIATELY\n"
+              "};\n\n"
+              "static void\n"
+              "replace(struct wrap **pp)\n"
+              "{\n"
+              "%s"
+              "}\n\n"
+              "static VALUE\n"
+              "feed(VALUE self)\n"
+              "{\n"
+              "    struct wrap *w;\n"
+              "    const char *p;\n"
+              "    TypedData_Get_Struct(self, struct wrap, &wrap_type, w);\n"
+              "    p = RSTRING_PTR(w->buf);\n"
+              "    rb_funcall(rb_mGC, rb_intern(\"compact\"), 0);\n"
+              "    replace(&w);\n"
+              "    w->held = p;\n"
+              "    return Qnil;\n"
+              "}\n\n"
+              "void Init_probe(void)\n{\n"
+              "    rb_define_method(rb_cObject, \"f\", feed, 0);\n}\n")
+    pf_arms = {
+        "carrier-rebound": (carr_c, "    w = elsewhere;\n", 3),
+        "carrier-clean":   (carr_c, "", 3),
+        "addr-rebind":     (addr_c, "    *pp = other;\n", 4),
+        "addr-clean":      (addr_c, "    (void)pp;\n", 4),
+    }
+    pf_root = {t: _synth("fx-proofhole-%s" % t, {"ext/probe.c": c % a})
+               for t, (c, a, _n) in pf_arms.items()}
+    pf = {t: _sweep(r) for t, r in pf_root.items()}
+    pf_pin = {t: sorted(Tree(r).pinned) for t, r in pf_root.items()}
+    check(all((pf[t].funcs, len(pf[t].derivations), len(pf[t].with_window))
+              == (n, 1, 1) for t, (_c, _a, n) in pf_arms.items())
+          and pf_pin["carrier-rebound"] == []
+          and pf_pin["carrier-clean"] == [("wrap", "buf")]
+          and pf_pin["addr-rebind"] == [("wrap", "buf")]
+          and len(pf["carrier-rebound"].hits) == 1 and not pf["carrier-rebound"].discharges
+          and len(pf["addr-rebind"].hits) == 1 and not pf["addr-rebind"].discharges
+          and all(not pf[t].hits
+                  and [d[0] for d in pf[t].discharges] == ["pinning-mark"]
+                  for t in ("carrier-clean", "addr-clean")),
+          "proof-hole red/green: a carrier REASSIGNED before the mark proves nothing -- the "
+          "test is positional now, not name-wide -- and a callee handed `&w` that writes "
+          "`*pp` rebinds the base from another frame, which is a hand-off kind of its own "
+          "and not the object at zero hops. The pin index is asserted separately from the "
+          "row: `addr-rebind` still PROVES the key and is still a hit, which is what tells "
+          "the temporal hole from the structural one",
+          [(t, pf[t].funcs, len(pf[t].derivations), len(pf[t].with_window),
+            [h[0] for h in pf[t].hits], sorted(d[0] for d in pf[t].discharges), pf_pin[t])
+           for t in sorted(pf_arms)])
 
     # 8l/8m. GENERATED RED: A BARE STORE INTO STATIC STORAGE IS AN ESCAPE.
     #

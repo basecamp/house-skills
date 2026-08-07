@@ -412,9 +412,24 @@ Two diagnostics for when a rule is on the wrong side of this:
   false negative wearing a clean sheet.
 
 Expect the corpus to move **down** when you invert one, and expect the losses to be
-*over-reports you can name* — for predicate D it was 21 rows where a callee really does rebind
-the field, plus 11 where the instance is passed to a function-like macro the sweep cannot
-resolve. Naming those beats clearing them.
+*over-reports you can name*. For predicate D the 32 lost rows were later settled by execution
+as **known-safe false positives** — 21 carrying a real callee rebind that provably never
+precedes the pointer's last use, 11 carrying only an unresolvable function-like macro. Naming
+them beats clearing them, and *"unproven"* is the honest label only until someone runs it.
+
+**Inverting the polarity does not finish the job — it changes what the bugs look like.** The
+review round after the inversion found two more, and both were the new machinery believing it
+had proven something it had not: a carrier tested by NAME over the whole function when the
+proof needed it tested AT THE MARK (`w = elsewhere;` between the assignment and the mark), and
+`&w` — the address of the pointer variable — modelled as the object itself, so a callee doing
+`*pp = other` rebound the base invisibly. Neither is an enumeration gap; both are the proof
+being flow- or address-blind. So after inverting, audit the proof's own primitives:
+
+- **Is every identity test positional?** "This name has held the pointer" is not "it holds it
+  here". If your alias machinery offers both, using the name-wide one inside a proof is an
+  over-clear waiting to be found.
+- **Is every hand-off kind modelled?** `x`, `&x->m` and `&x` are three different things. The
+  third lets a callee rewrite your base, and it is the one that looks like the first.
 
 ---
 
@@ -537,7 +552,7 @@ per-slot: round 4 measured stackprof's registered `empty_string` pinned while it
 sibling `objtracer` was not.
 
 **Run `--self-test` before trusting any silence** — A is 60/60 (1 skipped), B 35/35, C 73/73,
-D 67/67. Read the count, not the word: **nineteen** of those checks arrived with #29's five
+D 68/68. Read the count, not the word: **nineteen** of those checks arrived with #29's five
 follow-ups, and only one of the five moved a corpus row in the end. Four of them are pure
 over-clears — a merged slot, a deduped slot, an unindexed declaration — and every one of those
 reads as a clean sheet, so the self-test count is the only place the fix is visible at all.

@@ -776,10 +776,35 @@ variant naming no callback contributes the empty set and empties the intersectio
 **Corpus: 414 → 446, and down is correct.** `pinning-mark` clears 45 → 13. Every one of the 32
 is zlib and there are exactly two causes:
 
+**All 32 are known-safe over-reports**, settled by execution rather than by reading:
+`gzfile_read_header` is written read-the-bytes-then-discard-them, six times, never reversed,
+and `zstream_discard_input` is the *last* statement of every block that derived a pointer.
+Positive control 300/300 with no amplifier on aarch64-linux, against stock zlib and the fork;
+green ran the same paths 140,000 times clean. So the conservative rule costs **32 false
+positives on this corpus, not 32 unknowns** — still the right trade, because the alternative
+was an unsound clear, but worth stating accurately.
+
+**The causes are over-determined, so a single-cause split is a projection, not a partition.**
+Measured order-independently:
+
 | rows | cause |
 |---|---|
-| **21** | a callee genuinely rebinds the field — `gzfile_read_header` derives `RSTRING_PTR(gz->z.input)` then calls `zstream_discard_input(&gz->z, n)`, which ends `if (newlen == 0) { z->input = Qnil; }`. The reviewer's synthetic `replace(w, other)` has **21 real instances**. Whether the rebinding precedes the pointer's last use is the stated ordering blind spot, so these are *unproven*, not known-bad. |
-| **11** | `ZSTREAM_BUF_FILLED(z)` is a function-like **macro**; `strip_directives` leaves no body to read, and an unresolvable callee handed the instance is not proven. The macro is read-only, so these are over-reports — named with their cost rather than waved through. |
+| **21** | carry a **callee rebind** — `gzfile_read_header` (18) derives `RSTRING_PTR(gz->z.input)` then calls `zstream_discard_input(&gz->z, n)`, which ends `if (newlen == 0) { z->input = Qnil; }`; `zstream_sync` (3) is the same shape. The reviewer's synthetic `replace(w, other)` has real instances after all. |
+| **11** | carry **only** an unresolvable function-like macro, `ZSTREAM_BUF_FILLED(z)` (`zstream_shift_buffer` 8, `zstream_append_buffer` 3) — `strip_directives` leaves no body to read. |
+| *(4 of the 21)* | **also** carry unresolvable macros one hop down — `zstream_append_input2` via `gzfile_read_raw_ensure`/`_until_zero`, and `ZSTREAM_IS_GZFILE` via `zstream_run`. Filing those under either heading is equally true. |
+
+By tree: `zlib-3.2.1` 11, `zlib-3.2.3` 11, `zlib-basecamp-patch-1.1.1` 10.
+
+**A named non-fix, and the reason it would be sound in both directions.** Expanding
+function-like macros before the walk — harvesting `(name, params, body)` as `strip_directives`
+blanks each `#define`, at no cost to offsets, and substituting on an unbindable call — drops
+exactly the 11 (`ZSTREAM_BUF_FILLED` is `(NIL_P((z)->buf) ? 0 : RSTRING_LEN((z)->buf))`: no
+assignment, no `++`, no address-of, and its two calls receive the field's *contents*, so by the
+argument test they hand over no storage). What makes it sound rather than a blanket clear is
+that it resolves the question **both ways**: `zstream_append_input2` expands to
+`zstream_append_input`, which does `z->input = rb_str_buf_new(len)`, so those rows reclassify
+from *unresolvable* to *callee-rebind* — still hits, and now for a proven reason. Same
+prove-don't-search polarity, sharing `PIN_PROOF_DEPTH`. Not done here; scoped and priced.
 
 The pin index barely moves: **115 → 109** keys, movable unchanged at 69, and the six lost keys
 are all in one tree — privately routed, so described by shape rather than named — and none of
@@ -792,6 +817,39 @@ now declined three times.
 **So the corpus's dmarks really do pin what they claim; it is the deriving frames that cannot
 prove the field survives the window.** That is a measurement, and it is the most useful single
 number the four rounds produced.
+
+### …and the round after the inversion found two holes in the proof itself
+
+Worth separating from the four rounds above, because it is a different failure and it is the
+one to expect **after** you invert a rule. The obligations were right; two of them were
+implemented flow- or address-blind, so the code believed it had proven what it had not — and
+both failed in the **unsafe** direction, which is precisely what the inversion existed to stop.
+
+| hole | shape | why the machinery missed it |
+|---|---|---|
+| **temporal** | `struct wrap *w = p; w = elsewhere; rb_gc_mark(w->buf);` | the carrier test answered *"has this name held the instance"* — a fact about the whole body — where the proof needed *"does it hold it here"* |
+| **structural** | `replace(&w)` with `*pp = other` in the callee | `&w` is the address of the pointer **variable** and was read as the object at zero hops, so the callee was searched for member writes and never for a write *through* the parameter |
+
+**These are not one mechanism**, unlike the two earlier pairs, and the fixes do not overlap: a
+positional carrier test leaves the address-of case clearing, and an address-of hop kind leaves
+the rebound carrier proving. Worth stating, because two rounds of "these are the same thing"
+had established a pattern that does not hold here.
+
+The temporal fix needed nothing new. `tu_scope.alias_reads` is the offset-wise answer, carries
+rule 5's kill, and `alias_map`'s own docstring already said which callers want which — *"a name
+in this set has held the pointer, which is not the same claim as every mention of it reads the
+pointer"*. Predicate B shipped that exact defect once, which is why the sentence is there. This
+file then asked the wrong one anyway, inside a proof, where the polarity makes it an over-clear.
+
+**Corpus: 446 → 446.** No row moved, no discharge count moved, pin keys 109 and movable 69 both
+unchanged. Fifth consecutive round where the generated red is the only evidence the fix happened.
+
+**Two audits to run on any rule you have just inverted:**
+
+1. **Is every identity test positional?** If the alias machinery offers a name-wide and an
+   offset-wise answer, using the name-wide one inside a proof is an over-clear waiting to be found.
+2. **Is every hand-off kind modelled?** `x`, `&x->m` and `&x` are three different things. The
+   third lets a callee rewrite your base, and it is the one that looks like the first.
 
 ### The lesson that outlived all of them: an exact-path fix gets routed around by one hop
 
