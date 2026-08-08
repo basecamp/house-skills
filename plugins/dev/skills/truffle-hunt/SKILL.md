@@ -197,13 +197,23 @@ that list is next round's false-positive library.
 - **Prove the precondition actually occurred.** A test that passes because the trigger never
   fired is a false negative wearing a green tick. Assert the thing you needed to happen and
   print the evidence. Never infer "safe" from "it didn't crash."
+- **The *subject* has to be able to fail, not just the conditions around it.** Match the subject
+  into the regime where the defect expresses, not merely its size. A compaction witness relocated
+  80% of the time while the subject never moved once — it had landed in a densely-packed page the
+  compactor never evacuates, so the harness measured liveness, not mobility. Make the subject's
+  own pool sparse and prove the subject itself entered the regime; witnesses moving is not the
+  subject moving.
 - **State the sensitivity of every negative.** "Clean" is meaningless without a rate: *"200k
   operations, clean — would have caught anything above ~1/20k."* A dependency cleared at three
   iterations is not cleared, and the difference is invisible unless you write the number.
 - **Show it goes green when fixed**, where practical. Apply the fix — patch the source, pin the
   fixed release, or your own suggested diff — and re-run. A test that stays red after the
   defect is removed was measuring something else. It's also how you earn the right to file a
-  suggested fix.
+  suggested fix. The mirror is the sharper trap: a test that goes **green while the defect is
+  still present** is measuring the wrong thing too. Prove a regression test still fails on the
+  unfixed tree, and watch for an innocent setup step that closes the window before the measured
+  call — a warm-up that prepares a CIF, a control placed before the loop instead of after.
+  Sensitivity proofs apply to the tests you ship, not only to the measurements you take.
 - **Verify you are testing the artifact you think you are.** Print the loaded binary, resolved
   version and linked library. Package managers substitute builds silently.
 
@@ -348,12 +358,20 @@ can be routed by an honest reading of what pulls the trigger and still be wrong,
 *"developer chose it"* is a claim about every caller in the corpus, and only a grep and a run can
 check it.
 
-Then check the code still matches **upstream HEAD** — `gh api repos/OWNER/REPO/contents/PATH
---jq .content | base64 -d` — and search for prior art. Issue anatomy:
-[references/issue-template.md](references/issue-template.md).
+Then settle HEAD's real status, and **build and measure it — do not only diff its text.**
+`gh api repos/OWNER/REPO/contents/PATH --jq .content | base64 -d` compares source and misses a
+fix made incidentally: an unrelated performance commit can move a value into a
+conservatively-scanned buffer and close the hole while its message says nothing about safety, so
+the released source reads affected and HEAD is already clean. Reproduce on HEAD with the same
+harness — and check the fix did not merely remove your harness's trigger: a refactor that adds a
+fast path for the exact shape you drove opens no window, and its clean run proves nothing. Search
+for prior art. Issue anatomy: [references/issue-template.md](references/issue-template.md).
 
-State honestly when a version is safe only *incidentally*. Maintainers need to know the defect
-is still there.
+State honestly when a version is safe only *incidentally* — maintainers need to know every
+release is still affected. When HEAD is already fixed but no test guards the invariant, the
+contribution is not an issue and not a fix: it is a **regression test that pins the invariant**,
+so the incidental fix cannot silently regress. A fix that landed as a side effect can leave the
+same way.
 
 ---
 
@@ -390,6 +408,7 @@ its scent library rediscovers everything next time.
 - [ ] Negatives carry a stated sensitivity
 - [ ] Loaded artifact verified (binary, version, linked library)
 - [ ] Every delegated finding independently re-reproduced
+- [ ] HEAD's status measured by build-and-run before routing, not inferred from a source diff
 - [ ] Findings routed; disclosure channel picked from §7's table, and the row cited in the report
 - [ ] Every corpus member labelled; reachable vs latent shown
 - [ ] Reproducers and new scents checked into the scent library, sanitised where §7 requires
