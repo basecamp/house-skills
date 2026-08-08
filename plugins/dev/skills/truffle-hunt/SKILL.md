@@ -367,11 +367,12 @@ harness — and check the fix did not merely remove your harness's trigger: a re
 fast path for the exact shape you drove opens no window, and its clean run proves nothing. Search
 for prior art. Issue anatomy: [references/issue-template.md](references/issue-template.md).
 
-State honestly when a version is safe only *incidentally* — maintainers need to know every
-release is still affected. When HEAD is already fixed but no test guards the invariant, the
-contribution is not an issue and not a fix: it is a **regression test that pins the invariant**,
-so the incidental fix cannot silently regress. A fix that landed as a side effect can leave the
-same way.
+Report the affected range from what you measured, release by release. A clean HEAD is not
+license to underreport a release that still reproduces, and a release that is clean only
+*incidentally* is not vulnerable — do not file it as such. Name incidental safety for what it
+is: the defect is unguarded, not fixed. Where HEAD is clean but no test holds the invariant, the
+contribution is not an issue and not a fix — it is a **regression test that pins the invariant**,
+because a fix that landed as a side effect can leave the same way.
 
 ---
 
