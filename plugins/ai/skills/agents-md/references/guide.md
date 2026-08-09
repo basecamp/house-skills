@@ -11,6 +11,7 @@ Then check, in this order:
 3. **Every literal** — ports, versions, limits. Read it from the file that defines it. A version pin cited from a linter config is a favorite failure: the linter's target version and the actual runtime pin drift apart, and the file confidently states the wrong one.
 4. **Duplication of anything already in context** — a shared or global instruction file, the README, a script's own header.
 5. **Contradictions**, both internal and against other loaded files. Where two files disagree, state which wins, or delete one of them.
+6. **Bare absolutes.** Keep-or-cut isn't the only move — rephrase is. Each never/always not guarding a genuine invariant becomes default + rationale + where it stops; when no failure can be named behind it, cut it.
 
 ## The usual cut list
 
@@ -24,6 +25,13 @@ Recurring across repos:
 - The same environment variable documented in two places.
 - Unfalsifiable filler: "follow standard conventions," "use proper error handling," "write clean code." These survive because they're unarguable, and they inform nothing.
 - Setup steps the setup script already performs and prints.
+
+## The usual add list
+
+Shorter, and the inverse failure: most files over-mandate and under-empower.
+
+- The file's own epistemic status — priors, not law; override with a flagged reason when the code in front of you disagrees.
+- The working norms — how hard to push back, adversarial review of one's own diff before calling it done, that "works" isn't "finished." No codebase demonstrates these and no agent assumes them, so where they're missing, that's a high-value addition, not padding.
 
 ## Worked example
 
