@@ -1,0 +1,24 @@
+plugins/ai/skills/agents-md/references/guide.md
+  s_e34f3927a5c88e::t_3726863144a545 14
+  s_e34f3927a5c88e::t_f7d7222a7bbc58 29-35
+plugins/ai/skills/agents-md/SKILL.md
+  s_e34f3927a5c88e::t_ab47c3bc0ede7f 51
+  s_e34f3927a5c88e::t_3a5768193ab3fa 54-64
+  s_e34f3927a5c88e::t_e814ec58cf0215 38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "9cfeaa3b797597971f1541fc08d362c134bb4c94",
+  "prompts": {},
+  "sessions": {
+    "s_e34f3927a5c88e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "48e251af-b345-4187-91a9-d00c2be16f80",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
