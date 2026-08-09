@@ -30,7 +30,7 @@ Recurring across repos:
 
 Shorter, and the inverse failure: most files over-mandate and under-empower.
 
-- The file's own epistemic status — priors, not law; override with a flagged reason when the code in front of you disagrees.
+- The file's own epistemic status — the defaults are priors, not law: override with a flagged reason when the code in front of you disagrees. Conflicts with the genuine invariants are surfaced, not overridden.
 - The working norms — how hard to push back, adversarial review of one's own diff before calling it done, that "works" isn't "finished." No codebase demonstrates these and no agent assumes them, so where they're missing, that's a high-value addition, not padding.
 
 ## Worked example

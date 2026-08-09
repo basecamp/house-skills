@@ -59,7 +59,7 @@ Reserve absolutes for genuine invariants — irreversibility, data loss, securit
 
 Two lines almost no file has, and nearly every file needs:
 
-- **The file's own status, stated once.** These are priors, to be overridden when the code in front of you disagrees — flag the conflict rather than silently obeying or silently routing around it. The agent's prior is obedience, so only the file can license the judgment you actually want; a well-argued objection is worth more than compliance.
+- **The file's own status, stated once.** The defaults are priors, to be overridden when the code in front of you disagrees — flag the conflict rather than silently obeying or silently routing around it. The invariants stay binding: a conflict with one is surfaced and stopped on, not overridden — a wrong invariant gets challenged by argument, never by acting past it. The agent's prior is obedience, so only the file can license the judgment you actually want; a well-argued objection is worth more than compliance.
 - **Working norms.** The highest-value TASTE is what the code can't teach and the agent won't assume: how hard to push back, whether to attack its own diff before calling it done, that "works" isn't "finished." Absent by default; name them. Recommend them as content — where they live and how they're phrased is the repo's call, per [the anti-template rule](references/guide.md#anti-patterns-in-the-file-youre-writing).
 
 ## Prefer repo paths to invented examples
