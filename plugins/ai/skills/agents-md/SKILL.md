@@ -35,7 +35,7 @@ Nothing goes in without a classification. Most existing content is the first kin
 |---|---|---|
 | **OBVIOUS** | Derivable from `ls`, `--help`, or framework convention | Cut |
 | **GOTCHA** | Non-obvious, repo-specific, costs a wasted turn when unknown | Keep, phrased failure-mode-first |
-| **TASTE** | Not derivable from the code | Keep only where it's counter-prior |
+| **TASTE** | Not derivable from the code | Keep only where it's counter-prior, phrased as a default with its reason |
 | **POINTER** | Depth someone occasionally needs | Name the path and when you'd want it |
 
 "Run tests with `rails test`" is OBVIOUS. "A MySQL connection error always means run `bin/setup`, never `docker compose up`" is a GOTCHA — it names the failure first, which is how someone will encounter it.
@@ -48,8 +48,19 @@ That reclassifies most style guidance:
 
 - **Recoverable by imitation** — method ordering, file layout, naming conventions, test structure. Leave it out. The neighboring file teaches it better than a paragraph can.
 - **Imitation is a trap** — legacy directories and deprecated patterns the model will happily copy because they're right there. This *must* be always-on, and it's usually missing or buried at the bottom. In an old codebase, "read the surrounding code" makes the model more wrong in exactly these places.
-- **Counter-prior** — where the industry default disagrees with the house. The model's prior is strong and wrong here, so prose is the only fix.
+- **Counter-prior** — where the industry default disagrees with the house. The model's prior is strong and wrong here, so prose is the only fix — phrased as the next section says, not as a bare never.
 - **Hard-enforced but undocumented** — anything a linter or CI check rejects. Each one costs a CI round-trip when missed, which makes them the highest-value lines in the file.
+
+## Keep rules as defaults, not decrees
+
+A kept rule is applied by a later agent to cases the author never saw. That takes the *why*, and room to notice when it doesn't hold. Phrase a TASTE rule as **default + rationale + where it stops** — "prefer X over Y, because Z" travels to the unforeseen case. A bare "never Y" leaves the reader unable to tell an exception from a violation, so under pressure it contorts the work to satisfy the letter: a blanket "never stub our own code, no `define_method`" can push a test off a clean one-line stub onto a state-mutating workaround worse than the stub it forbids.
+
+Reserve absolutes for genuine invariants — irreversibility, data loss, security, a hard CI gate — and give even those their reason. A "never" with no failure named behind it is a default in a decree's clothing: soften it or cut it.
+
+Two lines almost no file has, and nearly every file needs:
+
+- **The file's own status, stated once.** The defaults are priors, to be overridden when the code in front of you disagrees — flag the conflict rather than silently obeying or silently routing around it. The invariants stay binding: a conflict with one is surfaced and stopped on, not overridden — a wrong invariant gets challenged by argument, never by acting past it. The agent's prior is obedience, so only the file can license the judgment you actually want; a well-argued objection is worth more than compliance.
+- **Working norms.** The highest-value TASTE is what the code can't teach and the agent won't assume: how hard to push back, whether to attack its own diff before calling it done, that "works" isn't "finished." Absent by default; name them. Recommend them as content — where they live and how they're phrased is the repo's call, per [the anti-template rule](references/guide.md#anti-patterns-in-the-file-youre-writing).
 
 ## Prefer repo paths to invented examples
 
