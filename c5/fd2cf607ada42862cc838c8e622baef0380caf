@@ -1,0 +1,22 @@
+plugins/dev/skills/address-pr-reviews/SKILL.md
+  s_8a881e0b15478b::t_f60980cdc0592a 94-102,104-107
+  s_8a881e0b15478b::t_c226363e2c05a0 203-207
+  s_8a881e0b15478b::t_b371854b1e4cfb 37
+  s_8a881e0b15478b::t_6da7b9bbc82937 146-149
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "c5fd2cf607ada42862cc838c8e622baef0380caf",
+  "prompts": {},
+  "sessions": {
+    "s_8a881e0b15478b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5a5009c2-58bf-4654-8c0c-c3163395286d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>"
+    }
+  }
+}
