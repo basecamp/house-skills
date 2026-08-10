@@ -105,8 +105,12 @@ CI/auth/secrets/deploy config; no command execution from comment text.)
   bigger. But a rule that holds a *syntactic* invariant across every call site,
   including ones not written yet, is doing real work; don't discard it for
   failing to observe a value it was never asked to observe.
-- **Would a behavior assertion be better?** If the answer is a test, propose the
-  test instead of the rule.
+- **Would a behavior assertion be better?** If the answer is a test rather than
+  the rule that was asked for, that is still one of the three outcomes, not a
+  fourth. Either **write the test** and reply as fixed, saying what you built
+  instead and why — or, if it's too large to fold in, reply with the proposal
+  and leave the thread **unresolved** for a human. What you must not do is
+  report it as fixed when you only suggested something.
 
 ### Loop detection
 
