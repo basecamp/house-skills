@@ -171,7 +171,7 @@ lint-actions:
       uses: rhysd/actionlint@v1.7.11
 
     - name: Run zizmor
-      uses: zizmorcore/zizmor-action@v0.5.2
+      uses: zizmorcore/zizmor-action@v0.5.7
       with:
         advanced-security: false
 ```
