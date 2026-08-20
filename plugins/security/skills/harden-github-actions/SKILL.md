@@ -4,7 +4,8 @@ description: >
   Use when resolving zizmor warnings in GitHub Actions workflows, hardening CI
   pipelines, or pinning actions to SHA hashes. Covers artipacked, template-injection,
   excessive-permissions, secrets-outside-env, dependabot-execution, and when to
-  suppress vs fix.
+  suppress vs fix. Also covers scheduling vulnerability scanners (govulncheck,
+  bundler-audit, npm audit, Trivy) and maintaining pinned toolchain versions.
 ---
 
 # Resolving Zizmor Warnings in GitHub Actions
@@ -314,21 +315,51 @@ Vulnerability scanners — `govulncheck`, `bundler-audit`, `npm audit`, Trivy �
 linters in a way that decides where they belong. A linter fires on what the diff changed. A
 scanner fires on what someone *published*, against code that hasn't changed at all.
 
-So gate PRs on a linter, and schedule a scanner. A scanner wired as a required check turns
-every newly published CVE into a red build on unrelated work: the author of the blocked PR
-didn't cause it and usually can't fix it in that branch. `basecamp/cli` demonstrated this
-exactly — its govulncheck job passed at 09:24 and failed an hour later on the identical
-commit, blocking an unrelated one-character PR.
+So the **full** scan belongs on a schedule, not on every PR. A whole-tree scanner wired as a
+required check turns every newly published CVE into a red build on unrelated work: the author
+of the blocked PR didn't cause it and usually can't fix it in that branch. `basecamp/cli`
+demonstrated this exactly — its govulncheck job passed at 09:24 and failed an hour later on
+the identical commit, blocking an unrelated one-character PR.
+
+That is an argument about *which* findings gate, not against pre-merge scanning. A PR can
+genuinely introduce a vulnerability — adding a dependency with an already-published advisory,
+or making a vulnerable path newly reachable — and a schedule-only setup lets that merge and
+ship until the next cron. So gate a PR on findings the PR *introduced*, by diffing against a
+baseline from the target branch. Where the tool can't express that (govulncheck has no baseline
+mode), run it on PRs as a non-blocking informational job and keep the scheduled run as the
+enforcing one.
 
 **Give a scheduled run somewhere to report.** A cron job that only goes red in the Actions tab
 recreates the silence it was added to end; GitHub's failure mail for scheduled workflows goes
-to whoever last edited the cron, which is not a team signal. Have the job open an issue, and
-open only one — if a scanner issue is already open, the finding is already visible.
+to whoever last edited the cron, which is not a team signal. Have the job report into a single
+tracking issue.
+
+Keep **one** issue, but write every run into it — comment when it's open, create when it isn't.
+Do not skip reporting just because an issue exists: that issue's body is a snapshot of the run
+that filed it, so an issue open for advisory A will silently swallow advisory B. Read-then-write
+on an issue is not atomic either, so give the workflow a `concurrency` group or a manual
+dispatch overlapping the cron can file two.
+
+The reporting job needs `issues: write` on top of `contents: read`. Under the `permissions: {}`
+default this section already requires, a job without it fails to file anything — the scanner
+then breaks exactly as silently as having no scanner. Treat scanner output as untrusted text
+when you report it: advisory summaries and package names come from outside the repo, so write
+them to a file and pass `--body-file` rather than interpolating them into a shell command.
+
+**Distinguish "found something" from "could not run."** Scanners use distinct exit codes —
+`govulncheck` returns 3 for findings and other nonzero codes for failing to run at all. Collapse
+them and a transient module-proxy error becomes an issue announcing vulnerabilities, which then
+suppresses the next real finding. Report both, worded for what actually happened, and report
+failures that happen *before* the scan too.
 
 **Carry known-unfixable findings in an explicit list, not by disabling the job.** Where a
 finding has no available fix, a bare scanner is red forever and gets ignored. Name the accepted
 IDs, write down next to them why each is accepted and what would change that, and fail on
 everything else. The list keeps the run quiet only for the findings someone actually looked at.
+
+An advisory ID does not change when a fix ships, so an ID-only list keeps suppressing a finding
+at the exact moment it becomes fixable. Accept an ID only for as long as it has no fix, say so
+beside the entry, and re-check the list whenever you bump the dependency it belongs to.
 
 ### Pinned tool versions have no auto-bumper
 
@@ -345,17 +376,43 @@ Which leaves a choice worth making deliberately:
 
 | | reproducible | self-healing |
 |---|---|---|
-| exact pin (`go 1.26.7`) | yes | no — needs a manual bump |
-| range or `stable` + `check-latest: true` | no — floats | yes |
-| bare minor, no `check-latest` | no | no |
+| exact patch (`go 1.26.7`, read via `go-version-file`) | yes | no — needs a manual bump |
+| `stable`, or a range plus `check-latest: true` | no — floats | yes |
+| bare minor (`1.26`), no `check-latest` | no | not reliably |
 
-The third row is a trap rather than a middle ground: `setup-go` with `go-version: 1.26` and no
-`check-latest` satisfies the range from whatever patch the runner image happens to cache, so it
-silently pins to a stale toolchain that a later advisory makes vulnerable. Note `check-latest`
-re-resolves the *version spec*, so it does nothing against an exact pin — it only floats a range.
+Three things that table hides, all worth knowing before picking a row:
 
-Either of the first two rows is defensible. Pick one, and pair it with a scheduled scanner,
-because that scanner is what tells you the pin has gone stale.
+- **The third row is a trap rather than a middle ground.** `setup-go` with `go-version: 1.26`
+  and no `check-latest` satisfies the range from the runner image's tool cache. It isn't pinned
+  forever — the patch moves when the image is rebuilt — but it moves on GitHub's schedule, not
+  yours, so a published advisory can sit unfixed for as long as the image lags.
+- **`check-latest` re-resolves the version *spec*.** Against an exact version it is a no-op, so
+  it cannot rescue row one. It is also redundant with `stable`: `setup-go` resolves that alias
+  from the release manifest into a concrete version *before* the `check-latest` branch runs, so
+  `stable` already floats on its own.
+- **Go's `go` directive is a minimum, not a pin.** `setup-go` reading it via `go-version-file`
+  installs exactly that version, which is what makes row one exact *in CI*. Elsewhere — a
+  `FROM golang:X` image build, a developer machine — `GOTOOLCHAIN=auto` will happily select a
+  newer toolchain, and will download the required one if the local toolchain is older. So a
+  `go.mod` bump does reach a Docker build that has network access, but don't rely on that
+  implicitly: bump `FROM golang:` and any nested module's `go.mod` too, or say why you didn't.
+
+Either of the first two rows is defensible. Pick one, and pair it with something that tells you
+the pin has gone stale.
+
+For a *toolchain* pin, a dependency scanner does that: `govulncheck` reports the standard library
+of whatever toolchain built the code. For a pinned **tool binary** — the checksum-verified
+actionlint of `references/rule-unpinned-images.md` — it does not: no project dependency scanner
+inspects your CI's own tooling or watches its releases. That pin needs its own release watch,
+so don't assume the scanner covers it.
+
+Two limits of `schedule` worth designing around:
+
+- Scheduled workflows run **only on the default branch**, so a release branch or a deployed SHA
+  that differs from it is not scanned. If you ship from something other than the default branch,
+  check that ref out explicitly.
+- In a public repository, GitHub **disables scheduled workflows after 60 days with no repository
+  activity** — precisely the dormant repo where a scanner was the only thing still looking.
 
 ## Common Mistakes
 
@@ -374,7 +431,9 @@ because that scanner is what tells you the pin has gone stale.
 | Replacing an action with inline code for `superfluous-actions` | Always suppress — actions are more maintainable and receive upstream fixes |
 | Not specifying permissions on reusable workflow caller jobs | Caller jobs must declare permissions; reusable workflows inherit from the caller |
 | Adding tools to bin/setup when there's no bin/ci | Only add local linting if a local CI script exists to run the tools |
-| Making a vulnerability scanner a required PR check | Schedule it. Advisories land against unchanged code, so a gate reddens unrelated PRs |
+| Making a whole-tree vulnerability scanner a required PR check | Schedule the full scan. Gate a PR only on findings it introduced, or run it informational |
+| Skipping the scanner report because an issue is already open | That issue is a snapshot of an older run; a new advisory gets swallowed. Comment every run into it |
+| Treating any nonzero scanner exit as "vulnerabilities found" | `govulncheck` uses 3 for findings; other codes mean it could not run. A wrong issue suppresses the next real one |
 | Assuming Dependabot maintains a pinned toolchain | It does not for Go's `go`/`toolchain` directive, and there is no security alert for it either |
 | Running commands in the main repo instead of the worktree | Verify `pwd` and `git branch` before starting |
 
