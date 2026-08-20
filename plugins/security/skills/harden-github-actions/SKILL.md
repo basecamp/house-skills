@@ -423,8 +423,11 @@ A scanner is part of that, but only part, and the gap is the same in both direct
   `references/rule-unpinned-images.md` — no project dependency scanner looks at it at all: it
   inspects your dependencies, not your CI's own tooling.
 
-So pair an exact pin with a scanner *and* a release watch. The scanner tells you the pin is
-dangerous; only the release watch tells you it is merely stale.
+So pair an exact pin with a monitor, and be clear about which one is doing the work. For a
+**toolchain** pin that is a scanner plus a release watch: the scanner tells you the pin is
+dangerous, the release watch tells you it is merely stale. For a pinned **tool binary** the
+scanner contributes nothing at all, so the release and advisory watch has to carry both jobs —
+a vulnerable actionlint release goes unnoticed otherwise.
 
 Two limits of `schedule` worth designing around:
 
