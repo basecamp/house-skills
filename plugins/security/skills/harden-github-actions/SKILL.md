@@ -308,6 +308,55 @@ are merely inert; leave them rather than churn the diff. On the semver-capable e
 (bundler, npm, gomod, gradle, pip, cargo, maven, nuget, …) all four keys work, so any existing
 combination stands as written.
 
+## Advisory scanning: put it on a clock, not on the diff
+
+Vulnerability scanners — `govulncheck`, `bundler-audit`, `npm audit`, Trivy — differ from
+linters in a way that decides where they belong. A linter fires on what the diff changed. A
+scanner fires on what someone *published*, against code that hasn't changed at all.
+
+So gate PRs on a linter, and schedule a scanner. A scanner wired as a required check turns
+every newly published CVE into a red build on unrelated work: the author of the blocked PR
+didn't cause it and usually can't fix it in that branch. `basecamp/cli` demonstrated this
+exactly — its govulncheck job passed at 09:24 and failed an hour later on the identical
+commit, blocking an unrelated one-character PR.
+
+**Give a scheduled run somewhere to report.** A cron job that only goes red in the Actions tab
+recreates the silence it was added to end; GitHub's failure mail for scheduled workflows goes
+to whoever last edited the cron, which is not a team signal. Have the job open an issue, and
+open only one — if a scanner issue is already open, the finding is already visible.
+
+**Carry known-unfixable findings in an explicit list, not by disabling the job.** Where a
+finding has no available fix, a bare scanner is red forever and gets ignored. Name the accepted
+IDs, write down next to them why each is accepted and what would change that, and fail on
+everything else. The list keeps the run quiet only for the findings someone actually looked at.
+
+### Pinned tool versions have no auto-bumper
+
+If CI pins a toolchain or a downloaded binary, nothing in Dependabot will move it:
+
+- Dependabot does **not** update Go's `go`/`toolchain` directive
+  ([dependabot-core#13520](https://github.com/dependabot/dependabot-core/issues/13520), open
+  since 2025-11-11), and GitHub raises no security alert for a vulnerable toolchain version in
+  `go.mod` either. Neither the version-update nor the security-update path covers it.
+- The same applies to a checksum-verified release binary (see `references/rule-unpinned-images.md`)
+  — version and checksum are bumped by hand.
+
+Which leaves a choice worth making deliberately:
+
+| | reproducible | self-healing |
+|---|---|---|
+| exact pin (`go 1.26.7`) | yes | no — needs a manual bump |
+| range or `stable` + `check-latest: true` | no — floats | yes |
+| bare minor, no `check-latest` | no | no |
+
+The third row is a trap rather than a middle ground: `setup-go` with `go-version: 1.26` and no
+`check-latest` satisfies the range from whatever patch the runner image happens to cache, so it
+silently pins to a stale toolchain that a later advisory makes vulnerable. Note `check-latest`
+re-resolves the *version spec*, so it does nothing against an exact pin — it only floats a range.
+
+Either of the first two rows is defensible. Pick one, and pair it with a scheduled scanner,
+because that scanner is what tells you the pin has gone stale.
+
 ## Common Mistakes
 
 | Mistake | Correction |
@@ -325,6 +374,8 @@ combination stands as written.
 | Replacing an action with inline code for `superfluous-actions` | Always suppress — actions are more maintainable and receive upstream fixes |
 | Not specifying permissions on reusable workflow caller jobs | Caller jobs must declare permissions; reusable workflows inherit from the caller |
 | Adding tools to bin/setup when there's no bin/ci | Only add local linting if a local CI script exists to run the tools |
+| Making a vulnerability scanner a required PR check | Schedule it. Advisories land against unchanged code, so a gate reddens unrelated PRs |
+| Assuming Dependabot maintains a pinned toolchain | It does not for Go's `go`/`toolchain` directive, and there is no security alert for it either |
 | Running commands in the main repo instead of the worktree | Verify `pwd` and `git branch` before starting |
 
 ## Common PR Feedback (Incorrect or Misleading)
