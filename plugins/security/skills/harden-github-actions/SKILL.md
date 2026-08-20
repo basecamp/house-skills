@@ -334,6 +334,16 @@ baseline from the target branch. Where the tool can't express that (govulncheck 
 mode), run it on PRs as a non-blocking informational job and keep the scheduled run as the
 enforcing one.
 
+**Check whether code scanning can do the reporting for you first.** Uploading SARIF to GitHub
+code scanning hands GitHub the dedup, the alert state, the reopening, and dismissal-with-reason
+— all the parts you would otherwise hand-roll. Many scanners emit it (`govulncheck -format
+sarif`, Trivy, and others). Verify availability before designing around it, though: at
+37signals it is not an option fleet-wide, because the org is on the **Team plan** and code
+scanning is rejected on every private repository ("Code Security must be enabled for this
+repository"). It works on public repos only. Splitting a fleet across two reporting mechanisms
+is worse than one that works everywhere, so we hand-roll — but check, because where it *is*
+available it deletes most of what follows.
+
 **Give a scheduled run somewhere to report.** A cron job that only goes red in the Actions tab
 recreates the silence it was added to end; GitHub's failure mail for scheduled workflows goes
 to whoever last edited the cron, which is not a team signal. Have the job report into a single
@@ -437,6 +447,17 @@ Two limits of `schedule` worth designing around:
 - In a public repository, GitHub **disables scheduled workflows after 60 days with no repository
   activity** — precisely the dormant repo where a scanner was the only thing still looking.
 
+**Pin the checkout to the ref you ship, and let that be the only ref.** `workflow_dispatch` can
+target any branch or tag, so a scanner that scans "whatever ref triggered it" has to carry ref
+identity through everything downstream: which issue to file against, how to keep a branch and a
+same-named tag apart, how to keep concurrent runs on different refs from racing. That is a lot
+of machinery in service of pre-checking a branch, which is not what a scheduled scanner is for.
+
+Check out the default branch explicitly and the whole class disappears — one repo, one tracking
+issue, one fixed title, and `workflow_dispatch` means "run it now" rather than "run it here".
+Record the scanned commit so you keep traceability. Reach for per-ref scanning only if you
+genuinely ship from more than one ref, and then accept the identity plumbing knowingly.
+
 ## Common Mistakes
 
 | Mistake | Correction |
@@ -457,6 +478,7 @@ Two limits of `schedule` worth designing around:
 | Making a whole-tree vulnerability scanner a required PR check | Schedule the full scan. Gate a PR only on findings it introduced, or run it informational |
 | Skipping the scanner report because an issue is already open | That issue is a snapshot of an older run; a new advisory gets swallowed. Comment every run into it |
 | Treating any nonzero scanner exit as "vulnerabilities found" | `govulncheck` uses 3 for findings; other codes mean it could not run. A wrong issue suppresses the next real one |
+| Letting a scanner scan whichever ref dispatched it | Pin the checkout to the ref you ship; ref-parametric reporting drags in per-ref issues, tag/branch collisions and concurrency keys |
 | Assuming Dependabot maintains a pinned toolchain | It does not for Go's `go`/`toolchain` directive, and there is no security alert for it either |
 | Running commands in the main repo instead of the worktree | Verify `pwd` and `git branch` before starting |
 
