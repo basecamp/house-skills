@@ -58,8 +58,9 @@ documented permission requirements before proceeding. Then add it to this table.
 | `sigstore/cosign-installer` | none | Only installs cosign. Subsequent cosign *commands* need `id-token: write` for OIDC keyless signing. |
 | `softprops/action-gh-release` | `contents: write` | + `discussions: write` if using `discussion_category_name` |
 | `ruby/actions` (`ruby_versions.yml` reusable workflow) | none | Caller job needs `permissions: {}`. Fetches the CI version list from cache.ruby-lang.org via a `run:` script; no checkout, no GitHub API, no GITHUB_TOKEN. |
+| `ruby/setup-ruby` | none | Let `actions/checkout` contribute `contents: read` when it is present; this action needs nothing of its own. Its `token` is only attached to `tc.downloadTool` calls for public Ruby release assets, to avoid rate limits. `bundler-cache: true` reaches the Actions cache service via `@actions/cache` and runner-injected credentials (`ACTIONS_RUNTIME_TOKEN`), never GITHUB_TOKEN — **do not add `actions: write`**. Not the same action as the deprecated `actions/setup-ruby`. |
 | `rubygems/configure-rubygems-credentials` | `id-token: write` | + `contents: write` only if using `bundle exec rake release` for git push |
-| `zizmorcore/zizmor-action` | none | With `advanced-security: false` (recommended in this skill). With `advanced-security: true`: `security-events: write`; private repos also need `contents: read`, `actions: read`. |
+| `zizmorcore/zizmor-action` | none (`permissions: {}`) | With `advanced-security: false`. Add `contents: read` only for private/internal repos, and that is for `actions/checkout`. With `advanced-security: true` (the default) it needs `security-events: write`, plus `contents: read` and `actions: read` on private repos, to upload SARIF. Note `advanced-security: false` *does* fail the job on findings, whereas AGS mode does not fail **on findings** — it still propagates zizmor's exit code for internal errors, and for collecting no inputs unless `fail-on-no-inputs` is false. |
 | `zzak/action-discord` | `contents: read` | Reads commit metadata for Discord webhook notifications |
 
 ## Common patterns (not specific actions)
