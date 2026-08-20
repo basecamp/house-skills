@@ -278,8 +278,35 @@ cooldown:
   default-days: 7
 ```
 
-If an ecosystem entry is missing the cooldown block, add it. If an existing cooldown block
-has different values, **override them** with the values above — these are the standard.
+If an ecosystem entry is missing the cooldown block, add it. If a cooldown block is already
+there with different values, **leave it alone.** The values above are a starting default for
+a repo that has none — not a fleet standard to converge on.
+
+The five main apps (bc3, haystack, launchpad, queenbee, fizzy) all deliberately run a longer
+soak on majors:
+
+```yaml
+cooldown:
+  default-days: 7
+  semver-major-days: 14
+```
+
+Overriding that with the block above would *shorten* their major-bump soak from 14 days to 7,
+which is backwards. A duration that merely differs from the block above is a deliberate choice,
+not drift — leave it.
+
+**One exception: fix a block that buys no cooldown at all.** The semver-granular keys are, per
+GitHub's own option reference, *"supported only where indicated"* — ignored everywhere else.
+These ecosystems honour **`default-days` only**:
+
+> Bazel, Devcontainers, Docker, Docker Compose, GitHub Actions, Gitsubmodule, Helm, Nix flakes,
+> OpenTofu, pre-commit, Terraform, vcpkg
+
+So on one of those, a block with semver keys and **no `default-days`** has every key ignored and
+no cooldown applied — add `default-days`. Semver keys sitting *alongside* a `default-days` there
+are merely inert; leave them rather than churn the diff. On the semver-capable ecosystems
+(bundler, npm, gomod, gradle, pip, cargo, maven, nuget, …) all four keys work, so any existing
+combination stands as written.
 
 ## Common Mistakes
 

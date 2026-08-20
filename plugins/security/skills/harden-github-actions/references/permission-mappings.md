@@ -22,10 +22,10 @@ documented permission requirements before proceeding. Then add it to this table.
 | `actions/download-artifact` | none | `actions: read` only when using `github-token` input to download from other repos/workflow runs |
 | `actions/github-script` | depends on script | No fixed permissions; required permissions depend on which GitHub API calls the script makes. Key distinction: PR comments (`gh pr comment`, `updateIssueComment` on PR objects) need `pull-requests: write`; applying labels via the Issues API needs `issues: write`. Read the script to determine. |
 | `actions/labeler` | `contents: read`, `pull-requests: write` | + `issues: write` only if the action needs to create labels that don't already exist |
-| `actions/setup-go` | `contents: read` | |
-| `actions/setup-java` | `contents: read` | |
-| `actions/setup-node` | `contents: read` | |
-| `actions/setup-ruby` | `contents: read` | |
+| `actions/setup-go` | none | Let `actions/checkout` contribute `contents: read` when it is present; this action needs nothing of its own. Its `token` is only attached as an auth header when pulling Go distributions from the public `actions/go-versions` repo, to avoid rate limits — it makes no API call against the calling repo, and the input defaults to empty on GHES. `cache: true` reaches the Actions cache service via `@actions/cache` and runner-injected credentials, never GITHUB_TOKEN. |
+| `actions/setup-java` | none | Let `actions/checkout` contribute `contents: read` when it is present. Its `token` only authenticates fetches of version manifests hosted on github.com (e.g. the Microsoft Build of OpenJDK), to avoid rate limits; no API call touches the calling repo. `cache: true` uses `@actions/cache` and runner credentials, not GITHUB_TOKEN. Separately, `settings.xml` generation defaults the Maven server password to the literal env var name `GITHUB_TOKEN` — if you then publish to GitHub Packages, that *publish* step needs `packages: write`, which is not a permission of this action. |
+| `actions/setup-node` | none | Let `actions/checkout` contribute `contents: read` when it is present; this action needs nothing of its own. Its `token` is only attached as an auth header when pulling Node distributions from the public `actions/node-versions` repo, to avoid rate limits, and defaults to empty on GHES. `cache: npm\|yarn\|pnpm` reaches the Actions cache service via `@actions/cache` and runner-injected credentials, never GITHUB_TOKEN. |
+| `actions/setup-ruby` | none | Deprecated and archived upstream; it has no `token` input at all, so there is nothing for GITHUB_TOKEN to scope. Use `ruby/setup-ruby` instead. |
 | `actions/stale` | `issues: write`, `pull-requests: write` | + `contents: write` when `delete-branch: true` |
 | `actions/upload-artifact` | none | Uses Actions artifact storage via implicit runner credentials |
 | `actions/upload-pages-artifact` | none | Only creates a tar archive |
