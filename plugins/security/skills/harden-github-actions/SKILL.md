@@ -31,6 +31,11 @@ git branch   # should show the feature branch, not main
 
 ## Workflow Order
 
+This ordering governs a **zizmor-hardening pass**. If you are here only to schedule a
+vulnerability scanner or to sort out a pinned toolchain, go straight to
+"Advisory scanning: put it on a clock, not on the diff" — those tasks stand on their own and
+do not require a repository-wide hardening pass first.
+
 Always work in this order. Each step is a separate commit.
 
 1. **Add zizmor CI job** using the standard template
@@ -346,6 +351,13 @@ then breaks exactly as silently as having no scanner. Treat scanner output as un
 when you report it: advisory summaries and package names come from outside the repo, so write
 them to a file and pass `--body-file` rather than interpolating them into a shell command.
 
+**Refresh the advisory database in the same job.** A scan is only as fresh as the data it
+reads, and several tools keep that data locally: `bundle-audit check` reads a cached
+`ruby-advisory-db` unless you pass `--update` (or run `bundle-audit update` first). Put the
+scan on a clock without this and a cached or self-hosted runner keeps passing against last
+month's advisories — the failure is invisible, because a stale database looks exactly like
+good news. `govulncheck` queries `vuln.go.dev` at run time and needs nothing extra.
+
 **Distinguish "found something" from "could not run."** Scanners use distinct exit codes —
 `govulncheck` returns 3 for findings and other nonzero codes for failing to run at all. Collapse
 them and a transient module-proxy error becomes an issue announcing vulnerabilities, which then
@@ -400,11 +412,19 @@ Three things that table hides, all worth knowing before picking a row:
 Either of the first two rows is defensible. Pick one, and pair it with something that tells you
 the pin has gone stale.
 
-For a *toolchain* pin, a dependency scanner does that: `govulncheck` reports the standard library
-of whatever toolchain built the code. For a pinned **tool binary** — the checksum-verified
-actionlint of `references/rule-unpinned-images.md` — it does not: no project dependency scanner
-inspects your CI's own tooling or watches its releases. That pin needs its own release watch,
-so don't assume the scanner covers it.
+A scanner is part of that, but only part, and the gap is the same in both directions:
+
+- For a **toolchain** pin, `govulncheck` reports the standard library of whatever toolchain
+  built the code — so it catches a *reachable* stdlib advisory. It is not a release monitor: a
+  newer patch with nothing reachable in it, or a fix in the compiler or `cmd/go` rather than in
+  the analysed package graph, leaves the scan green while the pin ages. Watch Go's release and
+  security announcements as well.
+- For a pinned **tool binary** — the checksum-verified actionlint of
+  `references/rule-unpinned-images.md` — no project dependency scanner looks at it at all: it
+  inspects your dependencies, not your CI's own tooling.
+
+So pair an exact pin with a scanner *and* a release watch. The scanner tells you the pin is
+dangerous; only the release watch tells you it is merely stale.
 
 Two limits of `schedule` worth designing around:
 
