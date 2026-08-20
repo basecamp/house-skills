@@ -292,7 +292,21 @@ cooldown:
 ```
 
 Overriding that with the block above would *shorten* their major-bump soak from 14 days to 7,
-which is backwards. Only change an existing cooldown when the repo's owner asks you to.
+which is backwards. A duration that merely differs from the block above is a deliberate choice,
+not drift — leave it.
+
+**One exception: fix a block that buys no cooldown at all.** The semver-granular keys are, per
+GitHub's own option reference, *"supported only where indicated"* — ignored everywhere else.
+These ecosystems honour **`default-days` only**:
+
+> Bazel, Devcontainers, Docker, Docker Compose, GitHub Actions, Gitsubmodule, Helm, Nix flakes,
+> OpenTofu, pre-commit, Terraform, vcpkg
+
+So on one of those, a block with semver keys and **no `default-days`** has every key ignored and
+no cooldown applied — add `default-days`. Semver keys sitting *alongside* a `default-days` there
+are merely inert; leave them rather than churn the diff. On the semver-capable ecosystems
+(bundler, npm, gomod, gradle, pip, cargo, maven, nuget, …) all four keys work, so any existing
+combination stands as written.
 
 ## Common Mistakes
 

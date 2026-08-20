@@ -26,7 +26,15 @@ action at all. It downloads the release binary and verifies it against a recorde
     curl --silent --show-error --fail --location --output actionlint.tar.gz \
       "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
     echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum --check
+    mkdir --parents "${RUNNER_TEMP}/actionlint"
+    tar --extract --gzip --file actionlint.tar.gz --directory "${RUNNER_TEMP}/actionlint" actionlint
+    rm actionlint.tar.gz
+    echo "${RUNNER_TEMP}/actionlint" >> "$GITHUB_PATH"
 ```
+
+The last four lines are load-bearing: `sha256sum --check` verifies the archive but leaves the
+binary inside it, so a step that stops there fails the next `actionlint` call with
+command-not-found. Extract it and put it on `PATH` in the same step.
 
 This gives a genuinely immutable artifact where a tag cannot. The cost is a version and a
 checksum to bump together on every upgrade, which dependabot will not do for you — so it
