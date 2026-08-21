@@ -25,10 +25,16 @@ Do **not** activate when:
 - The user merely names, quotes, discusses, audits, or configures this skill.
 - The user asks the current agent for ordinary review, feedback, validation, planning,
   or an opinion without explicitly requesting another independent reviewer.
-- A message is only a status update or follow-up from an earlier consultation and does
+- A message is only a status update or follow-up from a completed consultation and does
   not explicitly request another review round.
 - `ralph-lisa-loop` is active. That workflow owns its external-review channel; do not
   nest this skill unless the user explicitly asks for a separate consultation as well.
+
+An already-running consultation is exempt. If `review-log.md` or `review-session.md`
+exists for the current consultation, it was already explicitly started, so continue it
+when the user supplies a requested mediator decision or asks to resume. A reply such as
+"Option A" after a decision-point prompt applies that decision and continues the existing
+session; the explicit-opt-in requirement governs initial activation, not continuation.
 
 If the gate fails, answer normally and stop. Do not open the guide, spawn an expert, or
 create consultation artifacts.

@@ -549,6 +549,7 @@ If any check fails, fix the log structure before proceeding.
 | Checks pass but no real work done | Eval checks are smoke tests, not proof of work | Require human attestation in final synthesis - the real gate |
 | Round 1 external review echoes self-review | Self-review was shared before initial external review | Keep Round 1 reviews independent - share synthesis only in later rounds |
 | Ordinary review or a meta-discussion launches an expert | Broad selection metadata bypassed user intent | Keep the supported `description` metadata explicit-only and apply the `SKILL.md` activation gate before loading this guide |
+| A mediator reply cannot resume an in-progress consultation | Initial opt-in is incorrectly required again during an existing session | Treat a current `review-log.md` or `review-session.md` as proof that initial activation already occurred |
 | Consultation runs inside Ralph-Lisa | Overlapping orchestrators both claimed the same review | Let `ralph-lisa-loop` own its reviewer channel unless the user explicitly requests a separate consultation |
 
 ---
