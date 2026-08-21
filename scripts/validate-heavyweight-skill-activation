@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+
+python3 - "$root" <<'PYEOF'
+from pathlib import Path
+import sys
+
+
+root = Path(sys.argv[1])
+
+contracts = {
+    "consult-outside-expert": {
+        "path": root / "plugins/dev/skills/consult-outside-expert/SKILL.md",
+        "description": [
+            "explicitly launch",
+            "do not infer it from ordinary review",
+        ],
+        "gate": [
+            "heavyweight, explicit-opt-in workflow",
+            "merely names, quotes, discusses, audits, or configures",
+            "`ralph-lisa-loop` is active",
+            "`$consult-outside-expert` in codex",
+            "`/dev:consult-outside-expert`",
+            "`/consult-outside-expert`",
+            "an already-running consultation is exempt",
+            "`review-log.md` or `review-session.md`",
+            "initial activation, not continuation",
+            "if the gate fails",
+        ],
+    },
+    "ralph-lisa-loop": {
+        "path": root / "plugins/dev/skills/ralph-lisa-loop/SKILL.md",
+        "description": [
+            "explicitly launch",
+            "a mention or discussion of the skill is not an invocation",
+            "never infer it from ordinary",
+        ],
+        "gate": [
+            "heavyweight, explicit-opt-in workflow",
+            "ordinary planning, building, implementation, review, or codex help",
+            "`consult-outside-expert`",
+            "`$ralph-lisa-loop` in codex",
+            "`/dev:ralph-lisa-loop`",
+            "`/ralph-lisa-loop`",
+            "an already-running loop is exempt",
+            "status `active` or `awaiting_human`",
+            "if the gate fails",
+        ],
+        "preflight": True,
+    },
+}
+
+
+def frontmatter(text):
+    lines = text.splitlines()
+    if not lines or lines[0] != "---":
+        raise ValueError("missing opening frontmatter delimiter")
+    try:
+        end = lines.index("---", 1)
+    except ValueError as error:
+        raise ValueError("missing closing frontmatter delimiter") from error
+    return lines[1:end]
+
+
+def frontmatter_scalar(lines, key):
+    prefix = f"{key}:"
+    for line in lines:
+        if line.startswith(prefix):
+            return line[len(prefix) :].strip().strip("'\"")
+    raise ValueError(f"missing {key}")
+
+
+def frontmatter_block(lines, key):
+    marker = f"{key}: |"
+    try:
+        start = lines.index(marker) + 1
+    except ValueError as error:
+        raise ValueError(f"missing {marker}") from error
+    values = []
+    for line in lines[start:]:
+        if line and not line.startswith("  "):
+            break
+        values.append(line[2:] if line.startswith("  ") else line)
+    return "\n".join(values)
+
+
+def section(text, heading):
+    lines = text.casefold().splitlines()
+    marker = f"## {heading}".casefold()
+    try:
+        start = lines.index(marker)
+    except ValueError:
+        raise ValueError(f"missing {marker}")
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+errors = []
+
+for expected_name, contract in contracts.items():
+    text = contract["path"].read_text()
+    folded = text.casefold()
+    try:
+        metadata = frontmatter(text)
+        name = frontmatter_scalar(metadata, "name")
+        description = " ".join(
+            frontmatter_block(metadata, "description").casefold().split()
+        )
+        gate = section(text, "Activation gate")
+    except ValueError as error:
+        errors.append(f"{expected_name}: {error}")
+        continue
+
+    if name != expected_name:
+        errors.append(
+            f"{expected_name}: canonical skill name changed to {name!r}"
+        )
+
+    # `triggers` is not part of the Agent Skills specification and is not a
+    # supported selection surface in the hosts this repository targets. Keep
+    # selection intent in description and canonical invocation in the gate
+    # instead of letting an inert keyword list masquerade as behavior.
+    if any(line.startswith("triggers:") for line in metadata):
+        errors.append(
+            f"{expected_name}: unsupported triggers metadata must not define activation"
+        )
+
+    # Claude extends the portable spec with `when_to_use`, but Codex and
+    # Copilot select from description. Keep one cross-host selection contract
+    # instead of allowing an unvalidated Claude-only supplement to broaden it.
+    if any(line.startswith("when_to_use:") for line in metadata):
+        errors.append(
+            f"{expected_name}: keep the portable selection contract in description"
+        )
+
+    for phrase in contract["description"]:
+        if phrase not in description:
+            errors.append(
+                f"{expected_name}: description missing selection boundary: {phrase!r}"
+            )
+
+    gate_index = folded.find("## activation gate")
+    guide_index = folded.find("open `@references/guide.md`")
+    if guide_index < 0 or gate_index > guide_index:
+        errors.append(
+            f"{expected_name}: activation gate must precede reference loading"
+        )
+
+    if contract.get("preflight"):
+        preflight_index = folded.find("## preflight")
+        if preflight_index < 0 or gate_index > preflight_index:
+            errors.append(
+                f"{expected_name}: activation gate must precede preflight"
+            )
+
+    for phrase in contract["gate"]:
+        if phrase not in gate:
+            errors.append(
+                f"{expected_name}: activation gate missing boundary: {phrase!r}"
+            )
+
+if errors:
+    for error in errors:
+        print(f"ERROR: {error}", file=sys.stderr)
+    sys.exit(1)
+
+print("OK: heavyweight skill activation contracts use supported metadata")
+PYEOF

@@ -672,3 +672,5 @@ Run `scripts/eval.sh` at completion (before attestation). Any FAIL blocks closur
 | Worker ignores findings | Fix instructions not specific enough | Reference finding IDs and required actions explicitly in worker prompt |
 | Context still fills up | Orchestrator reading too much artifact content | Verify orchestrator only reads plan, not source files; check subagent summary sizes |
 | Subagent fails or times out | Agent tool error | Log failure in round, retry once, fall back to orchestrator doing the step directly for this round |
+| An ordinary plan/build/review request starts the loop | Broad selection metadata inferred consent for heavyweight orchestration | Keep the supported `description` metadata explicit-only and apply the `SKILL.md` activation gate before preflight |
+| A separate consultation workflow starts inside the loop | Overlapping skills both claimed external review | Ralph-Lisa owns its reviewer channel; do not also activate `consult-outside-expert` unless explicitly requested |
