@@ -5,14 +5,6 @@ description: |
   when the current request directly asks to start or run Ralph-Lisa; a mention or
   discussion of the skill is not an invocation. Never infer it from ordinary planning,
   building, implementation, or review requests.
-triggers:
-  # Explicit invocations only. The activation gate below handles quoted/meta uses.
-  - /ralph-lisa-loop
-  - /ralph-lisa
-  - /ralph
-  - run the ralph-lisa loop
-  - start the ralph-lisa loop
-  - use the ralph-lisa loop
 ---
 
 # ralph-lisa-loop
@@ -22,9 +14,11 @@ triggers:
 This is a heavyweight, explicit-opt-in workflow. Apply this gate before preflight,
 reference loading, hook inspection, session creation, or subagent dispatch.
 
-Activate only when the current user request directly asks to start Ralph-Lisa — with a
-slash/`$ralph-lisa-loop` invocation or an imperative request to run, start, or use the
-Ralph-Lisa loop.
+Activate only when the current user request directly asks to start Ralph-Lisa, or uses
+the skill's canonical host invocation: `$ralph-lisa-loop` in Codex,
+`/dev:ralph-lisa-loop` from this Claude Code plugin, or `/ralph-lisa-loop` when
+installed as a standalone Claude Code skill. An imperative request to run, start, or
+use the Ralph-Lisa loop also qualifies.
 
 Do **not** activate when:
 - The user merely names, quotes, discusses, audits, or configures this skill.

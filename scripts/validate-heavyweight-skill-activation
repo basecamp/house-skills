@@ -13,13 +13,6 @@ root = Path(sys.argv[1])
 contracts = {
     "consult-outside-expert": {
         "path": root / "plugins/dev/skills/consult-outside-expert/SKILL.md",
-        "triggers": [
-            "/consult",
-            "/consult-outside-expert",
-            "ask an outside expert to review",
-            "get an independent outside review",
-            "run an outside-expert review",
-        ],
         "description": [
             "explicitly launch",
             "do not infer it from ordinary review",
@@ -28,33 +21,14 @@ contracts = {
             "heavyweight, explicit-opt-in workflow",
             "merely names, quotes, discusses, audits, or configures",
             "`ralph-lisa-loop` is active",
+            "`$consult-outside-expert` in codex",
+            "`/dev:consult-outside-expert`",
+            "`/consult-outside-expert`",
             "if the gate fails",
-        ],
-        "positive_prompts": [
-            "/consult review this proposal",
-            "Please ask an outside expert to review this diff",
-            "Get an independent outside review of this plan",
-            "Run an outside-expert review before release",
-        ],
-        "negative_prompts": [
-            "Review this diff",
-            "What do you think about this plan?",
-            "Why did consult-outside-expert trigger?",
-            "Give me feedback on this approach",
-            "Ready for the outside expert's next pass",
-            "The outside expert found two issues",
         ],
     },
     "ralph-lisa-loop": {
         "path": root / "plugins/dev/skills/ralph-lisa-loop/SKILL.md",
-        "triggers": [
-            "/ralph-lisa-loop",
-            "/ralph-lisa",
-            "/ralph",
-            "run the ralph-lisa loop",
-            "start the ralph-lisa loop",
-            "use the ralph-lisa loop",
-        ],
         "description": [
             "explicitly launch",
             "a mention or discussion of the skill is not an invocation",
@@ -64,27 +38,19 @@ contracts = {
             "heavyweight, explicit-opt-in workflow",
             "ordinary planning, building, implementation, review, or codex help",
             "`consult-outside-expert`",
+            "`$ralph-lisa-loop` in codex",
+            "`/dev:ralph-lisa-loop`",
+            "`/ralph-lisa-loop`",
+            "an already-running loop is exempt",
+            "status `active` or `awaiting_human`",
             "if the gate fails",
         ],
-        "positive_prompts": [
-            "/ralph plan and implement this feature",
-            "Please run the ralph-lisa loop for this change",
-            "Start the ralph-lisa loop at rope 3",
-            "Use the ralph-lisa loop to implement the plan",
-        ],
-        "negative_prompts": [
-            "Plan this feature",
-            "Build this component",
-            "Have Codex review this diff",
-            "Why did ralph-lisa-loop trigger?",
-            "The ralph-lisa-loop skill is getting triggered too often",
-            "This task might benefit from structured review",
-        ],
+        "preflight": True,
     },
 }
 
 
-def frontmatter_and_body(text):
+def frontmatter(text):
     lines = text.splitlines()
     if not lines or lines[0] != "---":
         raise ValueError("missing opening frontmatter delimiter")
@@ -92,7 +58,15 @@ def frontmatter_and_body(text):
         end = lines.index("---", 1)
     except ValueError as error:
         raise ValueError("missing closing frontmatter delimiter") from error
-    return lines[1:end], lines[end + 1 :]
+    return lines[1:end]
+
+
+def frontmatter_scalar(lines, key):
+    prefix = f"{key}:"
+    for line in lines:
+        if line.startswith(prefix):
+            return line[len(prefix) :].strip().strip("'\"")
+    raise ValueError(f"missing {key}")
 
 
 def frontmatter_block(lines, key):
@@ -109,87 +83,88 @@ def frontmatter_block(lines, key):
     return "\n".join(values)
 
 
-def frontmatter_triggers(lines):
+def section(text, heading):
+    lines = text.casefold().splitlines()
+    marker = f"## {heading}".casefold()
     try:
-        start = lines.index("triggers:") + 1
-    except ValueError as error:
-        raise ValueError("missing triggers") from error
-    triggers = []
-    for line in lines[start:]:
-        if line.startswith("  - "):
-            triggers.append(line[4:].strip().strip("'\""))
-        elif line.startswith("  #") or not line.strip():
-            continue
-        else:
-            break
-    return triggers
-
-
-def matches(prompt, triggers):
-    folded = prompt.casefold()
-    return any(trigger.casefold() in folded for trigger in triggers)
+        start = lines.index(marker)
+    except ValueError:
+        raise ValueError(f"missing {marker}")
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
 
 
 errors = []
 
-for name, contract in contracts.items():
+for expected_name, contract in contracts.items():
     text = contract["path"].read_text()
     folded = text.casefold()
     try:
-        frontmatter, _body = frontmatter_and_body(text)
+        metadata = frontmatter(text)
+        name = frontmatter_scalar(metadata, "name")
         description = " ".join(
-            frontmatter_block(frontmatter, "description").casefold().split()
+            frontmatter_block(metadata, "description").casefold().split()
         )
-        triggers = frontmatter_triggers(frontmatter)
+        gate = section(text, "Activation gate")
     except ValueError as error:
-        errors.append(f"{name}: {error}")
+        errors.append(f"{expected_name}: {error}")
         continue
 
-    if triggers != contract["triggers"]:
+    if name != expected_name:
         errors.append(
-            f"{name}: explicit trigger contract changed\n"
-            f"  expected: {contract['triggers']}\n"
-            f"  actual:   {triggers}"
+            f"{expected_name}: canonical skill name changed to {name!r}"
+        )
+
+    # `triggers` is not part of the Agent Skills specification and is not a
+    # supported selection surface in the hosts this repository targets. Keep
+    # selection intent in description and canonical invocation in the gate
+    # instead of letting an inert keyword list masquerade as behavior.
+    if any(line.startswith("triggers:") for line in metadata):
+        errors.append(
+            f"{expected_name}: unsupported triggers metadata must not define activation"
+        )
+
+    # Claude extends the portable spec with `when_to_use`, but Codex and
+    # Copilot select from description. Keep one cross-host selection contract
+    # instead of allowing an unvalidated Claude-only supplement to broaden it.
+    if any(line.startswith("when_to_use:") for line in metadata):
+        errors.append(
+            f"{expected_name}: keep the portable selection contract in description"
         )
 
     for phrase in contract["description"]:
         if phrase not in description:
-            errors.append(f"{name}: description missing intent boundary: {phrase!r}")
+            errors.append(
+                f"{expected_name}: description missing selection boundary: {phrase!r}"
+            )
 
     gate_index = folded.find("## activation gate")
     guide_index = folded.find("open `@references/guide.md`")
-    if gate_index < 0:
-        errors.append(f"{name}: missing activation gate")
-    elif guide_index < 0 or gate_index > guide_index:
-        errors.append(f"{name}: activation gate must precede reference loading")
+    if guide_index < 0 or gate_index > guide_index:
+        errors.append(
+            f"{expected_name}: activation gate must precede reference loading"
+        )
 
-    if name == "ralph-lisa-loop":
+    if contract.get("preflight"):
         preflight_index = folded.find("## preflight")
         if preflight_index < 0 or gate_index > preflight_index:
-            errors.append(f"{name}: activation gate must precede preflight")
+            errors.append(
+                f"{expected_name}: activation gate must precede preflight"
+            )
 
-    # Confine the gate-boundary search to the Activation gate section itself —
-    # from its heading to the next H2 — so a required phrase removed from the
-    # gate still fails CI even if the same words survive in a later section.
-    if gate_index >= 0:
-        next_h2 = folded.find("\n## ", gate_index + 1)
-        gate_section = folded[gate_index:] if next_h2 < 0 else folded[gate_index:next_h2]
-        for phrase in contract["gate"]:
-            if phrase not in gate_section:
-                errors.append(f"{name}: activation gate missing boundary: {phrase!r}")
-
-    for prompt in contract["positive_prompts"]:
-        if not matches(prompt, triggers):
-            errors.append(f"{name}: explicit invocation no longer matches: {prompt!r}")
-
-    for prompt in contract["negative_prompts"]:
-        if matches(prompt, triggers):
-            errors.append(f"{name}: ordinary/meta prompt matches a trigger: {prompt!r}")
+    for phrase in contract["gate"]:
+        if phrase not in gate:
+            errors.append(
+                f"{expected_name}: activation gate missing boundary: {phrase!r}"
+            )
 
 if errors:
     for error in errors:
         print(f"ERROR: {error}", file=sys.stderr)
     sys.exit(1)
 
-print("OK: heavyweight skill activation is explicit")
+print("OK: heavyweight skill activation contracts use supported metadata")
 PYEOF

@@ -7,7 +7,7 @@ echo "==> Validating skill/plugin structure…"
 "$ROOT/scripts/validate-structure"
 
 echo ""
-echo "==> Validating heavyweight skill activation…"
+echo "==> Validating heavyweight skill activation contracts…"
 "$ROOT/scripts/validate-heavyweight-skill-activation"
 
 echo ""
