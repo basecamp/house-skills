@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+
+python3 - "$root" <<'PYEOF'
+from pathlib import Path
+import sys
+
+
+root = Path(sys.argv[1])
+
+contracts = {
+    "consult-outside-expert": {
+        "path": root / "plugins/dev/skills/consult-outside-expert/SKILL.md",
+        "triggers": [
+            "/consult",
+            "/consult-outside-expert",
+            "ask an outside expert to review",
+            "get an independent outside review",
+            "run an outside-expert review",
+        ],
+        "description": [
+            "explicitly launch",
+            "do not infer it from ordinary review",
+        ],
+        "gate": [
+            "heavyweight, explicit-opt-in workflow",
+            "merely names, quotes, discusses, audits, or configures",
+            "`ralph-lisa-loop` is active",
+            "if the gate fails",
+        ],
+        "positive_prompts": [
+            "/consult review this proposal",
+            "Please ask an outside expert to review this diff",
+            "Get an independent outside review of this plan",
+            "Run an outside-expert review before release",
+        ],
+        "negative_prompts": [
+            "Review this diff",
+            "What do you think about this plan?",
+            "Why did consult-outside-expert trigger?",
+            "Give me feedback on this approach",
+            "Ready for the outside expert's next pass",
+            "The outside expert found two issues",
+        ],
+    },
+    "ralph-lisa-loop": {
+        "path": root / "plugins/dev/skills/ralph-lisa-loop/SKILL.md",
+        "triggers": [
+            "/ralph-lisa-loop",
+            "/ralph-lisa",
+            "/ralph",
+            "run the ralph-lisa loop",
+            "start the ralph-lisa loop",
+            "use the ralph-lisa loop",
+        ],
+        "description": [
+            "explicitly launch",
+            "a mention or discussion of the skill is not an invocation",
+            "never infer it from ordinary",
+        ],
+        "gate": [
+            "heavyweight, explicit-opt-in workflow",
+            "ordinary planning, building, implementation, review, or codex help",
+            "`consult-outside-expert`",
+            "if the gate fails",
+        ],
+        "positive_prompts": [
+            "/ralph plan and implement this feature",
+            "Please run the ralph-lisa loop for this change",
+            "Start the ralph-lisa loop at rope 3",
+            "Use the ralph-lisa loop to implement the plan",
+        ],
+        "negative_prompts": [
+            "Plan this feature",
+            "Build this component",
+            "Have Codex review this diff",
+            "Why did ralph-lisa-loop trigger?",
+            "The ralph-lisa-loop skill is getting triggered too often",
+            "This task might benefit from structured review",
+        ],
+    },
+}
+
+
+def frontmatter_and_body(text):
+    lines = text.splitlines()
+    if not lines or lines[0] != "---":
+        raise ValueError("missing opening frontmatter delimiter")
+    try:
+        end = lines.index("---", 1)
+    except ValueError as error:
+        raise ValueError("missing closing frontmatter delimiter") from error
+    return lines[1:end], lines[end + 1 :]
+
+
+def frontmatter_block(lines, key):
+    marker = f"{key}: |"
+    try:
+        start = lines.index(marker) + 1
+    except ValueError as error:
+        raise ValueError(f"missing {marker}") from error
+    values = []
+    for line in lines[start:]:
+        if line and not line.startswith("  "):
+            break
+        values.append(line[2:] if line.startswith("  ") else line)
+    return "\n".join(values)
+
+
+def frontmatter_triggers(lines):
+    try:
+        start = lines.index("triggers:") + 1
+    except ValueError as error:
+        raise ValueError("missing triggers") from error
+    triggers = []
+    for line in lines[start:]:
+        if line.startswith("  - "):
+            triggers.append(line[4:].strip().strip("'\""))
+        elif line.startswith("  #") or not line.strip():
+            continue
+        else:
+            break
+    return triggers
+
+
+def matches(prompt, triggers):
+    folded = prompt.casefold()
+    return any(trigger.casefold() in folded for trigger in triggers)
+
+
+errors = []
+
+for name, contract in contracts.items():
+    text = contract["path"].read_text()
+    folded = text.casefold()
+    try:
+        frontmatter, _body = frontmatter_and_body(text)
+        description = " ".join(
+            frontmatter_block(frontmatter, "description").casefold().split()
+        )
+        triggers = frontmatter_triggers(frontmatter)
+    except ValueError as error:
+        errors.append(f"{name}: {error}")
+        continue
+
+    if triggers != contract["triggers"]:
+        errors.append(
+            f"{name}: explicit trigger contract changed\n"
+            f"  expected: {contract['triggers']}\n"
+            f"  actual:   {triggers}"
+        )
+
+    for phrase in contract["description"]:
+        if phrase not in description:
+            errors.append(f"{name}: description missing intent boundary: {phrase!r}")
+
+    gate_index = folded.find("## activation gate")
+    guide_index = folded.find("open `@references/guide.md`")
+    if gate_index < 0:
+        errors.append(f"{name}: missing activation gate")
+    elif guide_index < 0 or gate_index > guide_index:
+        errors.append(f"{name}: activation gate must precede reference loading")
+
+    if name == "ralph-lisa-loop":
+        preflight_index = folded.find("## preflight")
+        if preflight_index < 0 or gate_index > preflight_index:
+            errors.append(f"{name}: activation gate must precede preflight")
+
+    for phrase in contract["gate"]:
+        if phrase not in folded:
+            errors.append(f"{name}: activation gate missing boundary: {phrase!r}")
+
+    for prompt in contract["positive_prompts"]:
+        if not matches(prompt, triggers):
+            errors.append(f"{name}: explicit invocation no longer matches: {prompt!r}")
+
+    for prompt in contract["negative_prompts"]:
+        if matches(prompt, triggers):
+            errors.append(f"{name}: ordinary/meta prompt matches a trigger: {prompt!r}")
+
+if errors:
+    for error in errors:
+        print(f"ERROR: {error}", file=sys.stderr)
+    sys.exit(1)
+
+print("OK: heavyweight skill activation is explicit")
+PYEOF

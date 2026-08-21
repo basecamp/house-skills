@@ -1,72 +1,46 @@
 ---
 name: consult-outside-expert
 description: |
-  Get a second opinion via Codex MCP. Use for stress-testing ideas, getting fresh perspective,
-  steelmanning arguments, or iteratively refining work through expert back-and-forth.
-  Invoke for ANY request involving external review, feedback, or consultation.
+  Explicitly launch an independent outside-expert consultation via Codex MCP. Use only
+  when the user directly asks to run this workflow or asks another expert/agent for an
+  independent second opinion. Do not infer it from ordinary review, feedback, validation,
+  planning, or discussion about the skill itself.
 triggers:
-  # Direct invocations
-  - consult outside expert
-  - outside expert
+  # Explicit invocations only. The activation gate below handles quoted/meta uses.
   - /consult
-  # Codex-specific
-  - codex
-  - ask codex
-  - use codex
-  - codex sparring
-  - codex review
-  - codex feedback
-  # Expert consultation
-  - expert consultation
-  - expert review
-  - expert feedback
-  - get expert input
-  - external consultation
-  - external review
-  - outside review
-  # Second opinion / fresh perspective
-  - second opinion
-  - another perspective
-  - fresh perspective
-  - different angle
-  - outside perspective
-  - external perspective
-  # Stress testing / validation
-  - stress test
-  - pressure test
-  - sanity check
-  - reality check
-  - gut check
-  - sense check
-  - validate my thinking
-  - check my work
-  - review my approach
-  # Informal / conversational
-  - bounce this off
-  - run this by
-  - get feedback on
-  - what do you think about
-  # Refinement / convergence
-  - cross-agent refinement
-  - dual-agent convergence
-  - iterative refinement
-  - steelman
-  # Questions and capability discovery
-  - can I get feedback
-  - can I consult
-  - how do I get expert
-  - should I consult
-  - is there a way to get review
-  - what is codex
-  - does codex
-  - how does codex work
+  - /consult-outside-expert
+  - ask an outside expert to review
+  - get an independent outside review
+  - run an outside-expert review
 ---
 
 # consult-outside-expert
 
+## Activation gate
+
+This is a heavyweight, explicit-opt-in workflow. Apply this gate before opening any
+reference, creating a review log, or contacting another agent.
+
+Activate only when the current user request directly asks to run this consultation —
+with a slash/`$consult-outside-expert` invocation, or an imperative request to ask an
+independent outside expert or agent for a second opinion.
+
+Do **not** activate when:
+- The user merely names, quotes, discusses, audits, or configures this skill.
+- The user asks the current agent for ordinary review, feedback, validation, planning,
+  or an opinion without explicitly requesting another independent reviewer.
+- A message is only a status update or follow-up from an earlier consultation and does
+  not explicitly request another review round.
+- `ralph-lisa-loop` is active. That workflow owns its external-review channel; do not
+  nest this skill unless the user explicitly asks for a separate consultation as well.
+
+If the gate fails, answer normally and stop. Do not open the guide, spawn an expert, or
+create consultation artifacts.
+
 Open `@references/guide.md` and follow it. Do not proceed without it.
 
-Consult an outside expert to collaboratively refine work through iterative back-and-forth. Use when you want:
+When the activation gate passes, consult an outside expert to collaboratively refine
+work through iterative back-and-forth. It supports:
 - Fresh perspective on your work
 - Stress-testing from a different angle
 - Steelmanning of ideas

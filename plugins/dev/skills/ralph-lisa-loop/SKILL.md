@@ -1,54 +1,43 @@
 ---
 name: ralph-lisa-loop
 description: |
-  Automated plan-implement loop with expert review. Orchestrator dispatches subagents
-  for planning/implementation and self-review, Codex for external review. The human steers.
-  A single rope-length knob (0-5) controls interruption frequency. Subagent architecture
-  keeps the orchestrator's context window lean for completing tasks in a single session.
-  Use for any planning, development, or implementation task that benefits from structured review.
+  Explicitly launch the automated Ralph-Lisa plan-implement-review workflow. Use only
+  when the current request directly asks to start or run Ralph-Lisa; a mention or
+  discussion of the skill is not an invocation. Never infer it from ordinary planning,
+  building, implementation, or review requests.
 triggers:
-  # Direct invocations
+  # Explicit invocations only. The activation gate below handles quoted/meta uses.
   - /ralph-lisa-loop
   - /ralph-lisa
   - /ralph
-  - ralph-lisa loop
-  - ralph loop
-  - ralph lisa
-  # Planning
-  - plan this
-  - let's plan
-  - make a plan
-  - plan with expert
-  - plan and build
-  - plan-implement cycle
-  - plan then implement
-  - plan then build
-  # Plan-only
-  - plan only
-  - just plan
-  - design review
-  - RFC review
-  # Development / implementation
-  - build this
-  - implement this
-  - implement with expert
-  - build with expert review
-  # Implement-only
-  - just implement
-  - just build
-  - skip planning
-  # Codex review
-  - codex review
-  - get codex to review
-  - have codex review
-  - review with codex
-  - expert review loop
-  # Automation emphasis
-  - automated review loop
-  - autonomous review loop
+  - run the ralph-lisa loop
+  - start the ralph-lisa loop
+  - use the ralph-lisa loop
 ---
 
 # ralph-lisa-loop
+
+## Activation gate
+
+This is a heavyweight, explicit-opt-in workflow. Apply this gate before preflight,
+reference loading, hook inspection, session creation, or subagent dispatch.
+
+Activate only when the current user request directly asks to start Ralph-Lisa — with a
+slash/`$ralph-lisa-loop` invocation or an imperative request to run, start, or use the
+Ralph-Lisa loop.
+
+Do **not** activate when:
+- The user merely names, quotes, discusses, audits, or configures this skill.
+- The user asks for ordinary planning, building, implementation, review, or Codex help,
+  even if the task might benefit from a structured loop.
+- The user has scoped the current agent as reviewer-only or explicitly excluded
+  implementation, delegation, or automation.
+- Another orchestration workflow is already active, unless the user explicitly asks to
+  replace it with Ralph-Lisa or run both. Once active, Ralph-Lisa owns its external-review
+  channel; do not separately activate `consult-outside-expert` for its Codex rounds.
+
+If the gate fails, answer normally and stop. Do not perform preflight, open the guide,
+inspect or install hooks, create a session, or spawn subagents.
 
 ## Preflight
 
@@ -136,9 +125,9 @@ needed from them):
 
 Open `@references/guide.md` and follow it. Do not proceed without it.
 
-Automated plan-implement loop with subagent workers and Codex as reviewer. The
-orchestrator dispatches subagents for planning/implementation and self-review, Codex for
-external review. Use when you want:
+When the activation gate passes, run the automated plan-implement loop with subagent
+workers and Codex as reviewer. The orchestrator dispatches subagents for
+planning/implementation and self-review, and Codex for external review. It supports:
 - Plans stress-tested through parallel ideation then iterative convergence
 - Implementation reviewed each round with zero-finding close gate
 - Adjustable autonomy via rope-length (0 = approve everything, 5 = full auto)

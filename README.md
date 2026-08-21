@@ -19,10 +19,10 @@ npx skills add basecamp/house-skills
 |-------|--------|-------------|
 | [address-pr-reviews](skills/address-pr-reviews) | dev | Address PR review comments - fix issues, reply to threads, mark resolved |
 | [basecamp-activity](skills/basecamp-activity/) | recap | Fetch Basecamp project or person activity into day-cached JSON atoms |
-| [consult-outside-expert](skills/consult-outside-expert) | dev | Consult an outside expert to collaboratively refine and stress-test ideas |
+| [consult-outside-expert](skills/consult-outside-expert) | dev | Explicitly launch an independent outside-expert consultation and refinement loop |
 | [git-activity](skills/git-activity/) | recap | Fetch git log from local repos into day-cached JSON atoms |
 | [github-activity](skills/github-activity/) | recap | Fetch GitHub PRs, reviews, issues, and commits into day-cached JSON atoms |
-| [ralph-lisa-loop](skills/ralph-lisa-loop) | dev | Automated plan-implement loop with expert review and rope-length autonomy control |
+| [ralph-lisa-loop](skills/ralph-lisa-loop) | dev | Explicitly launch the automated plan-implement-review loop with rope-length control |
 | [harden-github-actions](skills/harden-github-actions) | security | Resolve zizmor warnings in GitHub Actions workflows, harden CI pipelines, and pin actions to SHA hashes |
 | [agents-md](skills/agents-md) | ai | Write, slim, or audit a repository's agent instruction file — what earns always-on context and what belongs behind disclosure |
 | [install-md](skills/install-md) | ai | Create install.md files optimized for AI agent execution |
