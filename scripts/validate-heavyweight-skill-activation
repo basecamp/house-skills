@@ -168,9 +168,15 @@ for name, contract in contracts.items():
         if preflight_index < 0 or gate_index > preflight_index:
             errors.append(f"{name}: activation gate must precede preflight")
 
-    for phrase in contract["gate"]:
-        if phrase not in folded:
-            errors.append(f"{name}: activation gate missing boundary: {phrase!r}")
+    # Confine the gate-boundary search to the Activation gate section itself —
+    # from its heading to the next H2 — so a required phrase removed from the
+    # gate still fails CI even if the same words survive in a later section.
+    if gate_index >= 0:
+        next_h2 = folded.find("\n## ", gate_index + 1)
+        gate_section = folded[gate_index:] if next_h2 < 0 else folded[gate_index:next_h2]
+        for phrase in contract["gate"]:
+            if phrase not in gate_section:
+                errors.append(f"{name}: activation gate missing boundary: {phrase!r}")
 
     for prompt in contract["positive_prompts"]:
         if not matches(prompt, triggers):

@@ -36,6 +36,13 @@ Do **not** activate when:
   replace it with Ralph-Lisa or run both. Once active, Ralph-Lisa owns its external-review
   channel; do not separately activate `consult-outside-expert` for its Codex rounds.
 
+An already-running loop is exempt. If a session file (`tmp/ralph-lisa-loop-session.md`)
+exists with status `active` or `awaiting_human`, this workflow was already explicitly
+started, so continue it — the explicit-opt-in requirement governs initial activation, not
+continuation. A bare "continue" between rounds, a mediator decision resolving an
+`awaiting_human` round, or a compacted or hook-restored context reloading this skill mid-run
+all resume the existing session rather than fail the gate.
+
 If the gate fails, answer normally and stop. Do not perform preflight, open the guide,
 inspect or install hooks, create a session, or spawn subagents.
 
