@@ -1058,7 +1058,7 @@ def contract_problems(paras, card=None,
 
     for kind, reference in unlinked_references(text):
         problems.append(
-            f"{kind} named without a link ({reference!r}). He has to go and find "
+            f"{kind} named without a link ({reference!r}). They have to go and find "
             "it. Link it, with the id as the anchor text - `repo#N` over the pull "
             "URL, the short id over the Sentry issue URL - not the bare URL.")
 
@@ -1217,7 +1217,7 @@ def contract_problems(paras, card=None,
     for pat, why in PROOF_OF_WORK:
         m_ = re.search(pat, text, re.I)
         if m_:
-            problems.append(f"proof of our own work - {why} ({m_.group(0)!r}). He is not "
+            problems.append(f"proof of your own work - {why} ({m_.group(0)!r}). The reader is not "
                             "auditing the method. State the finding; a caveat stays only "
                             "when it changes their next move.")
     for pat, why in CREDIT:
@@ -1254,7 +1254,7 @@ def contract_problems(paras, card=None,
         problems.append(f"identifier named in running prose ({m_!r}). Backtick anything they "
                         "could grep for, so it reads as a thing rather than as a long word.")
     for phrase in unintroduced(text):
-        problems.append(f"points at something never introduced ({phrase!r}). He has not "
+        problems.append(f"points at something never introduced ({phrase!r}). The reader has not "
                         "been given it, and a definite article does not give it to them. "
                         "Name it the first time, or say what it does: 'a nightly job that "
                         "reopens closed issues' before 'the job'.")
