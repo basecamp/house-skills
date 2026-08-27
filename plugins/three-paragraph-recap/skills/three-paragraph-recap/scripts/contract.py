@@ -74,12 +74,12 @@ LEDGER = [
 # phase standing as the subject of a sentence. That is our bookkeeping too, and
 # it belongs in your own notes. If the cost changes what the reader should decide, put the
 # decision in front of him instead of the arithmetic behind it.
-# A second exemption: a comment Fernando asked for as a TABLE. The prose caps -
+# A second exemption: a comment asked for as a TABLE. The prose caps -
 # three paragraphs, sentence and word limits, one-fact-per-sentence - describe a
 # decision surface written in sentences. A table he requested is data he intends
 # to act from row by row, and counting its cells as sentences would refuse the
 # thing he asked for. The tone rules still apply to any prose around it.
-# Fernando, 2026-08-21: "the 3 paragraph rule stays, but adding images or tables
+# Ruled 2026-08-21: "the 3 paragraph rule stays, but adding images or tables
 # or bullet-points for additional explanation is allowed."
 #
 # So a block that is a table, a list, an image or an attachment is NOT prose. It
@@ -97,7 +97,7 @@ MENTION = re.compile(r"<bc-attachment\b[^>]*\bcontent-type=[\"']application/vnd\
                      r"[^>]*>.*?</bc-attachment>", re.I | re.S)
 NONPROSE = re.compile(r"<(?:table|tr|td|th|figure|img|bc-attachment)\b", re.I)
 
-# Bullet lists are gone. Fernando, on the voice: "Let's get rid of bullet points
+# Bullet lists are gone. On the voice: "Let's get rid of bullet points
 # in the voice. They don't serve other purpose than to extend comments." He is
 # describing what they were being used for -- a list is exempt from the word and
 # sentence caps, so five bullets carry what three paragraphs are not allowed to
@@ -106,7 +106,7 @@ LISTS = re.compile(r"<(?:ul|ol|li)\b", re.I)
 
 # Build artifacts, the same fault as the minutes below. The patterns here count
 # what a phase COST in time; they never counted what the work TOUCHED, and
-# Fernando named that on 2026-08-24: "there's no need to state files changed,
+# Named on 2026-08-24: "there's no need to state files changed,
 # number of tests passed." He called the passage "mostly useless" rather than
 # useless, and the word is doing real work - inside the same paragraph
 # "Missing those would have left Xcode pointed at 4.2.1" is a consequence he can
@@ -242,7 +242,7 @@ EDITORIAL = [
 # next to the two above and doing a different job. EMPHASIS turns up the volume
 # on a fact; EDITORIAL scores it; an ornament REPLACES it. "The follow-up is
 # load-bearing" says the follow-up matters without saying what breaks without
-# it, and the reader cannot act on the word. Fernando, 2026-08-24, on
+# it, and the reader cannot act on the word. Ruled 2026-08-24, on
 # "load-bearing" - it reached the reader twice in one day.
 #
 # A term this fleet uses with a technical meaning stays out of this list however
@@ -298,7 +298,7 @@ METAPHOR = [
 ]
 
 # Humanizer. The mechanically checkable subset of blader/humanizer's 35 AI
-# writing patterns, added 2026-08-25 on Fernando's instruction so the three
+# writing patterns, added 2026-08-25 by instruction so the three
 # paragraphs read like a person wrote them. That skill is prose guidance and
 # ships no linter, so what is enforceable had to be extracted here. A hook
 # denies and cannot rewrite, so enforcement is a rejection naming the pattern,
@@ -309,7 +309,7 @@ METAPHOR = [
 # COUNTED demands, since "name the things you are counting" produces triples on
 # purpose. A false "from X to Y" range cannot be told by regex from a literal
 # column move, "from Review to Test". Curly quotes are left alone because the
-# copy guide requires them; that conflict is Fernando's to settle, not this
+# copy guide requires them; that conflict is the operator's to settle, not this
 # file's.
 DASH = re.compile(r"[\u2013\u2014]")
 NOT_BUT = re.compile(
@@ -340,7 +340,7 @@ VAGUE_SOURCE = re.compile(
 # "rather than" is the comparison this contract keeps asking for and is not a
 # qualifier. Only the bare hedge is.
 
-# The six rules below came out of one comment Fernando rewrote by hand on
+# The six rules below came out of one comment rewritten by hand on
 # 2026-08-25. Each is the machine-checkable half of a rule; the half that needs
 # to know what a sentence MEANS lives in the worked examples in SKILL.md
 # and is not attempted here.
@@ -360,7 +360,7 @@ SELF_HISTORY = [
      "makes our earlier comment the subject"),
 ]
 
-# HIS_WORDS: telling Fernando what he said. The Issues board is shared with the
+# HIS_WORDS: telling the reader what they said. The board is shared with the
 # mobile team, so a correction of him lands in front of them. State the fact --
 # "this lands in 5.2.0, not 5.1.6" -- and let it replace the belief silently.
 # Narrow to speech nouns on purpose: "your ruling on whether the residual gets
@@ -476,7 +476,7 @@ def unmarked_prose(text):
 # PROCESS_STATUS: sentences whose subject is the state of our own work rather
 # than the state of the code. "369 is green", "the macOS build settled the risk",
 # "merging is yours" -- each is true, none of them is a finding, and all three
-# survived every other check on this file until Fernando cut them by hand.
+# survived every other check on this file until they were cut by hand.
 
 # CREDIT: who supplied what. "Your token was half of it", "the other half is
 # persist-credentials" -- the sentence is about the collaboration rather than
@@ -543,7 +543,7 @@ TAG = re.compile(r"<[^>]+>")
 CODE = re.compile(r"<code\b[^>]*>(.*?)</code>", re.I | re.S)
 
 
-# The empty sentence. Fernando, 2026-08-24, quoting one of mine: "One gap this
+# The empty sentence. Quoted back on 2026-08-24: "One gap this
 # makes reachable, which I left alone rather than widen a reviewed branch." He
 # said he would not know how to catalogue it. The sentence asserts nothing; its
 # whole job is to announce that a sentence is coming, and the fact it stood in
@@ -681,7 +681,7 @@ def empty_sentences(prose):
     return found
 
 
-# The method preamble. Fernando, 2026-08-24, on a sentence of mine from that
+# The method preamble. Ruled 2026-08-24, on a sentence from that
 # night: "I don't need meta-statements like 'Measuring the file instead of the
 # culprit:'. The rest of the sentence is useful enough." A sentence-initial
 # clause narrating the act of measuring or looking, handed to the finding by a
@@ -703,7 +703,7 @@ INSPECTION = (r"measuring|reading|re-reading|checking|querying|queried|measured|
 # "Reading every event in the window instead of a sample:" is ten words and is
 # the fault exactly.
 #
-# A comma is where the ambiguity lives, and it is the one Fernando drew a line
+# A comma is where the ambiguity lives, and it is the one that drew a line
 # around: "Running the suite serially avoids the port collision" is a claim about
 # the system whose gerund is the SUBJECT, and a trailing "..., which is why we
 # serialize" would otherwise pull it in. Two things keep it out - the clause must
@@ -753,7 +753,7 @@ BARE_LINK = re.compile(
     r'(?:https?://|#?\d{6,})', re.I)
 
 
-# A pull request or a Sentry issue named by its id carries a link. Fernando,
+# A pull request or a Sentry issue named by its id carries a link. Ruled
 # 2026-08-24: "why are we not catching that all PRs should have links?", and on
 # scope: "Both PRs and Sentry issues should be linked." Four PR references went
 # out that evening as bare text - "Pull request 1667", "Pull request 1648",
@@ -862,7 +862,7 @@ def mismatched_links(text):
     return found
 
 
-# Tier two: does the link's target exist. Fernando, 2026-08-24, on the offline
+# Tier two: does the link's target exist. Ruled 2026-08-24, on the offline
 # check and this one together: "Ok let's try both of these solutions."
 #
 # It reads the HREFS ONLY, never the prose, and that is what makes it possible at
