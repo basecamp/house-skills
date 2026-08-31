@@ -3,8 +3,8 @@ name: three-paragraph-recap
 description: |
   Turns raw material — findings, a report, a diff, notes, a thread — into the
   three paragraphs a person will actually read on Basecamp, and proves them
-  against the voice contract before returning. Two of explanation, one naming the
-  next step. It is handed inputs and returns prose; it never investigates, never
+  against the voice contract before returning. At most two of explanation, one
+  naming the next step. It is handed inputs and returns prose; it never investigates, never
   decides the disposition, and never writes a sentence it cannot trace back to
   something it was given. Use it whenever an agent is about to post a comment, a
   message or a chat line on somebody's behalf.
@@ -104,6 +104,14 @@ The shape, always:
 Write it as a person telling another person what happened. Read it back aloud in
 your head: if a sentence sounds like a machine reporting, it is.
 
+**Two explanation paragraphs is a ceiling, not a quota.** The next step is never
+optional; the explaining stops the moment the reader has what they need. Where
+they already know the situation — they raised it, or you are conceding a point
+they made — one paragraph is right, and sometimes one sentence of one. Writing to
+three because the shape says three is how a two-sentence concession turns into a
+comment they have to read twice to find the hold in. Cutting a paragraph is a
+legitimate outcome of drafting, and the gate has never counted them.
+
 ## 6. Prove it
 
 ```bash
@@ -158,11 +166,33 @@ Same contract every time; different spine.
   names the true cost where it differs, and states the disposition.
 - **An answer.** They asked something. Answer it in the first sentence. Everything
   else still holds, including the three paragraphs.
+- **A holding note.** Work is in flight and there is nothing to rule on yet. Two
+  paragraphs: what you now agree is true, and the next step naming what to hold
+  and what releases the hold. No evidence, because nothing is in dispute, and no
+  preview of the options, because they are not finished. This is the shortest
+  thing you will write and the one most likely to arrive bloated, because a
+  drafter with no findings reaches for the ones they have.
 
 ## The rules that are not in the gate
 
-Six things no regex checks, and they are the ones that make the difference. A
+Eight things no regex checks, and they are the ones that make the difference. A
 draft can pass the preview on every rule and still be the wrong comment.
+
+**Write it the way you would say it out loud.** This is the rule that decays
+fastest, because formality is what a careful drafter drifts into: expand every
+contraction, front every sentence with its qualification, and each individual
+choice looks like precision. The sum reads as a memo. Use contractions — "it's
+taken 179 events", "1.34.15 didn't touch it", "the fingerprint hasn't grouped
+anything" — because that is how the sentence sounds when a person says it. Start
+a sentence with "so" or "and" when that is the join. Say "you're right" and "we
+got this wrong", not "correcting the comment above". Say "puts us back on the
+default grouping", not "hands hangs back to the default grouping". None of this
+costs you a fact, and the gate has no opinion on any of it, so nothing but you
+holds the register.
+
+Casual is not loose. Every number, id and file name stays exact, the hedges stay
+gone, and a joke is somebody else's job. What goes is the distance: you are one
+person telling another what happened, on a card they will read on a phone.
 
 **Lead with what changed for them, not with what you did.** "The share sheet
 hands us a file the other app has not finished writing" beats "I investigated the
@@ -184,6 +214,12 @@ that took zero events, the phases the new grouping split out — are support you
 longer need once you state the conclusion outright. Keeping the proof and
 demoting the conclusion is the single most common way paragraph one goes wrong.
 
+The hard version of this: **never re-prove a point the reader made.** When they
+told you and you are conceding, agreement is one clause and the evidence is
+noise. A concession that arrives with a commit sha, a branch head and a file list
+attached reads as arguing with somebody who already agrees, and it buries the
+only new thing in the comment, which is what you are doing about it.
+
 **Every noun is one the reader already uses, or one you define where it first
 appears.** This is a hard rule, not a matter of polish. A term only the system
 uses — an internal name for a rule, a stage, a mechanism — makes the sentence
@@ -200,6 +236,17 @@ you already made, then discover you had made it. Write the step you recommend,
 and give the alternative one clause only if a reader might actually choose it.
 Presenting an option flat is still work handed back; presenting two and ranking
 them at the end is work handed back twice.
+
+**And when the options are not finished, say that and nothing more.** "We're
+working out the options and we'll bring them here" is the whole of it. Sketching
+the shape of options you have not settled invites a ruling on incomplete grounds,
+or makes them re-derive the thing you are mid-way through. Half an option is
+worse than none, because they cannot lean on it and cannot ignore it.
+
+**Cut any sentence that would be equally true of the opposite situation.**
+"The cost is real either way", "there are trade-offs here", "this needs
+consideration" — they read as judgment and carry none. The test is mechanical:
+flip the facts, and if the sentence survives, it was never about the facts.
 
 **Say the absence once.** The gate counts negations per paragraph precisely
 because restating one missing thing in three different ways is the most common
@@ -230,14 +277,13 @@ the paragraph is about the work, not about the reader's problem.
 **What was returned:**
 
 > Attachments shared from the Hilton app upload as zero bytes. The share sheet
-> hands us the file before that app has finished writing it, so we read an empty
-> one and send it. Photos and Files are unaffected, which is why it looked
-> app-specific.
+> hands us the file before that app's finished writing it, so we read an empty one
+> and send it. Photos and Files are fine, which is why it looked app-specific.
 >
-> The real fix is in a dependency we do not control, on their clock. A local
-> workaround is about forty lines: it refuses the send until the file settles.
-> That means a send scheduled for later fails instead of arriving empty, and I
-> would still take that trade.
+> The real fix is in a dependency we don't control, on their clock. There's a
+> local workaround, about forty lines: it refuses the send until the file settles.
+> That means a send scheduled for later fails instead of arriving empty, and I'd
+> still take that trade.
 >
 > Next step: you decide whether the workaround ships now or we wait on the
 > dependency. Support has two customers on this and no answer for them either way.
@@ -320,13 +366,62 @@ The word pointed at one branch of a four-branch handler in a shared library. The
 reader never opens that file, and the paragraph had already given them a name for
 the same thing in its first sentence. So the third paragraph finishes:
 
-> Next step: give the app-hang fingerprint an input that survives without
-> symbolication, and hangs separate by call site again. The SDK still reports
-> each frame's package, image and instruction address, so there is something left
-> to key on. Dropping the fingerprint instead hands hangs back to Sentry's
-> default stack grouping, which is the thing it was written to beat.
+> Next step: give the app-hang fingerprint something to key on that survives
+> without symbolication, so hangs split by call site again. The SDK still reports
+> each frame's package, image and instruction address. Dropping it instead puts us
+> back on Sentry's default stack grouping, which is what it was written to beat.
 
 The alternative they had cut comes back as one clause carrying its cost, because
 cutting it entirely hid that removal was on the table. That is the shape: the
 recommendation is the step, and the option they might still take gets a sentence,
 never a menu.
+
+## A worked example: fewer paragraphs
+
+The reader had said a release branch already carried a rotation. It did. The
+comment conceding that was three paragraphs and passed the preview.
+
+**Returned, and refused on reading:**
+
+> Correcting the comment above: `release/v5.0.16` carries the rotation. Anything
+> shipped off it today ships PR#1603 too. The branch sits at `9ad4a21c6`,
+> byte-identical to main, and main has carried the rotation since `ab0398ac`
+> landed on 18 August. `BasecampAuthorizationRefreshManager.swift` and its
+> siblings are on the branch.
+>
+> That branch is main, so a 5.0.16 that excludes #1603 means re-pointing it rather
+> than cutting from where it stands. The cost is real either way. We are working
+> out the options and will bring them here.
+>
+> Next step: hold anything meant to ship off `release/v5.0.16` until those options
+> land. The rest of the earlier comment stands. PR#1636 is still a draft, with its
+> description written and its tests still to come.
+
+**What the reader did to it:**
+
+> You're right, anything shipped off it today ships PR#1603 too. We are working
+> out the options and will bring them here.
+>
+> Next step: hold anything meant to ship off `release/v5.0.16` until those options
+> land. The rest of the earlier comment stands. PR#1636 is still a draft, with its
+> description written and its tests still to come.
+
+A whole paragraph and four sentences went, and the next step came through
+untouched. What each cut was:
+
+1. **"Correcting the comment above" became "You're right."** The correction was
+   filed against the system's own log instead of credited to the person who made
+   it. Sentence one of a concession names them, not the record.
+2. **The proof went.** The branch head, the byte-identical claim, the commit and
+   its date, the file list: five facts assembled to establish something the reader
+   had just told them. Nobody was auditing it.
+3. **The option sketch went.** "Re-pointing it rather than cutting from where it
+   stands" is half of an option that had not been settled, and "the cost is real
+   either way" is a sentence that survives flipping every fact in the comment.
+   What survived is the one sentence that was actually news: the options are being
+   worked out and will land here.
+4. **Three paragraphs became two.** With nothing in dispute and nothing to rule
+   on, there was one thing to say and one thing to hold. The shape is a ceiling.
+
+The comment that was needed is: you're right, we're on it, hold this. Any draft
+longer than that was the drafter's, not the reader's.
