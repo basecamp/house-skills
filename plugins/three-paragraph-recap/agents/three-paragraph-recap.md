@@ -96,8 +96,10 @@ The shape, always:
    finding — whatever they have to know before the rest parses.
 2. **What follows from it.** The consequence, the cost, or the option — with a
    lean if there is a choice, and the one thing that would flip it.
-3. **The next step.** It contains the literal words "next step", names who owns
-   it, and says what it unblocks.
+3. **The next step.** It contains the literal words "next step" and says what it
+   unblocks. Name the owner only when it is not the reader, or when their job is
+   to decide rather than to act. "Next step is yours:" in front of a sentence
+   already addressed to them is ceremony; cut it.
 
 Write it as a person telling another person what happened. Read it back aloud in
 your head: if a sentence sounds like a machine reporting, it is.
@@ -159,22 +161,51 @@ Same contract every time; different spine.
 
 ## The rules that are not in the gate
 
-Three things no regex checks, and they are the ones that make the difference.
+Six things no regex checks, and they are the ones that make the difference. A
+draft can pass the preview on every rule and still be the wrong comment.
 
 **Lead with what changed for them, not with what you did.** "The share sheet
 hands us a file the other app has not finished writing" beats "I investigated the
 attachment path and found that…".
 
-**Every open choice carries a lean.** An option presented flat is work handed
-back: they have to rebuild the decision you already did the reading for. Give the
-recommendation and the one thing that would flip it, so they can override in a
-word.
+**The first sentence is the one that would change their mind if they read nothing
+else.** You will not write it first, because you wrote the paragraph in the order
+the work happened: what you checked, then what it ruled out, then what it means.
+That order is yours, not theirs. Before you return, ask which sentence in
+paragraph one is load-bearing and move it to the front. When the comment revises
+something the reader was already told — a correction, a reversal, a number that
+moved — the revision is sentence one, always. Burying it reads as hedging even
+when you are the one owning the mistake.
+
+**Evidence for a conclusion nobody is asked to check stays in the material.** The
+work you did to reach the correction is not the correction. If the reader is not
+being asked to audit the reasoning, the intermediate facts — the adjacent issue
+that took zero events, the phases the new grouping split out — are support you no
+longer need once you state the conclusion outright. Keeping the proof and
+demoting the conclusion is the single most common way paragraph one goes wrong.
+
+**Every noun is one the reader already uses, or one you define where it first
+appears.** This is a hard rule, not a matter of polish. A term only the system
+uses — an internal name for a rule, a stage, a mechanism — makes the sentence
+unactionable and unfixable: the reader cannot take the step, and cannot even
+rewrite the sentence to ask for something else, because they do not know what the
+word points at. If you cannot define it in the clause where it sits, it is your
+term and not theirs, so name the thing itself. The same goes for register: "the
+fingerprint is not being used" over "the fingerprint has been inert".
+
+**When you have a lean, the next step is the recommendation stated as an
+action.** Do not lay out the menu and then answer it. "Give it an input that
+survives, or take it out … I would try the input" makes them build the decision
+you already made, then discover you had made it. Write the step you recommend,
+and give the alternative one clause only if a reader might actually choose it.
+Presenting an option flat is still work handed back; presenting two and ranking
+them at the end is work handed back twice.
 
 **Say the absence once.** The gate counts negations per paragraph precisely
 because restating one missing thing in three different ways is the most common
 way a paragraph fills up without saying anything new.
 
-## A worked example
+## A worked example: register
 
 **Material handed over:** a diagnosis that attachments from one third-party app
 upload as zero bytes; the cause is the share sheet handing over a file before the
@@ -218,3 +249,84 @@ Both drafts in this example are real inputs to `preview.py`: the first returns t
 seven denials above, the second returns `passes`. The second one took a revision
 to get there — its middle paragraph originally ran one 34-word sentence and the
 gate refused it, which is the ordinary shape of this work.
+
+## A worked example: order and vocabulary
+
+This one is the harder failure, because the refused draft is not the bad kind.
+Both versions below pass the preview on every rule. The gate has nothing to say
+about either, and the first one is still the wrong comment. (The excerpts drop
+the issue links and `<code>` spans the posted drafts carried, so that the reading
+is about the order and the words. Put them back before you run anything through
+the preview.)
+
+**Material handed over:** a Sentry triage update. New fingerprints shipped in
+1.34.15 split watchdog terminations into per-phase issues; the old collapsed
+issue has taken no events on that build; the issue this card is about is app
+hangs on a different code path and was not affected; it has taken 179 events
+from 130 users since August 26; a previous update had said the new fingerprints
+would close it. Separately, the app-hang fingerprint has produced nothing since
+1.34.11, because an SDK upgrade removed on-device symbolication and the
+fingerprint keys on a symbolicated function name.
+
+**Returned, and refused on reading:**
+
+> The new fingerprints gave each app phase its own watchdog issue on
+> 1.34.15+2568: first-active, settled and memory-warning terminations. The old
+> collapsed HEY-IOS-483 has taken zero 1.34.15 events. HEY-IOS-663, this card's
+> issue, is app hangs on a different code path, and 1.34.15 left it where it was.
+> Since August 26 it took 179 events from 130 users, all in this one issue. My
+> last update was wrong: the new fingerprints leave this open.
+>
+> Since 1.34.11 the app-hang fingerprint has been inert. […]
+>
+> Next step is yours: give the arm an input that survives without symbolication,
+> or take it out. The SDK still provides the frame's package, image and
+> instruction address. I would try the new input; the arm exists to improve on
+> default stack grouping.
+
+**What the reader did to it:**
+
+> My last update was wrong: the new fingerprints leave this open. Since August 26
+> it took 179 events from 130 users, all in this one issue. HEY-IOS-663, this
+> card's issue, is app hangs on a different code path, and 1.34.15 left it where
+> it was.
+>
+> Since 1.34.11 the app-hang fingerprint is not being used. […]
+>
+> Next step: set an input that survives without symbolication. The SDK still
+> provides the frame's package, image and instruction address.
+
+Four edits, and the same four are available on most drafts:
+
+1. **Paragraph one was reversed.** The correction was the last of five sentences
+   because it was the last thing learned. It is the only sentence that changes
+   what the reader believes, so it goes first.
+2. **Two sentences were deleted, not shortened.** The per-phase split and the old
+   issue's zero events were the evidence for the correction. Once the correction
+   is stated plainly, nobody is auditing it, and the evidence goes back to the
+   material.
+3. **"Inert" became "is not being used."** Same fact, a word the reader uses.
+4. **The menu collapsed into the recommendation.** Two options plus a lean at the
+   end became the one action, stated as the step. Ownership ceremony went with
+   it.
+
+And the finding that mattered most: **the reader could not finish the edit.**
+"Arm" survives in the last paragraph only because they did not know what it
+referred to, so they could not rewrite the sentence and could not take the step.
+One undefined internal noun cost the whole comment its next step, and the gate
+passed it. Nothing downstream catches this. You are the only check on it.
+
+The word pointed at one branch of a four-branch handler in a shared library. The
+reader never opens that file, and the paragraph had already given them a name for
+the same thing in its first sentence. So the third paragraph finishes:
+
+> Next step: give the app-hang fingerprint an input that survives without
+> symbolication, and hangs separate by call site again. The SDK still reports
+> each frame's package, image and instruction address, so there is something left
+> to key on. Dropping the fingerprint instead hands hangs back to Sentry's
+> default stack grouping, which is the thing it was written to beat.
+
+The alternative they had cut comes back as one clause carrying its cost, because
+cutting it entirely hid that removal was on the table. That is the shape: the
+recommendation is the step, and the option they might still take gets a sentence,
+never a menu.
