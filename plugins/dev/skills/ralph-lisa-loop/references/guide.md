@@ -448,7 +448,8 @@ automatically includes the diff. It starts its own session and accepts no prompt
 alongside `--uncommitted`, so neither the persona nor the open findings reach it. Use it only
 when `git -C "[project dir]" check-ignore -q tmp/ralph-lisa-loop-session.md` succeeds:
 `--uncommitted` reviews untracked files too, and the session log would reach the reviewer as a
-change. Don't
+change. Use it also only on rounds with no plan requirements to check and no open findings
+to re-verify, since it can't receive either; otherwise use the prompted session. Don't
 record its `thread_id`: leave `codex_impl_session_id` as it was, so the next round
 resumes the persona session, or starts one if there is none yet.
 
