@@ -83,7 +83,7 @@ If the hook IS already installed, proceed without mentioning it.
 ### Step 2: Codex reviewer channel check
 
 Codex reviews through `codex exec`, which runs non-interactively. Check that the
-CLI is on PATH and signed in: `command -v codex && codex login status`.
+CLI is on PATH and can authenticate: `command -v codex && { codex login status >/dev/null 2>&1 || [ -n "${CODEX_API_KEY:-}" ]; }` (a stored login, or `CODEX_API_KEY`, which `codex exec` reads and `login status` doesn't check).
 
 - If both succeed → record `reviewer_backend: exec` and `review_channel_status: exec_ready` in session, proceed.
 - If either fails → hard stop:
