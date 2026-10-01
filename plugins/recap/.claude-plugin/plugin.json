@@ -1,6 +1,6 @@
 {
   "name": "recap",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Activity digests — pluggable source fetchers, progressive timescale synthesis, audience-aware composition",
   "author": { "name": "37signals", "email": "support@37signals.com" },
   "homepage": "https://github.com/basecamp/house-skills",
