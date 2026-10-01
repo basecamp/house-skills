@@ -26,8 +26,8 @@ The loop: **Implement → Self-Review → External Review → Reconciliation →
   findings. Stateless — no memory of prior rounds. The orchestrator provides open
   findings list for continuity.
 - **External Reviewer** (Codex): Independent external reviewer. Finds problems, doesn't
-  praise. Reviews via MCP thread or `codex exec` fallback. Maintains thread context
-  across rounds.
+  praise. Reviews via `codex exec`; `codex exec resume` maintains its context across
+  rounds.
 - **Mediator** (Human): Steering authority. Sets scope, resolves disputes, approves
   rejections. Sees everything in the orchestrator's conversation. Intervenes when they
   choose, gets elicited when salience warrants it.
@@ -103,7 +103,7 @@ When salience < rope threshold, the system continues without interrupting — bu
    synthesize into a unified plan, documenting which ideas came from each source and
    where they diverge. Subagent writes merged plan to artifact file.
 4. Orchestrator reads the merged plan (Plan Context Loading)
-5. Update session file: `current_round=2`, record `codex_plan_thread_id`
+5. Update session file: `current_round=2`, record `codex_plan_session_id`
 
 The independence guarantee: the Round 1 Codex prompt contains the task description and
 reviewer persona, but zero content from the planner subagent's draft.
@@ -128,7 +128,7 @@ reviewer persona, but zero content from the planner subagent's draft.
    - Orchestrator assigns F-{seq} IDs to new findings
 
 3. External Review
-   - Unchanged from current protocol: Codex MCP or exec fallback
+   - Codex via `codex exec` (see Codex Interaction)
    - Orchestrator sends review prompt to Codex referencing file paths
    - Orchestrator parses response into structured findings with IDs
 
@@ -244,7 +244,7 @@ On plan-mode close gate passing:
 3. Update session: `mode=implement`, `current_round=1`
 4. **Compile decisions ledger**: extract all resolved disputes and rejected-with-reason findings into `## Implementation Decisions` section. Read-only context, not gating state.
 5. Clear finding and dispute ledgers for the implementation phase (fresh start)
-6. Start new Codex MCP thread for implementation reviews (record `codex_impl_thread_id`)
+6. Start a new Codex session for implementation reviews (record `codex_impl_session_id`)
 7. Notify human: "Plan converged after N rounds. Transitioning to implementation."
 8. Orchestrator reads converged plan + decisions ledger, begins implementation
 
@@ -352,7 +352,7 @@ Every round synthesis MUST include:
 - New disputes / resolved disputes (by ID)
 - Derived gate counts (recomputed from records)
 - Cache mismatch check (compare derived to YAML cache)
-- Review channel used (mcp|exec|self-review-only)
+- Review channel used (exec|self-review-only)
 - Reasoning effort used (should be xhigh; note if degraded)
 - If channel diverged from policy: why
 
@@ -373,76 +373,46 @@ Every round synthesis MUST include:
 
 ## Codex Interaction
 
-### MCP Thread Pattern (Primary)
+### Session Pattern
 
-**Plan-phase Round 1** (independent ideation):
-```
-mcp__codex__codex(
-  developer-instructions="[reviewer persona from prompts.md]",
-  prompt="[independent ideation prompt — task only, NO planner draft]",
-  cwd="[project dir]",
-  config={"model_reasoning_effort": "xhigh", "model_reasoning_summary": "detailed", "model_supports_reasoning_summaries": true},
-  sandbox="read-only",
-  approval-policy="never"
-) → threadId → save as codex_plan_thread_id
-```
+Each phase runs one Codex session: `codex exec` starts it in Round 1 and
+`codex exec resume` continues it after that, so the reviewer remembers prior findings,
+decisions, and artifact state.
 
-**Plan-phase Round 2+** (review):
-```
-mcp__codex__codex-reply(
-  threadId="[codex_plan_thread_id]",
-  prompt="[continuation + plan review prompt from prompts.md]"
-)
-```
+Write each prompt to `tmp/ralph-lisa-codex-prompt.md` and pass it on stdin (`-`).
+The reply goes to `tmp/ralph-lisa-codex-response.txt`. An xhigh review can run for many
+minutes: give the shell call a timeout that long, or run it in the background and wait
+for it to exit, so the host's default command timeout doesn't cut it off.
 
-**Implement-phase Round 1** (new thread):
-```
-mcp__codex__codex(
-  developer-instructions="[reviewer persona from prompts.md]",
-  prompt="[implementation review prompt from prompts.md]",
-  cwd="[project dir]",
-  config={"model_reasoning_effort": "xhigh", "model_reasoning_summary": "detailed", "model_supports_reasoning_summaries": true},
-  sandbox="read-only",
-  approval-policy="never"
-) → threadId → save as codex_impl_thread_id
-```
-
-**Implement-phase Round 2+** (review):
-```
-mcp__codex__codex-reply(
-  threadId="[codex_impl_thread_id]",
-  prompt="[continuation + implementation review prompt from prompts.md]"
-)
-```
-
-### codex exec Fallback
-
-When Codex MCP is not available and the user has opted into exec mode at the startup gate, fall back to `codex exec`.
-
-Output goes to `tmp/ralph-lisa-codex-response.txt`.
-
-**Plan-phase Round 1** (new session):
+**Plan-phase Round 1** (independent ideation, new session):
 ```bash
-codex exec "[independent ideation prompt — task only, NO planner draft]" \
-  -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' -s read-only \
-  -C "[project dir]" --json \
-  -o tmp/ralph-lisa-codex-response.txt
-# Parse session_id from JSON output → save as codex_plan_session_id in session file
+codex exec -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' \
+  -s read-only -C "[project dir]" --json -o tmp/ralph-lisa-codex-response.txt \
+  - < tmp/ralph-lisa-codex-prompt.md > tmp/ralph-lisa-codex-events.jsonl
+# Prompt: reviewer persona + independent ideation prompt — task only, NO planner draft
+# First event: {"type":"thread.started","thread_id":"..."} → save thread_id as codex_plan_session_id
 ```
 
-**Round 2+** (resume prior session):
+**Plan-phase Round 2+** (resume):
 ```bash
-codex exec resume "$codex_plan_session_id" \
-  "[continuation prompt]" \
-  -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' -s read-only \
-  -o tmp/ralph-lisa-codex-response.txt
+codex exec -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' \
+  -s read-only -C "[project dir]" -o tmp/ralph-lisa-codex-response.txt \
+  resume "$codex_plan_session_id" - < tmp/ralph-lisa-codex-prompt.md
+# Prompt: continuation + plan review prompt from prompts.md
 ```
 
-**Implement-phase** — same pattern: new session for Round 1, `exec resume` for Round 2+. Save session ID as `codex_impl_session_id`.
+**Implement-phase** — same pattern: a new session for Round 1 (reviewer persona +
+implementation review prompt), `resume` for Round 2+. Save its `thread_id` as
+`codex_impl_session_id`.
 
-**Implementation shortcut**: For implementation rounds, `codex exec review --uncommitted "[focus areas]"` is a first-class code review that automatically includes the diff. The orchestrator can use this instead of manually constructing diff prompts.
+Every call sets its own sandbox, working directory, and reasoning effort, so repeat
+them on `resume`. Put `-s` and `-C` before `resume`; after it they are rejected as
+unexpected arguments.
 
-Session continuation preserves Codex's context across rounds — the reviewer remembers prior findings, decisions, and artifact state. This is the direct analog of MCP thread persistence.
+**Implementation shortcut**: `codex exec review --uncommitted` (same flags before
+`review`) is a first-class code review that automatically includes the diff. It starts
+its own session and accepts no prompt alongside `--uncommitted`, so neither the persona
+nor the open findings reach it.
 
 ---
 
@@ -454,33 +424,24 @@ Always `xhigh`. Review depth is worth the cost — both plan and implementation 
 benefit from maximum reasoning. Reasoning summaries (`detailed`) give the orchestrator visibility
 into Codex's chain of thought, improving reconciliation quality.
 
-### MCP Call Parameters
+### Exec Parameters
 
-Set on every initial `mcp__codex__codex` call (persists per thread — `codex-reply` inherits):
+Set on every `codex exec` call, `resume` included:
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| `config` | `{"model_reasoning_effort": "xhigh", "model_reasoning_summary": "detailed", "model_supports_reasoning_summaries": true}` | Maximum depth + visible reasoning |
-| `sandbox` | `"read-only"` | Reviewer reads, doesn't modify |
-| `approval-policy` | `"never"` | Non-interactive |
-| `developer-instructions` | Reviewer persona from prompts.md | Role separation from content |
+| `-c` | `model_reasoning_effort="xhigh"`, `model_reasoning_summary="detailed"`, `model_supports_reasoning_summaries=true` | Maximum depth + visible reasoning |
+| `-s` | `read-only` | Reviewer reads, doesn't modify |
+| `-C` | Project dir | Reviewer's working root |
 
-Pass the reviewer persona via `developer-instructions` rather than stuffing it into
-`prompt`. Developer messages get priority attention in the model. Keep `prompt` for
-path references and open findings.
+`codex exec` runs non-interactively and never asks for approval, so there is no
+approval flag to set.
+
+Put the reviewer persona from prompts.md at the top of the first prompt of each
+session (plan Round 1, implement Round 1). The resumed session keeps it in context, so
+later prompts carry only path references, open findings, and open disputes.
 
 Don't override `model` — the user's codex config owns model selection.
-
-### Graceful Degradation
-
-Not all MCP configurations support `config`, `developer-instructions`, or `sandbox` parameters. On the first MCP call, if parameters cause an error:
-- Retry with persona stuffed into `prompt` instead of `developer-instructions`
-- If `config` is unsupported, note the degradation in the session (`review_channel_status: mcp_degraded`) and log it in round summaries
-- The round header still records what was attempted vs what succeeded
-
-### Exec Fallback Parameters
-
-For `codex exec` fallback: `-c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' -s read-only`.
 
 ---
 
@@ -547,17 +508,16 @@ context from subagent summaries.
 
 | Failure | Recovery |
 |---------|----------|
-| Codex MCP call fails (timeout/error) | Retry once → fall back to `codex exec` for this round → fall back to self-review-only with M-priority finding logged. Retry MCP next round. |
-| MCP thread lost | Start new thread, update session file `codex_*_thread_id` |
+| `codex exec` fails (non-zero exit/timeout) | Read stderr for diagnostics. Retry once → fall back to self-review-only with M-priority finding logged. Retry Codex next round. |
+| Codex session lost (`resume` can't find it) | Start a new session with the persona and open findings, update session file `codex_*_session_id` |
 | Session file corrupted | Check `tmp/ralph-lisa-loop-history/` → reconstruct from continuation block → inform user, offer restart |
 | Context compacted mid-round | Stop hook re-injects continuation block. Orchestrator reads session, checks which round sections exist, resumes from next missing section. |
-| codex exec fails | Read stderr for diagnostics. Self-review-only for this round. |
 | Worker subagent fails (timeout/crash) | Retry once with same prompt → if still fails, orchestrator performs the step directly for this round (degrades to current behavior). Log in round summary. |
 | Subagent returns malformed summary | Orchestrator re-dispatches with explicit format instructions appended to prompt. If still malformed after retry, treat as empty and log warning. |
 
 Any fallback to a different review channel must be recorded in the round summary:
 ```
-Review channel: exec (MCP call failed: timeout after 30s, retried once)
+Review channel: self-review-only (codex exec failed: timeout, retried once)
 ```
 
 ---
@@ -567,10 +527,13 @@ Review channel: exec (MCP call failed: timeout after 30s, retried once)
 | Tier | What works | What's manual |
 |------|------------|---------------|
 | **Manual** | Skill guide + prompts + session template. Orchestrator follows protocol, human types "continue" between rounds. | Loop continuation |
-| **Semi-auto** | Stop hook registered. Loop continues automatically. `awaiting_human` respected. | Hook registration (one-time) |
-| **Full-auto** | Stop hook + Codex MCP configured. Zero human input during execution; attestation at close unless attestation-exempt. | MCP server setup (one-time) |
+| **Full-auto** | Stop hook registered + Codex via `codex exec`. Loop continues automatically, pausing only for `awaiting_human`; attestation at close unless attestation-exempt. | Hook registration (one-time) |
 
-The startup preflight in SKILL.md determines the actual tier. Full-auto requires both stop hook AND `reviewer_backend: mcp`. If MCP is unavailable and user opted for exec fallback, tier caps at Semi-auto and this is logged in the session.
+The startup preflight in SKILL.md determines the actual tier: Full-auto with the stop
+hook, Manual without it. Preflight stops if Codex is unavailable, so every session has
+a reviewer. `codex exec` carries Full-auto on its own: it runs non-interactively with
+approvals off in a read-only sandbox, and `codex exec resume` keeps the reviewer's
+context from round to round.
 
 ### Stop Hook Setup
 
@@ -647,7 +610,7 @@ Run `scripts/eval.sh` at completion (before attestation). Any FAIL blocks closur
 | Low signal feedback | Codex lacks context | Verify artifact path is accessible, check sandbox=read-only allows file reads |
 | Too many findings, no progress | Everything open, nothing resolved | Prioritize H findings, batch L findings |
 | Reviewer contradicts themselves | No evidence requirement | Require evidence field in findings |
-| MCP thread lost | Thread ID not recorded | Record in session file, fall back to codex exec |
+| Codex session lost | Session ID not recorded | Record `codex_*_session_id` from the `thread.started` event; start a new session if lost |
 | Worker steamrolls decisions | Not escalating tradeoffs | Check salience scoring, lower rope threshold |
 | "No findings" when issues exist | Reviewer shallow or prompt too terse | Orchestrator verifies: check for unlabeled suggestions in response |
 | False convergence | Both agents aligned but wrong | Mediator validates key decisions at close (attestation) |
@@ -658,14 +621,14 @@ Run `scripts/eval.sh` at completion (before attestation). Any FAIL blocks closur
 | Attestation skipped at high rope | Attestation-exempt criteria not checked | Verify all four criteria against immutable counters |
 | Phase transition with open disputes | Gate check missed | Gate blocks transition if any dispute state=open |
 | Rejected finding without metadata | Gate not checking rejection fields | Gate verifies rationale + approved_by + approved_round |
-| Codex MCP unavailable, no fallback | Neither MCP nor CLI installed | Startup gate blocks, offers install instructions |
-| Silent degradation to codex exec | MCP not callable, CLI present | Startup gate warns, requires explicit opt-in to exec |
-| Codex MCP timeout | Network/server issue | Retry once → exec fallback → self-review only |
+| Codex unavailable | CLI not installed | Startup gate blocks, offers install and sign-in instructions |
+| Every review round falls back to self-review-only | Codex not signed in, or the shell call times out | Check `codex exec` stderr; sign in with `codex login`, or give the call a longer timeout |
+| `codex exec resume` exits with "unexpected argument" | `-s` or `-C` placed after `resume` | Put them before `resume` |
+| Codex timeout | Network/server issue | Retry once → self-review only |
 | Session file unreadable | Disk error or manual edit broke YAML | Reconstruct from archive or continuation block |
 | Context compacted mid-round | Token limit hit | Resume from continuation block + section check |
-| Thread ID stale | MCP server restarted | Start new thread, update session |
 | Session file too large | 10+ rounds without compaction | Compact old rounds per Context Management |
-| Reasoning effort not xhigh | MCP degradation or config error | Eval check 21 flags non-compliant rounds |
+| Reasoning effort not xhigh | `-c` flags not repeated on `resume`, or config error | Eval check 21 flags non-compliant rounds |
 | Subagent returns vague summary | Prompt too loose | Tighten subagent prompt: require file list, finding IDs addressed, specific changes |
 | Subagent modifies session file | Subagent overstepped | Only orchestrator writes session file; review subagent output for session mutations |
 | Self-review finds nothing | Subagent lacks context on open findings | Include open findings list in self-review prompt |

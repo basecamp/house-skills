@@ -1,7 +1,7 @@
 ---
 name: consult-outside-expert
 description: |
-  Explicitly launch an independent outside-expert consultation via Codex MCP. Use only
+  Explicitly launch an independent outside-expert consultation via Codex. Use only
   when the user directly asks to run this workflow or asks another expert/agent for an
   independent second opinion. Do not infer it from ordinary review, feedback, validation,
   planning, or discussion about the skill itself.
@@ -55,4 +55,4 @@ The guide contains:
 - Round templates and expert prompts
 - Convergence gates and quality criteria
 - Eval checks and failure modes
-- Working log templates (manual + MCP modes)
+- Working log templates (manual + Codex session modes)
