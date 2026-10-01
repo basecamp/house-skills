@@ -79,7 +79,7 @@ If you have the Codex CLI, you can run the expert through a single non-interacti
 
 **Note:** Codex session mode is optimized for two-agent mode (one expert). For multi-agent reviews, use manual mode or run multiple Codex sessions (one per expert lens).
 
-**Prerequisite:** the `codex` CLI installed and authenticated (`codex login`).
+**Prerequisite:** the `codex` CLI installed and authenticated, by `codex login` or a `CODEX_API_KEY` in the environment (`codex exec` reads it).
 
 ---
 

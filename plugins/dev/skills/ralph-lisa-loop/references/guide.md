@@ -420,7 +420,7 @@ codex exec -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="deta
 rm -f "[codex dir]/response.txt"
 codex exec -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' \
   --skip-git-repo-check -s read-only -C "[project dir]" --json -o "[codex dir]/response.txt" \
-  resume "$codex_plan_session_id" - < "[codex dir]/prompt.md" > "[codex dir]/events.jsonl" 2> "[codex dir]/stderr.log"
+  resume "[codex_plan_session_id]" - < "[codex dir]/prompt.md" > "[codex dir]/events.jsonl" 2> "[codex dir]/stderr.log"
 # Prompt: continuation + plan review prompt from prompts.md
 # First event's thread_id must equal codex_plan_session_id
 ```
