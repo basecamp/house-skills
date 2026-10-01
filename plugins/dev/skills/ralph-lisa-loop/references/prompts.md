@@ -222,11 +222,11 @@ it into the protocol's finding structure (F-{seq} IDs, state, evidence, required
 Codex produces natural review output; the orchestrator imposes the schema.
 
 **Example first call** (prompt file holds the persona text above, then the review
-prompt: path references, open findings, open disputes):
+prompt: path references, open findings, open disputes; `$CODEX_DIR` is set once per session, outside the reviewed tree, per guide.md):
 ```bash
 codex exec -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' \
-  --skip-git-repo-check -s read-only -C "[project dir]" --json -o tmp/ralph-lisa-codex-response.txt \
-  - < tmp/ralph-lisa-codex-prompt.md > tmp/ralph-lisa-codex-events.jsonl 2> tmp/ralph-lisa-codex-stderr.log
+  --skip-git-repo-check -s read-only -C "[project dir]" --json -o "$CODEX_DIR/response.txt" \
+  - < "$CODEX_DIR/prompt.md" > "$CODEX_DIR/events.jsonl" 2> "$CODEX_DIR/stderr.log"
 ```
 
 ---
