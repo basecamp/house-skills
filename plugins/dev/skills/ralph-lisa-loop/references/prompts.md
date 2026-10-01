@@ -254,10 +254,6 @@ Open disputes (your position requested):
 Use for implement-phase reviews. The first implementation round starts a new session,
 so put the reviewer persona above its prompt; later rounds resume that session.
 
-`codex exec review --uncommitted` is a first-class option that automatically includes
-the diff. It accepts no prompt alongside `--uncommitted`, so the persona and open
-findings can't ride along.
-
 **First implementation round:**
 ```
 Plan at {artifact_path}. Review uncommitted changes against it.
