@@ -4,7 +4,7 @@
 
 ```bash
 claude plugin marketplace add basecamp/claude-plugins
-claude plugin install dev        # or: security, ai, recap
+claude plugin install dev        # or: security, ai, recap, three-paragraph-recap
 ```
 
 **Other agents** — install as standalone skills:
@@ -29,6 +29,7 @@ npx skills add basecamp/house-skills
 | [ruby-cext-memory-truffle-hunt](skills/ruby-cext-memory-truffle-hunt) | dev | Scent library for use-after-free and GC-invalidated pointers in Ruby C extensions |
 | [recap](skills/recap/) | recap | Activity digests — pluggable fetchers, timescale synthesis, audience-aware composition |
 | [skill-crafting](skills/skill-crafting) | ai | Create and refine agent skills through co-development and eval loops |
+| [three-paragraph-recap](skills/three-paragraph-recap/) | three-paragraph-recap | Three paragraphs for one reader who has to decide — an agent that composes them and a contract that refuses the ones that miss |
 | [truffle-hunt](skills/truffle-hunt) | dev | Sweep a dependency corpus for every instance of one latent bug class — scoping, proof protocol, and filing upstream |
 
 ## Structure
