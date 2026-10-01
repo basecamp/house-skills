@@ -18,6 +18,7 @@ open_disputes_count: 0
 reviewer_backend: null
 review_channel_status: null
 reasoning_effort: xhigh
+codex_dir: null
 codex_plan_session_id: null
 codex_impl_session_id: null
 max_rounds: 20
@@ -97,6 +98,7 @@ Contains resolved disputes and rejected-with-reason findings from plan phase.]
 | `reviewer_backend` | enum/null | `exec` — set at startup, null before preflight |
 | `review_channel_status` | enum/null | `exec_ready`, `blocked` |
 | `reasoning_effort` | string | Reasoning effort for all Codex calls (default: `xhigh`) |
+| `codex_dir` | string/null | Absolute directory for Codex's prompt, reply, events and stderr files, outside the reviewed tree; set at initialization |
 | `codex_plan_session_id` | string/null | `codex exec` session ID for plan-phase reviews; null until a session starts, and never passed to `resume` while null |
 | `codex_impl_session_id` | string/null | `codex exec` session ID for implement-phase reviews; null until a session starts, and never passed to `resume` while null |
 | `max_rounds` | int | Safety limit per phase |

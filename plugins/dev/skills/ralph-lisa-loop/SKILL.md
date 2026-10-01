@@ -83,10 +83,10 @@ If the hook IS already installed, proceed without mentioning it.
 ### Step 2: Codex reviewer channel check
 
 Codex reviews through `codex exec`, which runs non-interactively. Check that the
-CLI is on PATH with `command -v codex`.
+CLI is on PATH and signed in: `command -v codex && codex login status`.
 
-- If it is → record `reviewer_backend: exec` and `review_channel_status: exec_ready` in session, proceed.
-- If it isn't → hard stop:
+- If both succeed → record `reviewer_backend: exec` and `review_channel_status: exec_ready` in session, proceed.
+- If either fails → hard stop:
   > The ralph-lisa loop requires the Codex CLI as reviewer. Install it with
   > `npm i -g @openai/codex`, sign in with `codex login`, then re-invoke the skill.
 
