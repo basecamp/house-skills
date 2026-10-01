@@ -97,8 +97,8 @@ Contains resolved disputes and rejected-with-reason findings from plan phase.]
 | `reviewer_backend` | enum/null | `exec` — set at startup, null before preflight |
 | `review_channel_status` | enum/null | `exec_ready`, `blocked` |
 | `reasoning_effort` | string | Reasoning effort for all Codex calls (default: `xhigh`) |
-| `codex_plan_session_id` | string/null | `codex exec` session ID for plan-phase reviews |
-| `codex_impl_session_id` | string/null | `codex exec` session ID for implement-phase reviews |
+| `codex_plan_session_id` | string/null | `codex exec` session ID for plan-phase reviews; null until a session starts, and never passed to `resume` while null |
+| `codex_impl_session_id` | string/null | `codex exec` session ID for implement-phase reviews; null until a session starts, and never passed to `resume` while null |
 | `max_rounds` | int | Safety limit per phase |
 | `total_rounds_all_phases` | int | **Immutable cumulative** — survives phase transition |
 | `total_disputes_opened_all_phases` | int | **Immutable cumulative** — survives phase transition |

@@ -225,8 +225,8 @@ Codex produces natural review output; the orchestrator imposes the schema.
 prompt: path references, open findings, open disputes):
 ```bash
 codex exec -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' \
-  -s read-only -C "[project dir]" --json -o tmp/ralph-lisa-codex-response.txt \
-  - < tmp/ralph-lisa-codex-prompt.md > tmp/ralph-lisa-codex-events.jsonl
+  --skip-git-repo-check -s read-only -C "[project dir]" --json -o tmp/ralph-lisa-codex-response.txt \
+  - < tmp/ralph-lisa-codex-prompt.md > tmp/ralph-lisa-codex-events.jsonl 2> tmp/ralph-lisa-codex-stderr.log
 ```
 
 ---

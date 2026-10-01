@@ -160,22 +160,23 @@ OUTPUT FORMAT:
 ```
 
 ### Codex session option: Reviewer thread
-If using a Codex session, start the expert in a single session and resume it across rounds. The expert's reply is written to `[reply file]`; keep it and `[events file]` outside the repository.
+If using a Codex session, start the expert in a single session and resume it across rounds. The expert's reply is written to `[reply file]`; read only that file, and read `[stderr file]` when the exit code is non-zero. Keep all three files outside the repository.
 
 Round 1 (start new session):
 ```bash
 codex exec -s read-only --skip-git-repo-check -C "[project dir]" --json -o [reply file] \
-  "You are the outside expert... [artifact path] [scope] [quality bar] [output format]" > [events file]
+  "You are the outside expert... [artifact path] [scope] [quality bar] [output format]" > [events file] 2> [stderr file]
 # First event: {"type":"thread.started","thread_id":"..."} -> thread ID
 ```
 
 Round N (resume session):
 ```bash
-codex exec -s read-only --skip-git-repo-check -C "[project dir]" -o [reply file] \
-  resume [thread ID] "Here is the updated artifact, changes made, and synthesis from Round N-1: [include key decisions, risks accepted]. Provide deltas only (H/M/L labeled) - no repeats from previous rounds."
+codex exec -s read-only --skip-git-repo-check -C "[project dir]" --json -o [reply file] \
+  resume [thread ID] "Here is the updated artifact, changes made, and synthesis from Round N-1: [include key decisions, risks accepted]. Provide deltas only (H/M/L labeled) - no repeats from previous rounds." > [events file] 2> [stderr file]
+# First event's thread_id must equal [thread ID]
 ```
 
-Repeat `-s` and `-C` on every call, before `resume`; `resume` rejects them after it. Pass `-` in place of a long prompt to read it from stdin. A review can run for minutes, so give the shell call a long enough timeout or run it in the background.
+Repeat `-s` and `-C` on every call, before `resume`; `resume` rejects them after it. Keep `--json` and the redirects on every call too: without `--json`, codex writes each command it runs, that command's output and the reply to stderr, and the reply to stdout as well, so the whole transcript would land in your context. A `resume` whose first event shows a different `thread_id` started a new session (codex does that, and exits 0, for an ID that isn't a UUID and names no thread); start a new session with the Round 1 brief and the latest synthesis, and record its ID. Pass `-` in place of a long prompt to read it from stdin. A review can run for minutes, so give the shell call a long enough timeout or run it in the background.
 
 Record the thread ID and round summaries in `review-session.md`.
 

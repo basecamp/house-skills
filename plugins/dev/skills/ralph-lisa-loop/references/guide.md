@@ -380,15 +380,25 @@ Each phase runs one Codex session: `codex exec` starts it in Round 1 and
 decisions, and artifact state.
 
 Write each prompt to `tmp/ralph-lisa-codex-prompt.md` and pass it on stdin (`-`).
-The reply goes to `tmp/ralph-lisa-codex-response.txt`. An xhigh review can run for many
-minutes: give the shell call a timeout that long, or run it in the background and wait
-for it to exit, so the host's default command timeout doesn't cut it off.
+The reply goes to `tmp/ralph-lisa-codex-response.txt`; read only that file, and read
+`tmp/ralph-lisa-codex-stderr.log` when the exit code is non-zero. Every call uses
+`--json` with stdout sent to `tmp/ralph-lisa-codex-events.jsonl` and stderr to the log.
+Without `--json`, codex writes each command it runs, that command's output, its
+reasoning, and the reply to stderr, and the reply to stdout as well, so the shell tool
+would bring the reviewer's whole transcript into the orchestrator's context every round.
+
+An xhigh review can run for many minutes: give the shell call a timeout that long, or
+run it in the background and wait for it to exit, so the host's default command timeout
+doesn't cut it off. If it runs in the background, wait for it inside the same turn,
+polling the process in bounded steps, and don't end the turn while it runs: under the
+stop hook, ending the turn re-prompts the loop, which can start a second `resume` on the
+same session.
 
 **Plan-phase Round 1** (independent ideation, new session):
 ```bash
 codex exec -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' \
-  -s read-only -C "[project dir]" --json -o tmp/ralph-lisa-codex-response.txt \
-  - < tmp/ralph-lisa-codex-prompt.md > tmp/ralph-lisa-codex-events.jsonl
+  --skip-git-repo-check -s read-only -C "[project dir]" --json -o tmp/ralph-lisa-codex-response.txt \
+  - < tmp/ralph-lisa-codex-prompt.md > tmp/ralph-lisa-codex-events.jsonl 2> tmp/ralph-lisa-codex-stderr.log
 # Prompt: reviewer persona + independent ideation prompt — task only, NO planner draft
 # First event: {"type":"thread.started","thread_id":"..."} → save thread_id as codex_plan_session_id
 ```
@@ -396,23 +406,35 @@ codex exec -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="deta
 **Plan-phase Round 2+** (resume):
 ```bash
 codex exec -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' \
-  -s read-only -C "[project dir]" -o tmp/ralph-lisa-codex-response.txt \
-  resume "$codex_plan_session_id" - < tmp/ralph-lisa-codex-prompt.md
+  --skip-git-repo-check -s read-only -C "[project dir]" --json -o tmp/ralph-lisa-codex-response.txt \
+  resume "$codex_plan_session_id" - < tmp/ralph-lisa-codex-prompt.md > tmp/ralph-lisa-codex-events.jsonl 2> tmp/ralph-lisa-codex-stderr.log
 # Prompt: continuation + plan review prompt from prompts.md
+# First event's thread_id must equal codex_plan_session_id
 ```
 
 **Implement-phase** — same pattern: a new session for Round 1 (reviewer persona +
 implementation review prompt), `resume` for Round 2+. Save its `thread_id` as
 `codex_impl_session_id`.
 
+Resume only a recorded ID. If `codex_*_session_id` is still null or empty (Round 1 fell
+back to self-review-only, or used the review shortcut), start a new session with the
+Round 1 command, the persona above this round's prompt and its open findings, and record
+its ID. `resume` treats an ID that isn't a UUID as a thread name, and when no thread has
+that name it starts a new session and exits 0, so `resume "null"` gives a reviewer with
+no persona and no history. After every `resume`, check that the first event's
+`thread_id` equals the recorded ID; a different ID means the session was lost (see Error
+Recovery).
+
 Every call sets its own sandbox, working directory, and reasoning effort, so repeat
 them on `resume`. Put `-s` and `-C` before `resume`; after it they are rejected as
 unexpected arguments.
 
-**Implementation shortcut**: `codex exec review --uncommitted` (same flags before
-`review`) is a first-class code review that automatically includes the diff. It starts
-its own session and accepts no prompt alongside `--uncommitted`, so neither the persona
-nor the open findings reach it.
+**Implementation shortcut**: `codex exec review --uncommitted` (same flags and
+redirects, with the flags before `review`) is a first-class code review that
+automatically includes the diff. It starts its own session and accepts no prompt
+alongside `--uncommitted`, so neither the persona nor the open findings reach it. Don't
+record its `thread_id`: leave `codex_impl_session_id` as it was, so the next round
+resumes the persona session, or starts one if there is none yet.
 
 ---
 
@@ -421,8 +443,8 @@ nor the open findings reach it.
 ### Reasoning Policy
 
 Always `xhigh`. Review depth is worth the cost — both plan and implementation phases
-benefit from maximum reasoning. Reasoning summaries (`detailed`) give the orchestrator visibility
-into Codex's chain of thought, improving reconciliation quality.
+benefit from maximum reasoning. Reasoning summaries (`detailed`) land in the events file, where
+the orchestrator can read Codex's chain of thought when reconciling a contested finding.
 
 ### Exec Parameters
 
@@ -433,6 +455,9 @@ Set on every `codex exec` call, `resume` included:
 | `-c` | `model_reasoning_effort="xhigh"`, `model_reasoning_summary="detailed"`, `model_supports_reasoning_summaries=true` | Maximum depth + visible reasoning |
 | `-s` | `read-only` | Reviewer reads, doesn't modify |
 | `-C` | Project dir | Reviewer's working root |
+| `--skip-git-repo-check` | — | The project dir may not be a git repo; without it `codex exec` exits 1 there |
+| `--json` | stdout → `tmp/ralph-lisa-codex-events.jsonl`, stderr → `tmp/ralph-lisa-codex-stderr.log` | Keeps the transcript out of the orchestrator's context; the first event carries the `thread_id` |
+| `-o` | `tmp/ralph-lisa-codex-response.txt` | The reply, the only output the orchestrator reads |
 
 `codex exec` runs non-interactively and never asks for approval, so there is no
 approval flag to set.
@@ -508,8 +533,8 @@ context from subagent summaries.
 
 | Failure | Recovery |
 |---------|----------|
-| `codex exec` fails (non-zero exit/timeout) | Read stderr for diagnostics. Retry once → fall back to self-review-only with M-priority finding logged. Retry Codex next round. |
-| Codex session lost (`resume` can't find it) | Start a new session with the persona and open findings, update session file `codex_*_session_id` |
+| `codex exec` fails (non-zero exit/timeout) | Read `tmp/ralph-lisa-codex-stderr.log` for diagnostics. Retry once → fall back to self-review-only with M-priority finding logged. Retry Codex next round. |
+| Codex session lost (`resume` exits 1 with `no rollout found`, or its first event's `thread_id` isn't the recorded ID) | Don't retry the `resume`. Start a new session with the persona and open findings, update session file `codex_*_session_id` |
 | Session file corrupted | Check `tmp/ralph-lisa-loop-history/` → reconstruct from continuation block → inform user, offer restart |
 | Context compacted mid-round | Stop hook re-injects continuation block. Orchestrator reads session, checks which round sections exist, resumes from next missing section. |
 | Worker subagent fails (timeout/crash) | Retry once with same prompt → if still fails, orchestrator performs the step directly for this round (degrades to current behavior). Log in round summary. |
@@ -610,7 +635,7 @@ Run `scripts/eval.sh` at completion (before attestation). Any FAIL blocks closur
 | Low signal feedback | Codex lacks context | Verify artifact path is accessible, check sandbox=read-only allows file reads |
 | Too many findings, no progress | Everything open, nothing resolved | Prioritize H findings, batch L findings |
 | Reviewer contradicts themselves | No evidence requirement | Require evidence field in findings |
-| Codex session lost | Session ID not recorded | Record `codex_*_session_id` from the `thread.started` event; start a new session if lost |
+| Codex session lost | Session ID not recorded, or `resume` given a null ID, which starts a new session and exits 0 | Record `codex_*_session_id` from the `thread.started` event; start a new session instead of resuming a null ID; compare the first event's `thread_id` on every `resume` |
 | Worker steamrolls decisions | Not escalating tradeoffs | Check salience scoring, lower rope threshold |
 | "No findings" when issues exist | Reviewer shallow or prompt too terse | Orchestrator verifies: check for unlabeled suggestions in response |
 | False convergence | Both agents aligned but wrong | Mediator validates key decisions at close (attestation) |
@@ -622,7 +647,7 @@ Run `scripts/eval.sh` at completion (before attestation). Any FAIL blocks closur
 | Phase transition with open disputes | Gate check missed | Gate blocks transition if any dispute state=open |
 | Rejected finding without metadata | Gate not checking rejection fields | Gate verifies rationale + approved_by + approved_round |
 | Codex unavailable | CLI not installed | Startup gate blocks, offers install and sign-in instructions |
-| Every review round falls back to self-review-only | Codex not signed in, or the shell call times out | Check `codex exec` stderr; sign in with `codex login`, or give the call a longer timeout |
+| Every review round falls back to self-review-only | Codex not signed in, or the shell call times out | Check `tmp/ralph-lisa-codex-stderr.log`; sign in with `codex login`, or give the call a longer timeout |
 | `codex exec resume` exits with "unexpected argument" | `-s` or `-C` placed after `resume` | Put them before `resume` |
 | Codex timeout | Network/server issue | Retry once → self-review only |
 | Session file unreadable | Disk error or manual edit broke YAML | Reconstruct from archive or continuation block |
