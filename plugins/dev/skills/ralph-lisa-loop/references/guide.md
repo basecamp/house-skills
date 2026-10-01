@@ -379,7 +379,7 @@ Each phase runs one Codex session: `codex exec` starts it in Round 1 and
 `codex exec resume` continues it after that, so the reviewer remembers prior findings,
 decisions, and artifact state.
 
-Keep Codex's files out of the reviewed tree, or a later `review --uncommitted` reads them as
+Keep Codex's files out of the reviewed tree, or an implementation review reads them as
 changes. At initialization, compute the directory once with `git -C "[project dir]" rev-parse
 --path-format=absolute --git-path ralph-lisa-codex 2>/dev/null || mktemp -d` (inside the git
 directory, so never tracked or reviewed; a temp directory outside a repo), `mkdir -p` it, and
@@ -433,7 +433,7 @@ implementation review prompt), `resume` for Round 2+. Save its `thread_id` as
 `codex_impl_session_id`.
 
 Resume only a recorded ID. If `codex_*_session_id` is still null or empty (Round 1 fell
-back to self-review-only, or used the review shortcut), start a new session with the
+back to self-review-only), start a new session with the
 Round 1 command, the persona above this round's prompt and its open findings, and record
 its ID. `resume` treats an ID that isn't a UUID as a thread name, and when no thread has
 that name it starts a new session and exits 0, so `resume "null"` gives a reviewer with
@@ -444,17 +444,6 @@ Recovery).
 Every call sets its own sandbox, working directory, and reasoning effort, so repeat
 them on `resume`. Put `-s` and `-C` before `resume`; after it they are rejected as
 unexpected arguments.
-
-**Implementation shortcut**: `codex exec review --uncommitted` (same flags and
-redirects, with the flags before `review`) is a first-class code review that
-automatically includes the diff. It starts its own session and accepts no prompt
-alongside `--uncommitted`, so neither the persona nor the open findings reach it. Use it only
-when `git -C "[project dir]" check-ignore -q tmp/ralph-lisa-loop-session.md` succeeds:
-`--uncommitted` reviews untracked files too, and the session log would reach the reviewer as a
-change. Use it also only on rounds with no plan requirements to check and no open findings
-to re-verify, since it can't receive either; otherwise use the prompted session. Don't
-record its `thread_id`: leave `codex_impl_session_id` as it was, so the next round
-resumes the persona session, or starts one if there is none yet.
 
 ---
 
