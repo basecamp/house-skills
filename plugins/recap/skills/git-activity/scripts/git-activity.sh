@@ -3,10 +3,11 @@
 # Git activity fetcher — local git log to day-cached JSON.
 #
 # Usage:
-#   ./git-activity.sh --repos name:path[,name:path,...] --since DATE --until DATE [--reuse]
+#   ./git-activity.sh --repos name:path[,name:path,...] --since DATE --until DATE
+#                     [--author PATTERN] [--all-branches] [--reuse]
 #
 # Output:
-#   ~/.cache/recap/git/{repo}/{YYYY-MM-DD}/log.json  per-day per-repo
+#   ~/.cache/recap/git/{repo}/[{scope}/]{YYYY-MM-DD}/log.json  per-day per-repo
 #   Prints cache paths to stdout when done.
 #
 set -euo pipefail
@@ -15,12 +16,16 @@ REPOS=""
 SINCE_DATE=""
 UNTIL_DATE=""
 REUSE=false
+AUTHOR=""
+ALL_BRANCHES=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --repos) REPOS="$2"; shift 2 ;;
     --since) SINCE_DATE="$2"; shift 2 ;;
     --until) UNTIL_DATE="$2"; shift 2 ;;
+    --author) AUTHOR="$2"; shift 2 ;;
+    --all-branches) ALL_BRANCHES=true; shift ;;
     --reuse) REUSE=true; shift ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
@@ -43,6 +48,19 @@ SINCE_DAY="${SINCE_DATE:0:10}"
 UNTIL_DAY="${UNTIL_DATE:0:10}"
 
 CACHE_BASE="$HOME/.cache/recap/git"
+
+LOG_SCOPE=()
+SCOPE=""
+if [[ "$ALL_BRANCHES" == "true" ]]; then
+  LOG_SCOPE+=(--branches --remotes)
+  SCOPE="all-branches"
+fi
+if [[ -n "$AUTHOR" ]]; then
+  LOG_SCOPE+=(--author="$AUTHOR")
+  AUTHOR_SLUG=$(printf '%s' "$AUTHOR" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//; s/-$//')
+  AUTHOR_DIGEST=$(printf '%s' "$AUTHOR" | git hash-object --stdin | cut -c1-8)
+  SCOPE="${SCOPE:+$SCOPE-}author-$AUTHOR_SLUG-$AUTHOR_DIGEST"
+fi
 
 # Generate list of days in range
 days_in_range() {
@@ -72,7 +90,7 @@ for pair in "${REPO_PAIRS[@]}"; do
 
   for day in $(days_in_range "$SINCE_DAY" "$UNTIL_DAY"); do
     NEXT_DAY=$(date -d "$day + 1 day" +%Y-%m-%d 2>/dev/null || date -j -v+1d -f "%Y-%m-%d" "$day" +%Y-%m-%d)
-    CACHE_DIR="$CACHE_BASE/$REPO_NAME/$day"
+    CACHE_DIR="$CACHE_BASE/$REPO_NAME${SCOPE:+/$SCOPE}/$day"
     CACHE_FILE="$CACHE_DIR/log.json"
 
     # Skip if reuse and cache exists with complete flag
@@ -89,7 +107,7 @@ for pair in "${REPO_PAIRS[@]}"; do
     COMMITS_FILE=$(mktemp)
     GIT_STDERR=$(mktemp)
     GIT_EXIT=0
-    git -C "$REPO_PATH" log \
+    git -C "$REPO_PATH" log ${LOG_SCOPE[@]+"${LOG_SCOPE[@]}"} \
       --format='%H%x1f%h%x1f%s%x1f%an%x1f%aI%x1f%b%x1e' \
       --since="${day}T00:00:00" --until="${NEXT_DAY}T00:00:00" \
       --no-merges > "$COMMITS_FILE" 2>"$GIT_STDERR" || GIT_EXIT=$?
@@ -139,7 +157,7 @@ for pair in "${REPO_PAIRS[@]}"; do
     echo "  $day: $COUNT commits" >&2
   done
 
-  echo "$CACHE_BASE/$REPO_NAME" >&2
+  echo "$CACHE_BASE/$REPO_NAME${SCOPE:+/$SCOPE}" >&2
 done
 
 # Print summary to stdout as JSON
