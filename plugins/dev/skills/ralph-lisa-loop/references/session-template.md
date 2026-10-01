@@ -18,8 +18,7 @@ open_disputes_count: 0
 reviewer_backend: null
 review_channel_status: null
 reasoning_effort: xhigh
-codex_plan_thread_id: null
-codex_impl_thread_id: null
+codex_dir: null
 codex_plan_session_id: null
 codex_impl_session_id: null
 max_rounds: 20
@@ -71,7 +70,7 @@ Next: [specific next action, e.g., "Dispatch planner subagent for round 1"]
 
 ### Gate Check
 Derived open findings: 0. Derived open disputes: 0. Cache match: yes.
-Review channel: mcp. Reasoning effort: xhigh. Policy compliant: yes.
+Review channel: exec. Reasoning effort: xhigh. Policy compliant: yes.
 
 ---
 
@@ -96,13 +95,12 @@ Contains resolved disputes and rejected-with-reason findings from plan phase.]
 | `current_round` | int | Current round number within this phase |
 | `open_findings_count` | int | **Cache** — must match record-derived count |
 | `open_disputes_count` | int | **Cache** — must match record-derived count |
-| `reviewer_backend` | enum/null | `mcp` or `exec` — set at startup, null before preflight |
-| `review_channel_status` | enum/null | `mcp_ready`, `mcp_degraded`, `exec_opt_in`, `blocked` |
+| `reviewer_backend` | enum/null | `exec` — set at startup, null before preflight |
+| `review_channel_status` | enum/null | `exec_ready`, `blocked` |
 | `reasoning_effort` | string | Reasoning effort for all Codex calls (default: `xhigh`) |
-| `codex_plan_thread_id` | string/null | MCP thread ID for plan-phase reviews |
-| `codex_impl_thread_id` | string/null | MCP thread ID for implement-phase reviews |
-| `codex_plan_session_id` | string/null | `codex exec` session ID for plan-phase reviews (fallback) |
-| `codex_impl_session_id` | string/null | `codex exec` session ID for implement-phase reviews (fallback) |
+| `codex_dir` | string/null | Absolute directory for Codex's prompt, reply, events and stderr files, outside the reviewed tree; set at initialization |
+| `codex_plan_session_id` | string/null | `codex exec` session ID for plan-phase reviews; null until a session starts, and never passed to `resume` while null |
+| `codex_impl_session_id` | string/null | `codex exec` session ID for implement-phase reviews; null until a session starts, and never passed to `resume` while null |
 | `max_rounds` | int | Safety limit per phase |
 | `total_rounds_all_phases` | int | **Immutable cumulative** — survives phase transition |
 | `total_disputes_opened_all_phases` | int | **Immutable cumulative** — survives phase transition |

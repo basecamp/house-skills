@@ -82,38 +82,13 @@ If the hook IS already installed, proceed without mentioning it.
 
 ### Step 2: Codex reviewer channel check
 
-Probe whether the Codex MCP tools are callable (search available tools for
-`mcp__codex__codex`, or attempt a lightweight call). Don't inspect how it's
-configured — it could be project `.mcp.json`, user-wide MCP settings, or
-another harness entirely.
+Codex reviews through `codex exec`, which runs non-interactively. Check that the
+CLI is on PATH and can authenticate: `command -v codex && { codex login status >/dev/null 2>&1 || [ -n "${CODEX_API_KEY:-}" ]; }` (a stored login, or `CODEX_API_KEY`, which `codex exec` reads and `login status` doesn't check).
 
-- If `mcp__codex__codex` is available → record `reviewer_backend: mcp` and `review_channel_status: mcp_ready` in session, proceed.
-- If unavailable → check `which codex` for CLI fallback.
-  - If codex CLI exists → offer to configure MCP:
-    > Codex MCP isn't available in this session. I can add it for you:
-    >
-    > 1. **User-level** — available in all projects
-    > 2. **Project-level** — scoped to this repo
-    > 3. **Skip** — use `codex exec` CLI fallback (slower, session-based persistence)
-    >
-    > Which do you prefer?
-
-    For options 1 or 2, run the appropriate command, then stop — do not enter
-    the round loop. Tell the user to restart Claude Code and re-invoke the skill.
-    Preflight will re-run and find MCP available.
-    ```bash
-    # User-level
-    claude mcp add --scope user --transport stdio codex -- codex mcp-server
-
-    # Project-level
-    claude mcp add --scope project --transport stdio codex -- codex mcp-server
-    ```
-
-    If the user chooses "skip" (option 3), record `reviewer_backend: exec` and
-    `review_channel_status: exec_opt_in`, proceed with the downgrade logged.
-  - If no codex CLI at all → hard stop:
-    > The ralph-lisa loop requires Codex as reviewer. Install: `npm i -g @openai/codex`
-    > Then either restart (I'll offer to configure MCP) or ensure the CLI is in your PATH.
+- If both succeed → record `reviewer_backend: exec` and `review_channel_status: exec_ready` in session, proceed.
+- If either fails → hard stop:
+  > The ralph-lisa loop requires the Codex CLI as reviewer. Install it with
+  > `npm i -g @openai/codex`, sign in with `codex login`, then re-invoke the skill.
 
 ### Step 3: Reasoning policy initialization
 

@@ -358,7 +358,7 @@ fi
 
 channel_status=$(yaml_field "$SESSION" "review_channel_status")
 case "$channel_status" in
-  mcp_ready|mcp_degraded|exec_opt_in)
+  exec_ready|exec_opt_in|mcp_ready|mcp_degraded)
     report 22 "Review channel status valid" "PASS" "status=$channel_status"
     ;;
   blocked)

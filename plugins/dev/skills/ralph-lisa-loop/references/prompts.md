@@ -203,11 +203,11 @@ L (nice to have).
 
 ## Reviewer Persona (Codex)
 
-Pass as `developer-instructions` on MCP calls (or prepend to `prompt` if
-`developer-instructions` is not supported). Keeping persona separate from review
-content gives it priority attention in the model.
+Put at the top of the first prompt of each Codex session (plan Round 1, implement
+Round 1), above the review content. `codex exec resume` keeps it in context, so later
+rounds don't repeat it.
 
-**developer-instructions value:**
+**Persona text:**
 ```
 You are a ruthless reviewer and expert guide, not a builder. Be proactive
 and generous in suggestions — go deep on every inquiry and take the next step.
@@ -221,16 +221,13 @@ re-raise with evidence. If you genuinely find nothing wrong, say "No findings."
 it into the protocol's finding structure (F-{seq} IDs, state, evidence, required action).
 Codex produces natural review output; the orchestrator imposes the schema.
 
-**Example MCP call:**
-```
-mcp__codex__codex(
-  developer-instructions="[reviewer persona text above]",
-  prompt="[review prompt: path references, open findings, open disputes]",
-  cwd="[project dir]",
-  config={"model_reasoning_effort": "xhigh", "model_reasoning_summary": "detailed", "model_supports_reasoning_summaries": true},
-  sandbox="read-only",
-  approval-policy="never"
-)
+**Example first call** (prompt file holds the persona text above, then the review
+prompt: path references, open findings, open disputes; `[codex dir]` is the session file's `codex_dir`, per guide.md):
+```bash
+rm -f "[codex dir]/response.txt"
+codex exec -c 'model_reasoning_effort="xhigh"' -c 'model_reasoning_summary="detailed"' -c 'model_supports_reasoning_summaries=true' \
+  --skip-git-repo-check -s read-only -C "[project dir]" --json -o "[codex dir]/response.txt" \
+  - < "[codex dir]/prompt.md" > "[codex dir]/events.jsonl" 2> "[codex dir]/stderr.log"
 ```
 
 ---
@@ -238,7 +235,7 @@ mcp__codex__codex(
 ## Plan Review (Codex, Plan Round 2+)
 
 Use for plan-phase reviews after Round 1 (which uses Independent Ideation above).
-Reviewer persona is passed via `developer-instructions`, not inlined here.
+The resumed plan session already holds the reviewer persona, so it isn't inlined here.
 
 ```
 Updated plan at {artifact_path}.
@@ -254,10 +251,12 @@ Open disputes (your position requested):
 
 ## Implementation Review (Codex, Implement Rounds)
 
-Use for implement-phase reviews. Reviewer persona is passed via `developer-instructions`.
+Use for implement-phase reviews. The first implementation round starts a new session,
+so put the reviewer persona above its prompt; later rounds resume that session.
 
-For `codex exec` fallback, `codex exec review --uncommitted "[focus areas]"` is a
-first-class option that automatically includes the diff.
+`codex exec review --uncommitted` is a first-class option that automatically includes
+the diff. It accepts no prompt alongside `--uncommitted`, so the persona and open
+findings can't ride along.
 
 **First implementation round:**
 ```
@@ -340,18 +339,18 @@ Each round's External Review section should begin with a human-readable header l
 This is for session readability — eval parses the Gate Check audit line, not this.
 
 ```
-Channel: mcp | Effort: xhigh | Policy: plan-phase default
+Channel: exec | Effort: xhigh | Policy: plan-phase default
 ```
 
 Variations:
 ```
 Channel: exec | Effort: xhigh
-Channel: self-review-only | Effort: n/a | Policy: fallback (MCP+exec both failed)
+Channel: self-review-only | Effort: n/a | Policy: fallback (codex exec failed)
 ```
 
 The Gate Check section uses a separate eval-parseable format:
 ```
-Review channel: mcp. Reasoning effort: xhigh. Policy compliant: yes.
+Review channel: exec. Reasoning effort: xhigh. Policy compliant: yes.
 ```
 
 Keep these distinct — `Channel:` for External Review headers, `Review channel:` for Gate Check audit lines.
