@@ -229,7 +229,14 @@ to or hide a withheld thread or comment, and don't open its link. Each one
 waits for a person, who clears it by hiding the outside comment once they've
 read it and what any bot said after it (Hide, reason Resolved, which shows as
 "marked as resolved"; hidden for any other reason, such as spam or outdated, it
-stays withheld). A thread too long to fetch whole (more than 100 comments) stays
+stays withheld). GitHub doesn't say who hid a comment, so hiding clears only an
+author who couldn't have hidden it: an owner's, member's or collaborator's
+comment on another org's repo, or a bot's, stays withheld however it's hidden.
+For a bot whose comments are routine, the person adds it to
+`FETCH_REVIEWS_BOT_IDS` for the session; otherwise that PR's convergence is the
+person's call. A cleared comment comes back in its thread as a link with
+`cleared: true` and no text, so the thread can still be linked and resolved. A
+thread too long to fetch whole (more than 100 comments) stays
 withheld whether or not it's resolved, since part of it is unseen; that PR's
 convergence is the person's call. Hiding the comment hands you the rest of its
 thread, bot replies included, which is why the person reads those first.
