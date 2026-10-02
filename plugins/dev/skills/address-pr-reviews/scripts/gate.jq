@@ -18,10 +18,12 @@ def inside: member or bot;
 # A person clears an outside item by hiding it as Resolved once they've read
 # it. Hidden for any other reason (spam, off-topic, outdated, duplicate, abuse),
 # it's still unread as far as anyone knows, so it stays withheld.
-# An outside collaborator can hide comments, their own included, and GitHub
-# doesn't say who hid one, so a collaborator's comment can't be cleared this way.
+# GitHub doesn't say who hid a comment, so a hide counts only when its author
+# couldn't have hidden it: a person whose role can't hide comments. Owners,
+# members and collaborators can (on another org's repo they're still outside),
+# and so can an app with write access, so their own hides don't clear.
 def cleared: .isMinimized and ((.minimizedReason // "") | ascii_downcase) == "resolved"
-  and .authorAssociation != "COLLABORATOR";
+  and person and (.authorAssociation | IN("NONE", "CONTRIBUTOR", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR", "MANNEQUIN"));
 def pending: (inside or cleared) | not;
 def nodes($pages; f): [$pages[0][].data.repository.pullRequest | f | .nodes[]];
 def link($kind): {kind: $kind, url, by: (if person then "person" else "bot" end), association: .authorAssociation};

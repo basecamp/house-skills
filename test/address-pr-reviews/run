@@ -68,7 +68,7 @@ got=$(run .)
 check "a member's PR is read" "$(status "$got")" 0
 check "no outside text reaches the output" "$(grep -c MARKER-OUTSIDE <<<"$got" || true)" 0
 check "inside items kept" "$(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id]')" \
-  '["r1","r3","r7","c4","c6","c7","c10","c14","c16","t2","t4","t11"]'
+  '["r1","r3","r7","c4","c6","c7","c10","c18","c14","c16","t2","t4","t11"]'
 check "an outside comment a person hid as Resolved is dropped from its thread" \
   "$(out "$got" | jq -c '[.threads[] | select(.id == "t4") | .comments[].id]')" '["t4a"]'
 check "a member's text comes through as written, quotes included" \
@@ -89,7 +89,7 @@ check "convergence's fields come through: head, mergeable, review commits, threa
   '["abc","MERGEABLE","abc","abc","abc",1]'
 check "outside items listed by link, resolved threads included" \
   "$(out "$got" | jq -c '[.withheld[] | "\(.kind):\(.url | ltrimstr("https://x/"))"]')" \
-  '["thread:t1b","thread:t3a","thread:t7a","thread:t8b","thread:t10a","thread:t12a","thread:t13a","thread-comment:t5b","thread-comment:t9b","review:r2","review:r5","review:r6","review:r8","comment:c1","comment:c2","comment:c3","comment:c8","comment:c13","comment:c17","comment:c15"]'
+  '["thread:t1b","thread:t3a","thread:t7a","thread:t8b","thread:t10a","thread:t12a","thread:t13a","thread-comment:t5b","thread-comment:t9b","review:r2","review:r5","review:r6","review:r8","comment:c1","comment:c2","comment:c3","comment:c8","comment:c13","comment:c17","comment:c19","comment:c15"]'
 check "later pages are read: inside items kept, outside items withheld" \
   "$(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id | select(IN("r7", "c14", "t11"))],
     [.withheld[].url | ltrimstr("https://x/") | select(IN("r8", "c15", "t12a"))]')" \
@@ -164,5 +164,13 @@ check "an outside collaborator's comment hidden as Resolved stays withheld (they
 check "reviewers asked for but not yet reported come through, so a pending Copilot pass is seen" \
   "$(out "$(run .)" | jq -c '[.requested, .requested_complete]')" '[["copilot-pull-request-reviewer"],true]'
 refuses "a PR whose labels run past one page refuses" "$pr.labels.pageInfo.hasNextPage = true"
+
+# Outside the company's orgs, an org member hiding their own comment as Resolved
+# doesn't clear it; nor does an off-list bot.
+got=$(run "$elsewhere | $pr.author.login = \"me\"")
+check "outside the company's orgs, a member's own Resolved hide doesn't clear it" \
+  "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c18") | .kind]')" '["comment"]'
+check "an off-list bot's own Resolved hide doesn't clear it" \
+  "$(out "$(run .)" | jq -c '[.withheld[] | select(.url == "https://x/c19") | .kind]')" '["comment"]'
 
 exit $fail

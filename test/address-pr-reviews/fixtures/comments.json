@@ -142,6 +142,33 @@
                   "__typename": "User",
                   "login": "collab"
                 }
+              },
+              {
+                "id": "c18",
+                "url": "https://x/c18",
+                "createdAt": "2026-01-02",
+                "isMinimized": true,
+                "minimizedReason": "RESOLVED",
+                "body": "member comment hidden by its author",
+                "authorAssociation": "MEMBER",
+                "author": {
+                  "__typename": "User",
+                  "login": "member"
+                }
+              },
+              {
+                "id": "c19",
+                "url": "https://x/c19",
+                "createdAt": "2026-01-02",
+                "isMinimized": true,
+                "minimizedReason": "RESOLVED",
+                "body": "MARKER-OUTSIDE off-list bot hid this itself",
+                "authorAssociation": "NONE",
+                "author": {
+                  "__typename": "Bot",
+                  "login": "somebot",
+                  "databaseId": 424242
+                }
               }
             ]
           }
