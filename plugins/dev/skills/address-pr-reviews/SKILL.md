@@ -74,7 +74,8 @@ state, and:
 
 - `reviews`: review bodies, with `state` and the `commit` each reviewed.
 - `comments`: the PR's own comments. Codex sometimes puts its findings here
-  rather than in a review.
+  rather than in a review, and its summary comment here says which commit it
+  last finished on.
 - `threads`: unresolved review threads, with each comment's `databaseId`,
   `path` and `line`.
 - `withheld`: what you may not read, as `{kind, url, by, association}` with no
@@ -89,9 +90,9 @@ script doesn't know comes back withheld; the person can add it by database id in
 `FETCH_REVIEWS_BOT_IDS` for the session. Don't set that variable yourself.
 
 Re-running the script is the convergence probe in §4: `head` against each
-review's `commit` tells you which reviewers have reported on the current head,
-and an item's `url` (or a thread comment's `databaseId`) is what the summary
-comment links to.
+review's `commit`, and against Codex's summary comment, tells you which
+reviewers have reported on the current head, and an item's `url` (or a thread
+comment's `databaseId`) is what the summary comment links to.
 
 ## Triage: scope first, then merit
 
@@ -240,11 +241,8 @@ yourself.
 ## 4. Converge
 
 A PR is converged when CI is green on its head, every reviewer that reviews
-this repo automatically (Codex re-reviews each push; Copilot does so only where
-the repo enables it) has reported on that exact head (its latest review's
-`commit` equals `head`) — where one last reported on an older head, re-request
-it (`gh pr edit PR_NUMBER --add-reviewer @copilot` for Copilot), and if it
-doesn't come, say so in the summary comment — the PR is mergeable against its
+this repo automatically (Codex, and Copilot where the repo enables it) has
+reported on that exact head (see below), the PR is mergeable against its
 base (`mergeable` is `MERGEABLE`; `UNKNOWN` means GitHub is still computing it,
 so wait and re-query rather than count it; on `CONFLICTING`, rebase and say what
 conflicted in a PR comment), the review-thread list is empty except for threads
@@ -256,6 +254,16 @@ unresolved threads, not who spoke last. Probe convergence by re-running
 `fetch-reviews` on the head, never by comment recency: its `threads` plus the
 `thread` entries in `withheld` are every **unresolved** thread, and the
 unanswered review-body findings and every `withheld` entry count too.
+
+A reviewer has reported on the head when its latest review's `commit` is
+`head`, or, for Codex, when the latest row of its summary comment reads
+Completed on a short sha that `head` starts with. Codex posts no review when it
+finds nothing: it updates that comment (the entry in `comments` from
+`chatgpt-codex-connector` headed "Codex Review Summary") and reacts 👍, so a
+clean final pass shows only there. Where a reviewer last reported on an older
+head, re-request it: `gh pr edit PR_NUMBER --add-reviewer @copilot` for Copilot,
+a PR comment reading `@codex review` for Codex. If it doesn't come, say so in
+the summary comment.
 
 When a pass resolved or left open any thread, or answered any review-body
 finding, or anything is withheld, post ONE PR comment covering them all:

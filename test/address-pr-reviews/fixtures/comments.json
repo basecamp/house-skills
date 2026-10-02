@@ -85,7 +85,7 @@
                 "url": "https://x/c7",
                 "createdAt": "2026-01-01",
                 "isMinimized": false,
-                "body": "codex summary",
+                "body": "<!-- codex-pull-request-review-summary -->\n\n## Codex Review Summary\n\n| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime=\"2026-01-01T00:00:00Z\">2026-01-01T00:00:00Z</relative-time> | `abc` | New commits |",
                 "authorAssociation": "NONE",
                 "author": {
                   "__typename": "Bot",

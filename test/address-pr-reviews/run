@@ -71,6 +71,9 @@ check "a member's text comes through as written, quotes included" \
 check "Unicode tag characters are stripped; emoji with joiners and U+FE0F, and a U+E0100 variant, come through intact" \
   "$(out "$got" | jq -a -c '.comments[] | select(.id == "c16") | .body')" \
   '"pasted error: \ud83c\udff3\ufe0f\u200d\ud83c\udf08 \ud83d\udc69\u200d\ud83d\udcbb \u2764\ufe0f \u845b\udb40\udd00"'
+check "Codex's summary comment comes through whole, so its Completed row on the head can be read" \
+  "$(out "$got" | jq -c '.comments[] | select(.id == "c7") | .body')" \
+  "$(jq -c '.[0].data.repository.pullRequest.comments.nodes[] | select(.id == "c7") | .body' "$here/fixtures/comments.json")"
 check "every kept item has a url" \
   "$(out "$got" | jq '[.reviews[], .comments[], .threads[].comments[]] | all(.url != null)')" true
 check "convergence's fields come through: head, mergeable, review commits, thread comment ids" \
