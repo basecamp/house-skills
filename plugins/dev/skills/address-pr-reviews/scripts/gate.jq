@@ -39,26 +39,26 @@ repo as $repo
   else
     nodes($reviews; .reviews) as $reviews
     | nodes($comments; .comments) as $comments
-    | nodes($threads; .reviewThreads) as $threads
     # A thread comes through only when all of it was fetched and every outside
     # comment in it has been cleared. A cleared outside comment is dropped.
-    | [$threads[] | select(.isResolved | not)
-        | . + {readable: ((.comments.pageInfo.hasNextPage | not)
-            and (any(.comments.nodes[]; pending) | not))}] as $open
+    | [nodes($threads; .reviewThreads)[] | . + {whole: (.comments.pageInfo.hasNextPage | not)}
+        | . + {readable: (.whole and (any(.comments.nodes[]; pending) | not))}] as $threads
     | {
         url: $pr.url,
         head: $pr.headRefOid,
         mergeable: $pr.mergeable,
         reviews: [$reviews[] | select(inside and .body != "") | keep + {state, commit: .commit.oid}],
         comments: [$comments[] | select(inside) | keep],
-        threads: [$open[] | select(.readable) | {id, isOutdated,
+        threads: [$threads[] | select((.isResolved | not) and .readable) | {id, isOutdated,
           comments: [.comments.nodes[] | select(inside) | keep + {databaseId, path, line}]}],
         # Each outside item stays listed until a person clears it, resolved threads
         # included, so nothing outside merges unread.
         withheld: (
-          [$open[] | select(.readable | not)
+          # A thread not fetched whole is withheld whole, resolved or not, since
+          # the comments past the first page are unseen.
+          [$threads[] | select(if .isResolved then .whole | not else .readable | not end)
             | ([.comments.nodes[] | select(pending)] + .comments.nodes)[0] | link("thread")]
-          + [$threads[] | select(.isResolved) | .comments.nodes[]
+          + [$threads[] | select(.isResolved and .whole) | .comments.nodes[]
               | select(pending) | link("thread-comment")]
           + [$reviews[] | select(.body != "" and pending) | link("review")]
           # Bots off the list aren't reviewers; their PR comments are skipped.

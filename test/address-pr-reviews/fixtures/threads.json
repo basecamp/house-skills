@@ -350,6 +350,33 @@
                     }
                   ]
                 }
+              },
+              {
+                "id": "t10",
+                "isResolved": true,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": true
+                  },
+                  "nodes": [
+                    {
+                      "id": "t10a",
+                      "url": "https://x/t10a",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": false,
+                      "body": "resolved member thread, too long to fetch whole",
+                      "authorAssociation": "MEMBER",
+                      "author": {
+                        "__typename": "User",
+                        "login": "member"
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1
+                    }
+                  ]
+                }
               }
             ]
           }
