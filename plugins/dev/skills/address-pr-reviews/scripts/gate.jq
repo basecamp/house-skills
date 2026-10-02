@@ -25,7 +25,7 @@ def link($kind): {kind: $kind, url, by: (if person then "person" else "bot" end)
 # Unicode tag characters (U+E0000-U+E007F) render as nothing on GitHub, so a
 # member who pastes them from an outsider's text can't see what they pass on.
 # Only that block goes: emoji joiners and variation selectors stay intact.
-def keep: {id, url, login: .author.login, body: (.body | gsub("[\\x{E0000}-\\x{E007F}]"; ""))};
+def keep: {id, url, login: .author.login, body: (.body | gsub("[\\x{E0000}-\\x{E007F}]+"; ""))};
 
 repo as $repo
 | $repo.pullRequest as $pr

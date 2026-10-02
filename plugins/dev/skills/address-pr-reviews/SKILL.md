@@ -241,8 +241,9 @@ yourself.
 ## 4. Converge
 
 A PR is converged when CI is green on its head, every reviewer that reviews
-this repo automatically (Codex, and Copilot where the repo enables it) has
-reported on that exact head (see below), the PR is mergeable against its
+this PR automatically (Codex where it has reported on this PR, by a review or
+its summary comment; Copilot where the repo enables it) has reported on that
+exact head (see below); a PR Codex has never reported on has no Codex to wait for, the PR is mergeable against its
 base (`mergeable` is `MERGEABLE`; `UNKNOWN` means GitHub is still computing it,
 so wait and re-query rather than count it; on `CONFLICTING`, rebase and say what
 conflicted in a PR comment), the review-thread list is empty except for threads
@@ -261,9 +262,10 @@ Completed on a short sha that `head` starts with. Codex posts no review when it
 finds nothing: it updates that comment (the entry in `comments` from
 `chatgpt-codex-connector` headed "Codex Review Summary") and reacts 👍, so a
 clean final pass shows only there. Where a reviewer last reported on an older
-head, re-request it: `gh pr edit PR_NUMBER --add-reviewer @copilot` for Copilot,
-a PR comment reading `@codex review` for Codex. If it doesn't come, list it in
-the summary comment.
+head, re-request it once per head: `gh pr edit PR_NUMBER --add-reviewer @copilot`
+for Copilot, a PR comment reading `@codex review` for Codex (not again if the
+last summary already lists it as not reported on this head). If it doesn't
+come, list it in the summary comment.
 
 Each pass posts at most ONE summary comment, a PR comment in the form below,
 and only when it has something new to say: the pass replied in a thread or to a review-body
@@ -272,7 +274,8 @@ different from the last summary comment on the PR (the latest entry in
 `comments` that starts with the marker line). Otherwise post nothing, so an
 item that waits on a person, such as a CI bot's status comment in `withheld`,
 isn't posted again on every pass; and post nothing when every line under the
-marker would be empty. Post a new comment rather than editing the last one, since an edit
+marker would be empty, unless the last summary listed something: then post the
+marker and one line, "Nothing open on <head short sha>." Post a new comment rather than editing the last one, since an edit
 notifies no one.
 
 ```
