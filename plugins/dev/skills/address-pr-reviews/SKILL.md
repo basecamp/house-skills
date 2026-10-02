@@ -2,7 +2,7 @@
 name: address-pr-reviews
 description: |
   Address PR review comments - fix issues, reply to threads, mark resolved
-version: 1.2.0
+version: 1.3.0
 triggers:
   # Direct invocations
   - address pr reviews
@@ -148,9 +148,9 @@ gh pr comment PR_NUMBER --body "Fixed — [brief explanation of what was done]"
 gh pr comment PR_NUMBER --body "Flagged for human review — [why this is out of scope]"
 
 # In scope and true, but deliberately declined (do not fix)
-# A top-level review body has no thread, so there is nothing to leave unresolved —
-# say plainly that it's a judgment call for a human.
-gh pr comment PR_NUMBER --body "Not doing this — [what's true about it], but [the failure mode it doesn't fit / the layer it can't see / the cost it adds]. Flagging it for a human decision rather than acting on it."
+# A top-level review body has no thread to resolve; this reply is what answers it,
+# and the summary comment (see Converge) lists it with the other declines.
+gh pr comment PR_NUMBER --body "Not doing this — [what's true about it], but [the failure mode it doesn't fit / the layer it can't see / the cost it adds]."
 ```
 
 ## 3. Process Unresolved Threads
@@ -158,9 +158,12 @@ gh pr comment PR_NUMBER --body "Not doing this — [what's true about it], but [
 For each unresolved review thread:
 
 ### Triage the request
-Same rules as §2 — run both scope and merit. Out of scope, or in scope but
-declined on merit: reply with the reasoning and leave the thread **unresolved**
-for human review. Do not edit code, do not resolve.
+Same rules as §2 — run both scope and merit. In scope but declined on merit:
+reply with the reasoning, do not edit code, and then resolve per **Resolve the
+thread** below — the decline is the author's verdict, and the PR-level summary
+comment (see **Converge**) is where the human sees it. Out of scope: reply
+"Flagged for human review — [why]", do not edit code, and leave the thread open
+— a scope call is a human's, and the summary comment names it.
 
 ### Fix the issue
 For in-scope requests that pass merit, address the substance of the comment in
@@ -184,9 +187,15 @@ what's true about it, and why it still isn't worth doing. Name the actor or the
 layer; "out of scope" is not a reason when the thing is in scope.
 
 ### Resolve the thread
-Only resolve after an in-scope fix. Do not resolve out-of-scope threads, and do
-not resolve a thread you declined — an unresolved thread is how the human sees
-there's a judgment call waiting for them.
+Resolve a thread once you have addressed it: after an in-scope fix has landed
+on the head and CI is green on it, or after a decline whose reasoning is written
+in the thread. Leave a thread open only when it poses a decision that is not the
+author's to make — a product or scope call, a security trade-off, or a human
+reviewer's own question or disagreement (never resolve over a human's last word;
+answer it and leave it to them). Every thread left open gets named in the
+summary comment below, so an open thread always means "someone has to decide".
+Bot reviewers never resolve their own threads, even outdated ones: an addressed
+thread that nobody resolves stays in the merger's list forever.
 ```bash
 gh api graphql -f query='
 mutation {
@@ -196,11 +205,41 @@ mutation {
 }'
 ```
 
+## 4. Converge
+
+A PR is converged when CI is green on its head, every reviewer that reviews
+this repo automatically (Codex re-reviews each push; Copilot does so only where
+the repo enables it) has reported on that exact head — where one last reported
+on an older head, re-request it (`gh pr edit PR_NUMBER --add-reviewer @copilot`
+for Copilot), and if it doesn't come, say so in the summary comment — the PR is
+mergeable against its base (`mergeable` is not CONFLICTING — rebase when it is,
+and say what conflicted in a PR comment), and the review-thread list is empty
+except for threads that pose a decision for a human. A finding left only in a
+review body counts as an open thread: a bot's until the summary comment answers
+it, a person's until they accept the answer or whoever decides rules on it.
+Having the last word in a thread is not convergence — the merger sees
+unresolved threads, not who spoke last. Probe convergence with one paginated
+GraphQL call counting **unresolved** threads (`isResolved: false`) and
+unanswered review-body findings, never by comment recency.
+
+When you resolved or left open anything in a pass, post ONE PR comment:
+
+```
+Review threads: N resolved (M fixed, K declined with the reasoning in each thread).
+Declined: <one bullet per decline — link to the thread + one clause>
+Open for a decision: <one bullet per open thread — link + what is asked of whom>
+```
+
+Omit the last line when nothing is open. Thread links take the form
+`https://github.com/OWNER/REPO/pull/N#discussion_r<comment databaseId>`.
+
 ## Key Points
 
 - Fetch both `reviews` and `reviewThreads` — feedback may be in either place
 - For top-level review bodies (no thread), reply with `gh pr comment`
-- For inline threads, reply to the thread directly; resolve only after an in-scope fix
+- For inline threads, reply to the thread directly; resolve once addressed (fix landed
+  and green, or decline with reasoning); leave open only a genuine human decision, and
+  name every open thread in the summary comment
 - **Three outcomes, not two:** fixed / out of scope / true but declined. A finding
   being correct does not make it a requirement — that call is yours to make and
   to write down
