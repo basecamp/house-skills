@@ -33,12 +33,15 @@ pr='repository(owner: $owner, name: $name) { pullRequest(number: $number)'
 who='authorAssociation author { __typename login ... on Bot { databaseId } }'
 item="id url createdAt isMinimized minimizedReason body $who"
 
-gh api graphql "${args[@]}" -f query="query($vars) {
+head() {
+  gh api graphql "${args[@]}" -f query="query($vars) {
   viewer { login }
   repository(owner: \$owner, name: \$name) {
     owner { __typename login ... on Organization { viewerIsAMember } }
     pullRequest(number: \$number) { url headRefOid mergeable headRepositoryOwner { login }
-      labels(first: 100) { nodes { name } } $who } } }" > "$tmp/head.json"
+      labels(first: 100) { nodes { name } } $who } } }" > "$tmp/$1"
+}
+head head0.json
 
 page() {
   gh api graphql --paginate --slurp "${args[@]}" -f query="query($vars, \$endCursor: String) {
@@ -49,6 +52,13 @@ page reviews "$item state commit { oid }"
 page comments "$item"
 page reviewThreads "id isResolved isOutdated
   comments(first: 100) { pageInfo { hasNextPage } nodes { $item databaseId path line } }"
+
+# Read the head again after the paged reads: if it moved, the feedback may not
+# match the head being judged, so refuse and let the caller run again.
+head head.json
+[ "$(jq -r '.data.repository.pullRequest.headRefOid' "$tmp/head0.json")" = \
+  "$(jq -r '.data.repository.pullRequest.headRefOid' "$tmp/head.json")" ] || {
+  echo '{"refused": "the head moved while reading; run again"}'; exit 3; }
 
 jq -n -f "$here/gate.jq" --argjson extra "$extra" \
   --slurpfile head "$tmp/head.json" \

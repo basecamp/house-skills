@@ -51,7 +51,7 @@ repo as $repo
         url: $pr.url,
         head: $pr.headRefOid,
         mergeable: $pr.mergeable,
-        reviews: [$reviews[] | select(inside and .body != "") | keep + {state, commit: .commit.oid}],
+        reviews: [$reviews[] | select(inside) | keep + {state, commit: .commit.oid}],
         comments: [$comments[] | select(inside) | keep],
         threads: [$threads[] | select((.isResolved | not) and .readable) | {id, isOutdated,
           comments: [.comments.nodes[] | select(inside) | keep + {databaseId, path, line}]}],

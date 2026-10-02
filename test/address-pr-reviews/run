@@ -31,12 +31,16 @@ case "$query" in
   *"reviewThreads("*) file=$FX/threads.json ;;
   *"reviews("*) file=$FX/reviews.json ;;
   *"comments(first"*) file=$FX/comments.json ;;
-  *) file=$FX_HEAD ;;
+  *) file=$FX_HEAD
+     # FX_HEAD_LATER stands in for a push between the first and second head read.
+     if [ -n "${FX_HEAD_LATER:-}" ]; then
+       if [ -e "$FX_STATE" ]; then file=$FX_HEAD_LATER; else : > "$FX_STATE"; fi
+     fi ;;
 esac
 for key in $(jq -r '[.. | objects | keys[]] | unique[] | select(. != "data")' "$file"); do
   grep -qw -- "$key" <<<"$query" || { echo "stub gh: the query doesn't ask for $key" >&2; exit 1; }
 done
-if [ "$file" = "$FX_HEAD" ]; then cat "$file"
+if [ "$file" = "$FX_HEAD" ] || [ "$file" = "${FX_HEAD_LATER:-}" ]; then cat "$file"
 elif [ -z "$paginate" ]; then jq '.[0]' "$file"
 elif [[ $query != *'after: $endCursor'* ]]; then echo "stub gh: --paginate without \$endCursor" >&2; exit 1
 elif [ -n "$slurp" ]; then cat "$file"
@@ -50,8 +54,9 @@ check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: got $2, w
 # run HEAD_FILTER: prints the output, then the exit status on the last line.
 run() {
   jq "$1" "$here/fixtures/head.json" > "$tmp/head.json"
+  rm -f "$tmp/head-read"
   local status=0
-  PATH="$tmp/bin:$PATH" FX="$here/fixtures" FX_HEAD="$tmp/head.json" \
+  PATH="$tmp/bin:$PATH" FX="${FXDIR:-$here/fixtures}" FX_HEAD="$tmp/head.json" FX_STATE="$tmp/head-read" \
     "$fetch" o/r 1 > "$tmp/out.json" 2>/dev/null || status=$?
   cat "$tmp/out.json"; echo "$status"
 }
@@ -134,4 +139,19 @@ got=$(FETCH_REVIEWS_BOT_IDS="99" run .)
 check "FETCH_REVIEWS_BOT_IDS adds a review bot" \
   "$(out "$got" | jq -c '[(.reviews[], .threads[]) | select(.id == "r5" or .id == "t7") | .id], [.withheld[].url | select(test("r5|t7"))]')" \
   "$(printf '%s\n%s' '["r5","t7"]' '[]')"
+# A push between the first head read and the last: the feedback may not match
+# the head being judged, so it refuses.
+jq "$pr.headRefOid = \"def\"" "$here/fixtures/head.json" > "$tmp/head-later.json"
+got=$(FX_HEAD_LATER="$tmp/head-later.json" run .)
+check "a head that moves while reading refuses" "$(status "$got") $(out "$got" | jq -c .)" \
+  '3 {"refused":"the head moved while reading; run again"}'
+
+# A trusted review with no body still says which head its reviewer read.
+mkdir "$tmp/fx-empty"; cp "$here"/fixtures/*.json "$tmp/fx-empty/"
+jq '(.[0].data.repository.pullRequest.reviews.nodes[] | select(.id == "r1") | .body) = ""' \
+  "$here/fixtures/reviews.json" > "$tmp/fx-empty/reviews.json"
+got=$(FXDIR="$tmp/fx-empty" run .)
+check "a trusted review with an empty body is kept, with its commit" \
+  "$(out "$got" | jq -c '[.reviews[] | select(.id == "r1") | [.body, .commit]]')" '[["","abc"]]'
+
 exit $fail
