@@ -39,6 +39,7 @@ head() {
   repository(owner: \$owner, name: \$name) {
     owner { __typename login ... on Organization { viewerIsAMember } }
     pullRequest(number: \$number) { url headRefOid mergeable headRepositoryOwner { login }
+      reviews { totalCount } comments { totalCount } reviewThreads { totalCount }
       labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
       reviewRequests(first: 100) { pageInfo { hasNextPage } nodes { requestedReviewer {
         __typename ... on Bot { login databaseId } ... on User { login } ... on Team { slug } } } }
@@ -56,12 +57,14 @@ page comments "$item"
 page reviewThreads "id isResolved isOutdated
   comments(first: 100) { pageInfo { hasNextPage } nodes { $item databaseId path line } }"
 
-# Read the head again after the paged reads: if it moved, the feedback may not
-# match the head being judged, so refuse and let the caller run again.
+# Read the head again after the paged reads: if the head moved, or a review,
+# comment or thread was added meanwhile, the feedback may not match what's
+# judged, so refuse and let the caller run again. A reply added to an existing
+# thread in that window isn't counted here; the next pass sees it.
 head head.json
-[ "$(jq -r '.data.repository.pullRequest.headRefOid' "$tmp/head0.json")" = \
-  "$(jq -r '.data.repository.pullRequest.headRefOid' "$tmp/head.json")" ] || {
-  echo '{"refused": "the head moved while reading; run again"}'; exit 3; }
+same() { jq -r '.data.repository.pullRequest | [.headRefOid, .reviews.totalCount, .comments.totalCount, .reviewThreads.totalCount] | @tsv' "$1"; }
+[ "$(same "$tmp/head0.json")" = "$(same "$tmp/head.json")" ] || {
+  echo '{"refused": "the PR changed while reading; run again"}'; exit 3; }
 
 jq -n -f "$here/gate.jq" --argjson extra "$extra" \
   --slurpfile head "$tmp/head.json" \

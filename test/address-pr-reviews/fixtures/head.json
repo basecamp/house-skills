@@ -44,6 +44,15 @@
               }
             }
           ]
+        },
+        "reviews": {
+          "totalCount": 7
+        },
+        "comments": {
+          "totalCount": 17
+        },
+        "reviewThreads": {
+          "totalCount": 13
         }
       }
     }

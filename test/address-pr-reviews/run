@@ -144,7 +144,11 @@ check "FETCH_REVIEWS_BOT_IDS adds a review bot" \
 jq "$pr.headRefOid = \"def\"" "$here/fixtures/head.json" > "$tmp/head-later.json"
 got=$(FX_HEAD_LATER="$tmp/head-later.json" run .)
 check "a head that moves while reading refuses" "$(status "$got") $(out "$got" | jq -c .)" \
-  '3 {"refused":"the head moved while reading; run again"}'
+  '3 {"refused":"the PR changed while reading; run again"}'
+jq "$pr.reviews.totalCount += 1" "$here/fixtures/head.json" > "$tmp/head-updated.json"
+got=$(FX_HEAD_LATER="$tmp/head-updated.json" run .)
+check "a review added while reading (same head) refuses" "$(status "$got") $(out "$got" | jq -c .)" \
+  '3 {"refused":"the PR changed while reading; run again"}'
 
 # A trusted review with no body still says which head its reviewer read.
 mkdir "$tmp/fx-empty"; cp "$here"/fixtures/*.json "$tmp/fx-empty/"
