@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# Runs address-pr-reviews' fetch-reviews against a stand-in gh that answers
+# from fixtures. Every outside body carries MARKER-OUTSIDE; none may reach the
+# output. Variants of head.json are made here, each named by what it changes.
+set -euo pipefail
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+fetch=$here/../../plugins/dev/skills/address-pr-reviews/scripts/fetch-reviews
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+mkdir "$tmp/bin"
+cat > "$tmp/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+# Answers only GraphQL; anything else is a fetch the skill shouldn't make. A
+# fixture is the pages gh would fetch, in order. Like gh, the stub returns every
+# page with --paginate, as one array with --slurp too, and only the first page
+# without --paginate. Each field a fixture holds must be named somewhere in the
+# query: the check is by name over the whole query, so a field asked for in one
+# selection passes for another. A fixture with a field left out stands in for
+# what gh returns when one selection drops it.
+[ "${1:-} ${2:-}" = "api graphql" ] || { echo "stub gh: not a GraphQL call: $*" >&2; exit 1; }
+[ -z "${FX_FAIL:-}" ] || { echo "stub gh: simulated failure" >&2; exit 1; }
+paginate='' slurp='' query=''
+for arg in "$@"; do
+  case "$arg" in
+    --paginate) paginate=1 ;;
+    --slurp) slurp=1 ;;
+    query=*) query=${arg#query=} ;;
+  esac
+done
+case "$query" in
+  *"reviewThreads("*) file=$FX/threads.json ;;
+  *"reviews("*) file=$FX/reviews.json ;;
+  *"comments(first"*) file=$FX/comments.json ;;
+  *) file=$FX_HEAD
+     # FX_HEAD_LATER stands in for a push between the first and second head read.
+     if [ -n "${FX_HEAD_LATER:-}" ]; then
+       if [ -e "$FX_STATE" ]; then file=$FX_HEAD_LATER; else : > "$FX_STATE"; fi
+     fi ;;
+esac
+for key in $(jq -r '[.. | objects | keys[]] | unique[] | select(. != "data")' "$file"); do
+  grep -qw -- "$key" <<<"$query" || { echo "stub gh: the query doesn't ask for $key" >&2; exit 1; }
+done
+if [ "$file" = "$FX_HEAD" ] || [ "$file" = "${FX_HEAD_LATER:-}" ]; then cat "$file"
+elif [ -z "$paginate" ]; then jq '.[0]' "$file"
+elif [[ $query != *'after: $endCursor'* ]]; then echo "stub gh: --paginate without \$endCursor" >&2; exit 1
+elif [ -n "$slurp" ]; then cat "$file"
+else jq -c '.[]' "$file"
+fi
+EOF
+chmod +x "$tmp/bin/gh"
+
+fail=0
+check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: got $2, want $3"; fail=1; fi; }
+# run HEAD_FILTER: prints the output, then the exit status on the last line.
+run() {
+  jq "$1" "$here/fixtures/head.json" > "$tmp/head.json"
+  rm -f "$tmp/head-read"
+  local status=0
+  PATH="$tmp/bin:$PATH" FX="${FXDIR:-$here/fixtures}" FX_HEAD="$tmp/head.json" FX_STATE="$tmp/head-read" \
+    "$fetch" o/r 1 > "$tmp/out.json" 2>/dev/null || status=$?
+  cat "$tmp/out.json"; echo "$status"
+}
+out() { sed '$d' <<<"$1"; }
+status() { tail -n 1 <<<"$1"; }
+pr=.data.repository.pullRequest
+
+got=$(run .)
+check "a member's PR is read" "$(status "$got")" 0
+check "no outside text reaches the output" "$(grep -c MARKER-OUTSIDE <<<"$got" || true)" 0
+check "inside items kept" "$(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id]')" \
+  '["r1","r3","r7","c4","c6","c7","c10","c18","c14","c16","t2","t4","t11"]'
+check "an outside comment a person hid as Resolved comes through as a link, marked cleared, without its text" \
+  "$(out "$got" | jq -c '[.threads[] | select(.id == "t4") | .comments[] | [.id, (.cleared // false), has("body")]]')" '[["t4a",false,true],["t4b",true,false]]'
+check "a member's text comes through as written, quotes included" \
+  "$(out "$got" | jq -c '.comments[] | select(.id == "c6") | .body')" '"> a member quoting the PR\n\nthanks, will fix"'
+check "Unicode tag characters are stripped; emoji with joiners and U+FE0F, and a U+E0100 variant, come through intact" \
+  "$(out "$got" | jq -a -c '.comments[] | select(.id == "c16") | .body')" \
+  '"pasted error: \ud83c\udff3\ufe0f\u200d\ud83c\udf08 \ud83d\udc69\u200d\ud83d\udcbb \u2764\ufe0f \u845b\udb40\udd00"'
+check "Codex's summary comment comes through whole, so its Completed row on the head can be read" \
+  "$(out "$got" | jq -c '.comments[] | select(.id == "c7") | .body')" \
+  "$(jq -c '.[0].data.repository.pullRequest.comments.nodes[] | select(.id == "c7") | .body' "$here/fixtures/comments.json")"
+check "the last summary comment from the token's account comes through whole, so a pass can tell whether its own is new" \
+  "$(out "$got" | jq -c '.comments[] | select(.id == "c10") | .body')" \
+  "$(jq -c '.[].data.repository.pullRequest.comments.nodes[] | select(.id == "c10") | .body' "$here/fixtures/comments.json")"
+check "every kept item has a url" \
+  "$(out "$got" | jq '[.reviews[], .comments[], .threads[].comments[]] | all(.url != null)')" true
+check "convergence's fields come through: head, mergeable, review commits, thread comment ids" \
+  "$(out "$got" | jq -c '[.head, .mergeable, (.reviews[] | .commit), (.threads[0].comments[0] | .databaseId)]')" \
+  '["abc","MERGEABLE","abc","abc","abc",1]'
+check "outside items listed by link, resolved threads included" \
+  "$(out "$got" | jq -c '[.withheld[] | "\(.kind):\(.url | ltrimstr("https://x/"))"]')" \
+  '["thread:t1b","thread:t3a","thread:t7a","thread:t8b","thread:t10a","thread:t12a","thread:t13a","thread-comment:t5b","thread-comment:t9b","review:r2","review:r5","review:r6","review:r8","comment:c1","comment:c2","comment:c3","comment:c8","comment:c13","comment:c17","comment:c19","comment:c15"]'
+check "later pages are read: inside items kept, outside items withheld" \
+  "$(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id | select(IN("r7", "c14", "t11"))],
+    [.withheld[].url | ltrimstr("https://x/") | select(IN("r8", "c15", "t12a"))]')" \
+  "$(printf '%s\n%s' '["r7","c14","t11"]' '["t12a","r8","c15"]')"
+check "a PR comment from a bot off the list is withheld, not dropped" \
+  "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c3") | [.kind, .by]]')" '[["comment","bot"]]'
+check "a resolved thread too long to fetch whole is withheld whole, like an unresolved one" \
+  "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/t10a") | .kind]')" '["thread"]'
+check "an outside item hidden for any reason but Resolved stays withheld, and holds its thread" \
+  "$(out "$got" | jq -c '[.withheld[].url | ltrimstr("https://x/") | select(IN("t8b", "t9b", "r6", "c13"))], [.threads[].id | select(. == "t8")]')" \
+  "$(printf '%s\n%s' '["t8b","t9b","r6","c13"]' '[]')"
+
+check "a thread whose comments came back with no pageInfo is withheld whole, not read" \
+  "$(out "$got" | jq -c '[.threads[].id | select(. == "t13")], [.withheld[] | select(.url == "https://x/t13a") | .kind]')" \
+  "$(printf '%s\n%s' '[]' '["thread"]')"
+
+refuses() {
+  got=$(run "$2")
+  check "$1" "$(status "$got") $(out "$got" | jq -r '.refused != null')" "3 true"
+}
+refuses "a token that can't see members refuses" '.data.repository.owner.viewerIsAMember = false'
+refuses "a contributor's PR refuses" "$pr.authorAssociation = \"CONTRIBUTOR\""
+refuses "a bot's PR refuses" "$pr.author = {__typename: \"Bot\", login: \"dependabot\", databaseId: 49699333}"
+refuses "a head in someone else's fork refuses" "$pr.headRepositoryOwner = {login: \"someone\"}"
+refuses "a head whose fork is gone refuses" "$pr.headRepositoryOwner = null"
+refuses "a PR labeled outside-text refuses" "$pr.labels.nodes += [{name: \"outside-text\"}]"
+refuses "the label matches whatever its case" "$pr.labels.nodes += [{name: \"Outside-Text\"}]"
+got=$(FX_FAIL=1 run .)
+check "a failed fetch exits 3 and reads nothing" "$(status "$got") $(out "$got" | jq -c .)" \
+  '3 {"refused":"the fetch failed, so nothing was read"}'
+
+check "a head in the author's own fork is read" "$(status "$(run "$pr.headRepositoryOwner = {login: \"member\"}")")" 0
+check "a personal repo is read when it's the token's own" "$(status "$(run ".data.repository.owner = {__typename: \"User\", login: \"me\"}
+  | $pr.author.login = \"me\" | $pr.authorAssociation = \"OWNER\" | $pr.headRepositoryOwner = {login: \"me\"}")")" 0
+# Outside the company's orgs, the org's own members are outsiders: only the
+# token's account and the review bots come through, and membership isn't needed.
+elsewhere='.data.repository.owner = {__typename: "Organization", login: "other-org", viewerIsAMember: false}
+  | '"$pr"'.headRepositoryOwner = {login: "other-org"}'
+refuses "outside the company's orgs, a member's PR refuses" "$elsewhere"
+got=$(run "$elsewhere | $pr.author.login = \"me\"")
+check "outside the company's orgs, only the token's account and review bots come through" \
+  "$(status "$got") $(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id]')" \
+  '0 ["r1","r3","r7","c7","c10","t2","t4","t11"]'
+check "outside the company's orgs, a member's text is withheld" \
+  "$(out "$got" | jq -c '[.withheld[].url | ltrimstr("https://x/") | select(IN("c4", "c6", "t6a"))]')" \
+  '["t6a","c4","c6"]'
+got=$(FETCH_REVIEWS_BOT_IDS="99" run .)
+check "FETCH_REVIEWS_BOT_IDS adds a review bot" \
+  "$(out "$got" | jq -c '[(.reviews[], .threads[]) | select(.id == "r5" or .id == "t7") | .id], [.withheld[].url | select(test("r5|t7"))]')" \
+  "$(printf '%s\n%s' '["r5","t7"]' '[]')"
+# A push between the first head read and the last: the feedback may not match
+# the head being judged, so it refuses.
+jq "$pr.headRefOid = \"def\"" "$here/fixtures/head.json" > "$tmp/head-later.json"
+got=$(FX_HEAD_LATER="$tmp/head-later.json" run .)
+check "a head that moves while reading refuses" "$(status "$got") $(out "$got" | jq -c .)" \
+  '3 {"refused":"the PR changed while reading; run again"}'
+jq "$pr.reviews.totalCount += 1" "$here/fixtures/head.json" > "$tmp/head-updated.json"
+got=$(FX_HEAD_LATER="$tmp/head-updated.json" run .)
+check "a review added while reading (same head) refuses" "$(status "$got") $(out "$got" | jq -c .)" \
+  '3 {"refused":"the PR changed while reading; run again"}'
+
+# A trusted review with no body still says which head its reviewer read.
+mkdir "$tmp/fx-empty"; cp "$here"/fixtures/*.json "$tmp/fx-empty/"
+jq '(.[0].data.repository.pullRequest.reviews.nodes[] | select(.id == "r1") | .body) = ""' \
+  "$here/fixtures/reviews.json" > "$tmp/fx-empty/reviews.json"
+got=$(FXDIR="$tmp/fx-empty" run .)
+check "a trusted review with an empty body is kept, with its commit" \
+  "$(out "$got" | jq -c '[.reviews[] | select(.id == "r1") | [.body, .commit]]')" '[["","abc"]]'
+
+check "an outside collaborator's comment hidden as Resolved stays withheld (they can hide their own)" \
+  "$(out "$(run .)" | jq -c '[.withheld[] | select(.url == "https://x/c17") | .kind]')" '["comment"]'
+check "reviewers asked for but not yet reported come through, so a pending Copilot pass is seen" \
+  "$(out "$(run .)" | jq -c '[.requested, .requested_complete]')" '[["copilot-pull-request-reviewer"],true]'
+refuses "a PR whose labels run past one page refuses" "$pr.labels.pageInfo.hasNextPage = true"
+
+# Outside the company's orgs, an org member hiding their own comment as Resolved
+# doesn't clear it; nor does an off-list bot.
+got=$(run "$elsewhere | $pr.author.login = \"me\"")
+check "outside the company's orgs, a member's own Resolved hide doesn't clear it" \
+  "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c18") | .kind]')" '["comment"]'
+check "an off-list bot's own Resolved hide doesn't clear it" \
+  "$(out "$(run .)" | jq -c '[.withheld[] | select(.url == "https://x/c19") | .kind]')" '["comment"]'
+
+exit $fail

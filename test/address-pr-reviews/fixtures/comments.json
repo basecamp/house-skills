@@ -1,0 +1,231 @@
+[
+  {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "comments": {
+            "pageInfo": {
+              "hasNextPage": true,
+              "endCursor": "p1"
+            },
+            "nodes": [
+              {
+                "id": "c1",
+                "url": "https://x/c1",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "MARKER-OUTSIDE contributor",
+                "authorAssociation": "CONTRIBUTOR",
+                "author": {
+                  "__typename": "User",
+                  "login": "someone"
+                }
+              },
+              {
+                "id": "c2",
+                "url": "https://x/c2",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "MARKER-OUTSIDE ghost",
+                "authorAssociation": "NONE",
+                "author": null
+              },
+              {
+                "id": "c3",
+                "url": "https://x/c3",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "MARKER-OUTSIDE actions",
+                "authorAssociation": "NONE",
+                "author": {
+                  "__typename": "Bot",
+                  "login": "github-actions",
+                  "databaseId": 41898282
+                }
+              },
+              {
+                "id": "c4",
+                "url": "https://x/c4",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "member ok",
+                "authorAssociation": "MEMBER",
+                "author": {
+                  "__typename": "User",
+                  "login": "member"
+                }
+              },
+              {
+                "id": "c5",
+                "url": "https://x/c5",
+                "createdAt": "2026-01-01",
+                "isMinimized": true,
+                "body": "MARKER-OUTSIDE hidden",
+                "authorAssociation": "CONTRIBUTOR",
+                "author": {
+                  "__typename": "User",
+                  "login": "someone"
+                },
+                "minimizedReason": "resolved"
+              },
+              {
+                "id": "c6",
+                "url": "https://x/c6",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "> a member quoting the PR\n\nthanks, will fix",
+                "authorAssociation": "MEMBER",
+                "author": {
+                  "__typename": "User",
+                  "login": "member"
+                }
+              },
+              {
+                "id": "c7",
+                "url": "https://x/c7",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "<!-- codex-pull-request-review-summary -->\n\n## Codex Review Summary\n\n| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime=\"2026-01-01T00:00:00Z\">2026-01-01T00:00:00Z</relative-time> | `abc` | New commits |",
+                "authorAssociation": "NONE",
+                "author": {
+                  "__typename": "Bot",
+                  "login": "chatgpt-codex-connector",
+                  "databaseId": 199175422
+                }
+              },
+              {
+                "id": "c8",
+                "url": "https://x/c8",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "MARKER-OUTSIDE collaborator",
+                "authorAssociation": "COLLABORATOR",
+                "author": {
+                  "__typename": "User",
+                  "login": "collab"
+                }
+              },
+              {
+                "id": "c10",
+                "url": "https://x/c10",
+                "createdAt": "2026-01-02",
+                "isMinimized": false,
+                "body": "<!-- address-pr-reviews summary -->\nReview threads: 1 resolved (1 fixed, 0 declined with the reasoning in each thread).\nNot read, waiting for a person: https://x/c1 (read it and any bot reply after it, then hide the comment as Resolved; restate a point in your own words to hand it to the agent)",
+                "authorAssociation": "MEMBER",
+                "author": {
+                  "__typename": "User",
+                  "login": "me"
+                }
+              },
+              {
+                "id": "c13",
+                "url": "https://x/c13",
+                "createdAt": "2026-01-01",
+                "isMinimized": true,
+                "minimizedReason": "spam",
+                "body": "MARKER-OUTSIDE comment hidden as spam",
+                "authorAssociation": "CONTRIBUTOR",
+                "author": {
+                  "__typename": "User",
+                  "login": "someone"
+                }
+              },
+              {
+                "id": "c17",
+                "url": "https://x/c17",
+                "createdAt": "2026-01-02",
+                "isMinimized": true,
+                "minimizedReason": "RESOLVED",
+                "body": "MARKER-OUTSIDE collaborator hid this themselves",
+                "authorAssociation": "COLLABORATOR",
+                "author": {
+                  "__typename": "User",
+                  "login": "collab"
+                }
+              },
+              {
+                "id": "c18",
+                "url": "https://x/c18",
+                "createdAt": "2026-01-02",
+                "isMinimized": true,
+                "minimizedReason": "RESOLVED",
+                "body": "member comment hidden by its author",
+                "authorAssociation": "MEMBER",
+                "author": {
+                  "__typename": "User",
+                  "login": "member"
+                }
+              },
+              {
+                "id": "c19",
+                "url": "https://x/c19",
+                "createdAt": "2026-01-02",
+                "isMinimized": true,
+                "minimizedReason": "RESOLVED",
+                "body": "MARKER-OUTSIDE off-list bot hid this itself",
+                "authorAssociation": "NONE",
+                "author": {
+                  "__typename": "Bot",
+                  "login": "somebot",
+                  "databaseId": 424242
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "comments": {
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": "p2"
+            },
+            "nodes": [
+              {
+                "id": "c14",
+                "url": "https://x/c14",
+                "createdAt": "2026-01-02",
+                "isMinimized": false,
+                "body": "member on page 2",
+                "authorAssociation": "MEMBER",
+                "author": {
+                  "__typename": "User",
+                  "login": "member"
+                }
+              },
+              {
+                "id": "c15",
+                "url": "https://x/c15",
+                "createdAt": "2026-01-02",
+                "isMinimized": false,
+                "body": "MARKER-OUTSIDE comment on page 2",
+                "authorAssociation": "NONE",
+                "author": {
+                  "__typename": "User",
+                  "login": "someone"
+                }
+              },
+              {
+                "id": "c16",
+                "url": "https://x/c16",
+                "createdAt": "2026-01-02",
+                "isMinimized": false,
+                "body": "pasted󠀁󠁩󠁧󠁮󠁯󠁲󠁥󠁿 error: 🏳️‍🌈 👩‍💻 ❤️ 葛󠄀",
+                "authorAssociation": "MEMBER",
+                "author": {
+                  "__typename": "User",
+                  "login": "member"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+]

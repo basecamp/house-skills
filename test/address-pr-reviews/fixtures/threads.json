@@ -1,0 +1,484 @@
+[
+  {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "reviewThreads": {
+            "pageInfo": {
+              "hasNextPage": true,
+              "endCursor": "p1"
+            },
+            "nodes": [
+              {
+                "id": "t1",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t1a",
+                      "url": "https://x/t1a",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": false,
+                      "body": "cop thread",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "Bot",
+                        "login": "copilot-pull-request-reviewer",
+                        "databaseId": 175728472
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1
+                    },
+                    {
+                      "id": "t1b",
+                      "url": "https://x/t1b",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": false,
+                      "body": "MARKER-OUTSIDE t1b",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "User",
+                        "login": "someone"
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "t2",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t2a",
+                      "url": "https://x/t2a",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": false,
+                      "body": "cop thread kept",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "Bot",
+                        "login": "copilot-pull-request-reviewer",
+                        "databaseId": 175728472
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "t3",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": true
+                  },
+                  "nodes": [
+                    {
+                      "id": "t3a",
+                      "url": "https://x/t3a",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": false,
+                      "body": "member long",
+                      "authorAssociation": "MEMBER",
+                      "author": {
+                        "__typename": "User",
+                        "login": "member"
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "t4",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t4a",
+                      "url": "https://x/t4a",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": false,
+                      "body": "cop thread, outside reply hidden",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "Bot",
+                        "login": "copilot-pull-request-reviewer",
+                        "databaseId": 175728472
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1
+                    },
+                    {
+                      "id": "t4b",
+                      "url": "https://x/t4b",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": true,
+                      "body": "MARKER-OUTSIDE t4b",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "User",
+                        "login": "someone"
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1,
+                      "minimizedReason": "resolved"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "t5",
+                "isResolved": true,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t5a",
+                      "url": "https://x/t5a",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": false,
+                      "body": "resolved cop thread",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "Bot",
+                        "login": "copilot-pull-request-reviewer",
+                        "databaseId": 175728472
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1
+                    },
+                    {
+                      "id": "t5b",
+                      "url": "https://x/t5b",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": false,
+                      "body": "MARKER-OUTSIDE t5b",
+                      "authorAssociation": "NONE",
+                      "author": {
+                        "__typename": "User",
+                        "login": "someone"
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "t6",
+                "isResolved": true,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t6a",
+                      "url": "https://x/t6a",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": false,
+                      "body": "resolved member thread",
+                      "authorAssociation": "MEMBER",
+                      "author": {
+                        "__typename": "User",
+                        "login": "member"
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1
+                    },
+                    {
+                      "id": "t6b",
+                      "url": "https://x/t6b",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": true,
+                      "body": "MARKER-OUTSIDE t6b",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "User",
+                        "login": "someone"
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1,
+                      "minimizedReason": "resolved"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "t7",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t7a",
+                      "url": "https://x/t7a",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": false,
+                      "body": "MARKER-OUTSIDE offlist thread",
+                      "authorAssociation": "NONE",
+                      "author": {
+                        "__typename": "Bot",
+                        "login": "some-app",
+                        "databaseId": 99
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "t8",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t8a",
+                      "url": "https://x/t8a",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": false,
+                      "body": "cop thread, outside reply hidden as outdated",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "Bot",
+                        "login": "copilot-pull-request-reviewer",
+                        "databaseId": 175728472
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1
+                    },
+                    {
+                      "id": "t8b",
+                      "url": "https://x/t8b",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": true,
+                      "body": "MARKER-OUTSIDE t8b hidden as outdated",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "User",
+                        "login": "someone"
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1,
+                      "minimizedReason": "outdated"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "t9",
+                "isResolved": true,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t9a",
+                      "url": "https://x/t9a",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": false,
+                      "body": "resolved member thread",
+                      "authorAssociation": "MEMBER",
+                      "author": {
+                        "__typename": "User",
+                        "login": "member"
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1
+                    },
+                    {
+                      "id": "t9b",
+                      "url": "https://x/t9b",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": true,
+                      "body": "MARKER-OUTSIDE t9b hidden as duplicate",
+                      "authorAssociation": "NONE",
+                      "author": {
+                        "__typename": "User",
+                        "login": "someone"
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1,
+                      "minimizedReason": "duplicate"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "t10",
+                "isResolved": true,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": true
+                  },
+                  "nodes": [
+                    {
+                      "id": "t10a",
+                      "url": "https://x/t10a",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": false,
+                      "body": "resolved member thread, too long to fetch whole",
+                      "authorAssociation": "MEMBER",
+                      "author": {
+                        "__typename": "User",
+                        "login": "member"
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "reviewThreads": {
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": "p2"
+            },
+            "nodes": [
+              {
+                "id": "t11",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t11a",
+                      "url": "https://x/t11a",
+                      "createdAt": "2026-01-02",
+                      "isMinimized": false,
+                      "body": "cop thread on page 2",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "Bot",
+                        "login": "copilot-pull-request-reviewer",
+                        "databaseId": 175728472
+                      },
+                      "databaseId": 2,
+                      "path": "p",
+                      "line": 2
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "t12",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t12a",
+                      "url": "https://x/t12a",
+                      "createdAt": "2026-01-02",
+                      "isMinimized": false,
+                      "body": "MARKER-OUTSIDE t12a on page 2",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "User",
+                        "login": "someone"
+                      },
+                      "databaseId": 2,
+                      "path": "p",
+                      "line": 2
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "t13",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "nodes": [
+                    {
+                      "id": "t13a",
+                      "url": "https://x/t13a",
+                      "createdAt": "2026-01-02",
+                      "isMinimized": false,
+                      "body": "cop thread with no pageInfo",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "Bot",
+                        "login": "copilot-pull-request-reviewer",
+                        "databaseId": 175728472
+                      },
+                      "databaseId": 3,
+                      "path": "p",
+                      "line": 3
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+]
