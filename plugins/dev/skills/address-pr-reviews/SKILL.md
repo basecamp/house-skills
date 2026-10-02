@@ -49,13 +49,17 @@ gh api graphql -f query='
 query {
   repository(owner: "OWNER", name: "REPO") {
     pullRequest(number: PR_NUMBER) {
+      headRefOid
+      mergeable
       reviews(first: 50) {
         pageInfo { hasNextPage endCursor }
         nodes {
           id
+          url
           state
           body
           author { login }
+          commit { oid }
           comments(first: 50) {
             pageInfo { hasNextPage endCursor }
             nodes { body path line }
@@ -69,7 +73,7 @@ query {
           isResolved
           comments(last: 50) {
             pageInfo { hasPreviousPage startCursor }
-            nodes { body path line author { login } }
+            nodes { databaseId url body path line author { login } }
           }
         }
       }
@@ -77,6 +81,11 @@ query {
   }
 }'
 ```
+
+The same query is the convergence probe in §4: `headRefOid` against each
+review's `commit { oid }` tells you which reviewers have reported on the current
+head, and a review's `url` or a thread comment's `databaseId` is what the
+summary comment links to.
 
 ## Triage: scope first, then merit
 
@@ -209,34 +218,41 @@ mutation {
 
 A PR is converged when CI is green on its head, every reviewer that reviews
 this repo automatically (Codex re-reviews each push; Copilot does so only where
-the repo enables it) has reported on that exact head — where one last reported
-on an older head, re-request it (`gh pr edit PR_NUMBER --add-reviewer @copilot`
-for Copilot), and if it doesn't come, say so in the summary comment — the PR is
-mergeable against its base (`mergeable` is not CONFLICTING — rebase when it is,
-and say what conflicted in a PR comment), and the review-thread list is empty
-except for threads that pose a decision for a human. A finding left only in a
-review body counts as an open thread: a bot's until the summary comment answers
-it, a person's until they accept the answer or whoever decides rules on it.
-Having the last word in a thread is not convergence — the merger sees
-unresolved threads, not who spoke last. Probe convergence with one paginated
-GraphQL call counting **unresolved** threads (`isResolved: false`) and
-unanswered review-body findings, never by comment recency.
+the repo enables it) has reported on that exact head (its latest review's
+`commit.oid` equals `headRefOid`) — where one last reported on an older head,
+re-request it (`gh pr edit PR_NUMBER --add-reviewer @copilot` for Copilot), and
+if it doesn't come, say so in the summary comment — the PR is mergeable against
+its base (`mergeable` is `MERGEABLE`; `UNKNOWN` means GitHub is still computing
+it, so wait and re-query rather than count it; on `CONFLICTING`, rebase and say
+what conflicted in a PR comment), and the review-thread list is empty except for threads that pose a
+decision for a human. A finding left only in a review body counts as an open
+thread: a bot's until the summary comment answers it, a person's until they
+accept the answer or whoever decides rules on it. Having the last word in a
+thread is not convergence — the merger sees unresolved threads, not who spoke
+last. Probe convergence by re-running the §1 query (paginated) and counting
+**unresolved** threads (`isResolved: false`) and unanswered review-body
+findings, never by comment recency.
 
-When you resolved or left open anything in a pass, post ONE PR comment:
+When a pass resolved or left open any thread, or answered any review-body
+finding, post ONE PR comment covering both:
 
 ```
 Review threads: N resolved (M fixed, K declined with the reasoning in each thread).
-Declined: <one bullet per decline — link to the thread + one clause>
-Open for a decision: <one bullet per open thread — link + what is asked of whom>
+Review bodies: N findings answered (M fixed, K declined).
+Fixed from a review body: <one bullet per finding — link to the review + one clause>
+Declined: <one bullet per decline — link to the thread or review + one clause>
+Open for a decision: <one bullet per open thread or body finding — link + what is asked of whom>
 ```
 
-Omit the last line when nothing is open. Thread links take the form
-`https://github.com/OWNER/REPO/pull/N#discussion_r<comment databaseId>`.
+Omit any line that would be empty. Link a thread by one of its comments:
+`https://github.com/OWNER/REPO/pull/N#discussion_r<comment databaseId>` (or that
+comment's `url`). A body-only finding has no thread, so link the review's `url`.
 
 ## Key Points
 
 - Fetch both `reviews` and `reviewThreads` — feedback may be in either place
-- For top-level review bodies (no thread), reply with `gh pr comment`
+- For top-level review bodies (no thread), reply with `gh pr comment` and list the
+  finding in the summary comment, linked by the review's `url`
 - For inline threads, reply to the thread directly; resolve once addressed (fix landed
   and green, or decline with reasoning); leave open only a genuine human decision, and
   name every open thread in the summary comment
