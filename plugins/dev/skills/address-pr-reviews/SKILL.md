@@ -265,8 +265,8 @@ head, re-request it: `gh pr edit PR_NUMBER --add-reviewer @copilot` for Copilot,
 a PR comment reading `@codex review` for Codex. If it doesn't come, list it in
 the summary comment.
 
-Each pass posts at most ONE PR comment, in the form below, and only when it
-has something new to say: the pass replied in a thread or to a review-body
+Each pass posts at most ONE summary comment, a PR comment in the form below,
+and only when it has something new to say: the pass replied in a thread or to a review-body
 finding, or the lines from "Open for a decision" down would list something
 different from the last summary comment on the PR (the latest entry in
 `comments` that starts with the marker line). Otherwise post nothing, so an
