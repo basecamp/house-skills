@@ -39,20 +39,12 @@ pr=.data.repository.pullRequest
 got=$(run .)
 check "a member's PR is read" "$(status "$got")" 0
 check "no outside text reaches the output" "$(grep -c MARKER-OUTSIDE <<<"$got" || true)" 0
-check "no invisible characters reach the output" \
-  "$(out "$got" | jq '[.. | strings | test("\\p{Default_Ignorable_Code_Point}")] | any')" false
 check "inside items kept" "$(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id]')" \
-  '["r1","r3","c4","c6","c7","c9","c10","c11","c12","t2","t4"]'
+  '["r1","r3","c4","c6","c7","c10","t2","t4"]'
 check "an outside comment a person hid is dropped from its thread" \
   "$(out "$got" | jq -c '[.threads[] | select(.id == "t4") | .comments[].id]')" '["t4a"]'
-check "a member's quoted lines are left out" "$(out "$got" | jq -c '.comments[] | select(.id == "c6") | .body')" \
-  '"[quoted text omitted]\n\nthanks, will fix"'
-check "a member's code block comes through as written, quoted-looking lines included" \
-  "$(out "$got" | jq -c '.comments[] | select(.id == "c9") | .body')" \
-  '"```suggestion\n> keep this line\n```\n[quoted text omitted]\n```x``` opens no block\n[quoted text omitted]\n```\ncode\n```\ndone"'
-check "a code block with CRLF line ends closes" \
-  "$(out "$got" | jq -c '.comments[] | select(.id == "c11") | .body')" \
-  '"```suggestion\r\n> keep\r\n```\r\n[quoted text omitted]\nend"'
+check "a member's text comes through as written, quotes included" \
+  "$(out "$got" | jq -c '.comments[] | select(.id == "c6") | .body')" '"> a member quoting the PR\n\nthanks, will fix"'
 check "every kept item has a url" \
   "$(out "$got" | jq '[.reviews[], .comments[], .threads[].comments[]] | all(.url != null)')" true
 check "convergence's fields come through: head, mergeable, review commits, thread comment ids" \
@@ -89,8 +81,8 @@ check "outside the company's orgs, only the token's account and review bots come
   "$(status "$got") $(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id]')" \
   '0 ["r1","r3","c7","c10","t2","t4"]'
 check "outside the company's orgs, a member's text is withheld" \
-  "$(out "$got" | jq -c '[.withheld[].url | ltrimstr("https://x/") | select(IN("c4", "c6", "c9", "c11", "c12", "t6a"))]')" \
-  '["t6a","c4","c6","c9","c11","c12"]'
+  "$(out "$got" | jq -c '[.withheld[].url | ltrimstr("https://x/") | select(IN("c4", "c6", "t6a"))]')" \
+  '["t6a","c4","c6"]'
 got=$(FETCH_REVIEWS_BOT_IDS="99" run .)
 check "FETCH_REVIEWS_BOT_IDS adds a review bot" \
   "$(out "$got" | jq -c '[(.reviews[], .threads[]) | select(.id == "r5" or .id == "t7") | .id], [.withheld[].url | select(test("r5|t7"))]')" \

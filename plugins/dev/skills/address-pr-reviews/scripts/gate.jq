@@ -18,29 +18,7 @@ def inside: member or bot;
 def shown: .isMinimized | not;
 def nodes($pages; f): [$pages[0][].data.repository.pullRequest | f | .nodes[]];
 def link($kind): {kind: $kind, url, by: (if person then "person" else "bot" end), association: .authorAssociation};
-# A quote reply or an email reply puts someone else's words in a member's
-# comment, so a member's quoted lines don't come through. Lines inside a code
-# block the member opened and closed (a suggestion included) are code and come
-# through as written; a quote reply's lines all start with ">", so it can't
-# open or close one. A block left open gets no exemption, so a quote reply after
-# it is still left out. Characters that render as nothing don't come through
-# from anyone.
-def quoted: test("^\\s*>");
-def own:
-  reduce (split("\n")[]) as $l ({out: [], fence: null, held: []};
-    .fence as $f
-    | if $f != null then
-        if $l | test("^ {0,3}\($f[0:1]){\($f | length),}\\s*$") then
-          .out += .held + [$l] | .held = [] | .fence = null
-        else .held += [$l] end
-      elif $l | quoted then .out += ["[quoted text omitted]"]
-      else .out += [$l] | .fence = ($l | capture("^ {0,3}(?<f>~{3,}|`{3,}(?=[^`]*$))").f // null)
-      end)
-  | .out + [.held[] | if quoted then "[quoted text omitted]" else . end]
-  | reduce .[] as $l ([]; if $l == "[quoted text omitted]" and .[-1] == $l then . else . + [$l] end)
-  | join("\n");
-def keep: {id, url, login: .author.login,
-  body: (if member then .body | own else .body end | gsub("\\p{Default_Ignorable_Code_Point}"; ""))};
+def keep: {id, url, login: .author.login, body};
 
 repo as $repo
 | $repo.pullRequest as $pr

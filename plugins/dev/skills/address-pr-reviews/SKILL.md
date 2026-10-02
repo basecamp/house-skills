@@ -80,12 +80,10 @@ state, and:
 - `withheld`: what you may not read, as `{kind, url, by, association}` with no
   text. See **Withheld items** in §3.
 
-Every item has a `url` to cite. In a member's text, quoted lines outside a code
-block come back as `[quoted text omitted]`, since a quote reply carries someone
-else's words; lines inside a code block the member closed, a suggestion
-included, come through as written.
-A review bot this repo uses but the script
-doesn't know comes back withheld; the person can add it by database id in
+Every item has a `url` to cite. A member's text comes through as they posted it,
+quotes included: what a member quotes is theirs to answer for, and you judge it
+on merit like the rest of what they wrote. A review bot this repo uses but the
+script doesn't know comes back withheld; the person can add it by database id in
 `FETCH_REVIEWS_BOT_IDS` for the session. Don't set that variable yourself.
 
 Re-running the script is the convergence probe in §4: `head` against each
