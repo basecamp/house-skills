@@ -21,12 +21,29 @@
             {
               "name": "bug"
             }
-          ]
+          ],
+          "pageInfo": {
+            "hasNextPage": false
+          }
         },
         "authorAssociation": "MEMBER",
         "author": {
           "__typename": "User",
           "login": "member"
+        },
+        "reviewRequests": {
+          "pageInfo": {
+            "hasNextPage": false
+          },
+          "nodes": [
+            {
+              "requestedReviewer": {
+                "__typename": "Bot",
+                "login": "copilot-pull-request-reviewer",
+                "databaseId": 175728472
+              }
+            }
+          ]
         }
       }
     }

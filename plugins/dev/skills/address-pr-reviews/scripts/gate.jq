@@ -18,7 +18,10 @@ def inside: member or bot;
 # A person clears an outside item by hiding it as Resolved once they've read
 # it. Hidden for any other reason (spam, off-topic, outdated, duplicate, abuse),
 # it's still unread as far as anyone knows, so it stays withheld.
-def cleared: .isMinimized and ((.minimizedReason // "") | ascii_downcase) == "resolved";
+# An outside collaborator can hide comments, their own included, and GitHub
+# doesn't say who hid one, so a collaborator's comment can't be cleared this way.
+def cleared: .isMinimized and ((.minimizedReason // "") | ascii_downcase) == "resolved"
+  and .authorAssociation != "COLLABORATOR";
 def pending: (inside or cleared) | not;
 def nodes($pages; f): [$pages[0][].data.repository.pullRequest | f | .nodes[]];
 def link($kind): {kind: $kind, url, by: (if person then "person" else "bot" end), association: .authorAssociation};
@@ -37,6 +40,8 @@ repo as $repo
     {refused: "the PR's head is in a fork its author doesn't own, so its diff is outside text too", url: $pr.url}
   # The label catches a lane that forgot it. It can't stop an agent steered by
   # what it read: that agent decides whether to apply it.
+  elif $pr.labels.pageInfo.hasNextPage != false then
+    {refused: "the PR has more labels than one page holds, so outside-text can't be ruled out", url: $pr.url}
   elif any($pr.labels.nodes[]; .name == "outside-text") then
     {refused: "the PR is labeled outside-text: it was written from outside text", url: $pr.url}
   else
@@ -51,6 +56,9 @@ repo as $repo
         url: $pr.url,
         head: $pr.headRefOid,
         mergeable: $pr.mergeable,
+        # Reviewers asked for but not yet reported, Copilot's pass in progress included.
+        requested: [$pr.reviewRequests.nodes[].requestedReviewer | .login // .slug],
+        requested_complete: ($pr.reviewRequests.pageInfo.hasNextPage == false),
         reviews: [$reviews[] | select(inside) | keep + {state, commit: .commit.oid}],
         comments: [$comments[] | select(inside) | keep],
         threads: [$threads[] | select((.isResolved | not) and .readable) | {id, isOutdated,

@@ -129,6 +129,19 @@
                   "__typename": "User",
                   "login": "someone"
                 }
+              },
+              {
+                "id": "c17",
+                "url": "https://x/c17",
+                "createdAt": "2026-01-02",
+                "isMinimized": true,
+                "minimizedReason": "RESOLVED",
+                "body": "MARKER-OUTSIDE collaborator hid this themselves",
+                "authorAssociation": "COLLABORATOR",
+                "author": {
+                  "__typename": "User",
+                  "login": "collab"
+                }
               }
             ]
           }

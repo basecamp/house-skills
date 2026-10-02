@@ -39,7 +39,10 @@ head() {
   repository(owner: \$owner, name: \$name) {
     owner { __typename login ... on Organization { viewerIsAMember } }
     pullRequest(number: \$number) { url headRefOid mergeable headRepositoryOwner { login }
-      labels(first: 100) { nodes { name } } $who } } }" > "$tmp/$1"
+      labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
+      reviewRequests(first: 100) { pageInfo { hasNextPage } nodes { requestedReviewer {
+        __typename ... on Bot { login databaseId } ... on User { login } ... on Team { slug } } } }
+      $who } } }" > "$tmp/$1"
 }
 head head0.json
 
