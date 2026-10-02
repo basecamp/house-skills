@@ -262,18 +262,27 @@ finds nothing: it updates that comment (the entry in `comments` from
 `chatgpt-codex-connector` headed "Codex Review Summary") and reacts 👍, so a
 clean final pass shows only there. Where a reviewer last reported on an older
 head, re-request it: `gh pr edit PR_NUMBER --add-reviewer @copilot` for Copilot,
-a PR comment reading `@codex review` for Codex. If it doesn't come, say so in
+a PR comment reading `@codex review` for Codex. If it doesn't come, list it in
 the summary comment.
 
-When a pass resolved or left open any thread, or answered any review-body
-finding, or anything is withheld, post ONE PR comment covering them all:
+Each pass posts at most ONE PR comment, in the form below, and only when it
+has something new to say: the pass replied in a thread or to a review-body
+finding, or the lines from "Open for a decision" down would list something
+different from the last summary comment on the PR (the latest entry in
+`comments` that starts with the marker line). Otherwise post nothing, so an
+item that waits on a person, such as a CI bot's status comment in `withheld`,
+isn't posted again on every pass; and post nothing when every line under the
+marker would be empty. Post a new comment rather than editing the last one, since an edit
+notifies no one.
 
 ```
+<!-- address-pr-reviews summary -->
 Review threads: N resolved (M fixed, K declined with the reasoning in each thread).
 Review bodies: N findings answered (M fixed, K declined).
 Fixed from a review body: <one bullet per finding — link to the review + one clause>
 Declined: <one bullet per decline — link to the thread or review + one clause>
 Open for a decision: <one bullet per open thread or body finding — link + what is asked of whom>
+Not reported on the head: <one bullet per reviewer re-requested that hasn't come — its name + the head's short sha>
 Not read, waiting for a person: <one link per withheld item> (read it and any bot reply after it, then hide the comment as Resolved; restate a point in your own words to hand it to the agent)
 ```
 

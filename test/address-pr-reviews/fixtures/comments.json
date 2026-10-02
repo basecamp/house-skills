@@ -110,7 +110,7 @@
                 "url": "https://x/c10",
                 "createdAt": "2026-01-02",
                 "isMinimized": false,
-                "body": "my own note",
+                "body": "<!-- address-pr-reviews summary -->\nReview threads: 1 resolved (1 fixed, 0 declined with the reasoning in each thread).\nNot read, waiting for a person: https://x/c1 (read it and any bot reply after it, then hide the comment as Resolved; restate a point in your own words to hand it to the agent)",
                 "authorAssociation": "MEMBER",
                 "author": {
                   "__typename": "User",

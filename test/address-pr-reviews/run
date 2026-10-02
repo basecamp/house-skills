@@ -74,6 +74,9 @@ check "Unicode tag characters are stripped; emoji with joiners and U+FE0F, and a
 check "Codex's summary comment comes through whole, so its Completed row on the head can be read" \
   "$(out "$got" | jq -c '.comments[] | select(.id == "c7") | .body')" \
   "$(jq -c '.[0].data.repository.pullRequest.comments.nodes[] | select(.id == "c7") | .body' "$here/fixtures/comments.json")"
+check "the last summary comment from the token's account comes through whole, so a pass can tell whether its own is new" \
+  "$(out "$got" | jq -c '.comments[] | select(.id == "c10") | .body')" \
+  "$(jq -c '.[].data.repository.pullRequest.comments.nodes[] | select(.id == "c10") | .body' "$here/fixtures/comments.json")"
 check "every kept item has a url" \
   "$(out "$got" | jq '[.reviews[], .comments[], .threads[].comments[]] | all(.url != null)')" true
 check "convergence's fields come through: head, mergeable, review commits, thread comment ids" \
