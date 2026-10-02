@@ -1,0 +1,100 @@
+[
+  {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "reviews": {
+            "pageInfo": {
+              "hasNextPage": false
+            },
+            "nodes": [
+              {
+                "id": "r1",
+                "url": "https://x/r1",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "copilot review",
+                "authorAssociation": "CONTRIBUTOR",
+                "author": {
+                  "__typename": "Bot",
+                  "login": "copilot-pull-request-reviewer",
+                  "databaseId": 175728472
+                },
+                "state": "COMMENTED",
+                "commit": {
+                  "oid": "abc"
+                }
+              },
+              {
+                "id": "r2",
+                "url": "https://x/r2",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "MARKER-OUTSIDE impostor",
+                "authorAssociation": "NONE",
+                "author": {
+                  "__typename": "User",
+                  "login": "copilot-pull-request-reviewer"
+                },
+                "state": "COMMENTED",
+                "commit": {
+                  "oid": "abc"
+                }
+              },
+              {
+                "id": "r3",
+                "url": "https://x/r3",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "codex review",
+                "authorAssociation": "NONE",
+                "author": {
+                  "__typename": "Bot",
+                  "login": "chatgpt-codex-connector",
+                  "databaseId": 199175422
+                },
+                "state": "COMMENTED",
+                "commit": {
+                  "oid": "abc"
+                }
+              },
+              {
+                "id": "r4",
+                "url": "https://x/r4",
+                "createdAt": "2026-01-01",
+                "isMinimized": true,
+                "body": "MARKER-OUTSIDE hidden review",
+                "authorAssociation": "CONTRIBUTOR",
+                "author": {
+                  "__typename": "User",
+                  "login": "someone"
+                },
+                "state": "COMMENTED",
+                "commit": {
+                  "oid": "abc"
+                }
+              },
+              {
+                "id": "r5",
+                "url": "https://x/r5",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "MARKER-OUTSIDE offlist review",
+                "authorAssociation": "NONE",
+                "author": {
+                  "__typename": "Bot",
+                  "login": "some-app",
+                  "databaseId": 99
+                },
+                "state": "COMMENTED",
+                "commit": {
+                  "oid": "abc"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+]

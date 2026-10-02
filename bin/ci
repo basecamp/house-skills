@@ -11,4 +11,8 @@ echo "==> Validating heavyweight skill activation contracts…"
 "$ROOT/scripts/validate-heavyweight-skill-activation"
 
 echo ""
+echo "==> Testing address-pr-reviews' fetch-reviews gate…"
+"$ROOT/test/address-pr-reviews/run"
+
+echo ""
 echo "CI passed."

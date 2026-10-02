@@ -1,0 +1,160 @@
+[
+  {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "comments": {
+            "pageInfo": {
+              "hasNextPage": false
+            },
+            "nodes": [
+              {
+                "id": "c1",
+                "url": "https://x/c1",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "MARKER-OUTSIDE contributor",
+                "authorAssociation": "CONTRIBUTOR",
+                "author": {
+                  "__typename": "User",
+                  "login": "someone"
+                }
+              },
+              {
+                "id": "c2",
+                "url": "https://x/c2",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "MARKER-OUTSIDE ghost",
+                "authorAssociation": "NONE",
+                "author": null
+              },
+              {
+                "id": "c3",
+                "url": "https://x/c3",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "MARKER-OUTSIDE actions",
+                "authorAssociation": "NONE",
+                "author": {
+                  "__typename": "Bot",
+                  "login": "github-actions",
+                  "databaseId": 41898282
+                }
+              },
+              {
+                "id": "c4",
+                "url": "https://x/c4",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "member ok",
+                "authorAssociation": "MEMBER",
+                "author": {
+                  "__typename": "User",
+                  "login": "member"
+                }
+              },
+              {
+                "id": "c5",
+                "url": "https://x/c5",
+                "createdAt": "2026-01-01",
+                "isMinimized": true,
+                "body": "MARKER-OUTSIDE hidden",
+                "authorAssociation": "CONTRIBUTOR",
+                "author": {
+                  "__typename": "User",
+                  "login": "someone"
+                }
+              },
+              {
+                "id": "c6",
+                "url": "https://x/c6",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "> MARKER-OUTSIDE quote reply\n> more of it\n\nthanks\udb40\udc41\udb40\udc42, will fix\u200b",
+                "authorAssociation": "MEMBER",
+                "author": {
+                  "__typename": "User",
+                  "login": "member"
+                }
+              },
+              {
+                "id": "c7",
+                "url": "https://x/c7",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "codex summary",
+                "authorAssociation": "NONE",
+                "author": {
+                  "__typename": "Bot",
+                  "login": "chatgpt-codex-connector",
+                  "databaseId": 199175422
+                }
+              },
+              {
+                "id": "c8",
+                "url": "https://x/c8",
+                "createdAt": "2026-01-01",
+                "isMinimized": false,
+                "body": "MARKER-OUTSIDE collaborator",
+                "authorAssociation": "COLLABORATOR",
+                "author": {
+                  "__typename": "User",
+                  "login": "collab"
+                }
+              },
+              {
+                "id": "c9",
+                "url": "https://x/c9",
+                "createdAt": "2026-01-02",
+                "isMinimized": false,
+                "body": "```suggestion\n> keep this line\n```\n> MARKER-OUTSIDE after the block\n```x``` opens no block\n> MARKER-OUTSIDE after inline code\n```\ncode\n```\ndone",
+                "authorAssociation": "MEMBER",
+                "author": {
+                  "__typename": "User",
+                  "login": "member"
+                }
+              },
+              {
+                "id": "c10",
+                "url": "https://x/c10",
+                "createdAt": "2026-01-02",
+                "isMinimized": false,
+                "body": "my own note",
+                "authorAssociation": "MEMBER",
+                "author": {
+                  "__typename": "User",
+                  "login": "me"
+                }
+              },
+              {
+                "id": "c11",
+                "url": "https://x/c11",
+                "createdAt": "2026-01-02",
+                "isMinimized": false,
+                "body": "```suggestion\r\n> keep\r\n```\r\n> MARKER-OUTSIDE after a block with CRLF line ends\r\nend",
+                "authorAssociation": "MEMBER",
+                "author": {
+                  "__typename": "User",
+                  "login": "member"
+                }
+              },
+              {
+                "id": "c12",
+                "url": "https://x/c12",
+                "createdAt": "2026-01-02",
+                "isMinimized": false,
+                "body": "```\nsome code, block left open\n> MARKER-OUTSIDE a quote reply after it",
+                "authorAssociation": "MEMBER",
+                "author": {
+                  "__typename": "User",
+                  "login": "member"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+]

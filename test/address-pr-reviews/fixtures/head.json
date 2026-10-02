@@ -1,0 +1,34 @@
+{
+  "data": {
+    "viewer": {
+      "login": "me"
+    },
+    "repository": {
+      "owner": {
+        "__typename": "Organization",
+        "login": "basecamp",
+        "viewerIsAMember": true
+      },
+      "pullRequest": {
+        "url": "https://x/pr",
+        "headRefOid": "abc",
+        "mergeable": "MERGEABLE",
+        "headRepositoryOwner": {
+          "login": "basecamp"
+        },
+        "labels": {
+          "nodes": [
+            {
+              "name": "bug"
+            }
+          ]
+        },
+        "authorAssociation": "MEMBER",
+        "author": {
+          "__typename": "User",
+          "login": "member"
+        }
+      }
+    }
+  }
+}
