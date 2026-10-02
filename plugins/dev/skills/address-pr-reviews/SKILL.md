@@ -82,7 +82,9 @@ state, and:
 
 Every item has a `url` to cite. A member's text comes through as they posted it,
 quotes included: what a member quotes is theirs to answer for, and you judge it
-on merit like the rest of what they wrote. A review bot this repo uses but the
+on merit like the rest of what they wrote. The one thing taken out of any text
+is Unicode tag characters (U+E0000–U+E007F), which GitHub renders as nothing, so
+a member who pasted them never saw them. A review bot this repo uses but the
 script doesn't know comes back withheld; the person can add it by database id in
 `FETCH_REVIEWS_BOT_IDS` for the session. Don't set that variable yourself.
 

@@ -22,7 +22,10 @@ def cleared: .isMinimized and ((.minimizedReason // "") | ascii_downcase) == "re
 def pending: (inside or cleared) | not;
 def nodes($pages; f): [$pages[0][].data.repository.pullRequest | f | .nodes[]];
 def link($kind): {kind: $kind, url, by: (if person then "person" else "bot" end), association: .authorAssociation};
-def keep: {id, url, login: .author.login, body};
+# Unicode tag characters (U+E0000-U+E007F) render as nothing on GitHub, so a
+# member who pastes them from an outsider's text can't see what they pass on.
+# Only that block goes: emoji joiners and variation selectors stay intact.
+def keep: {id, url, login: .author.login, body: (.body | gsub("[\\x{E0000}-\\x{E007F}]"; ""))};
 
 repo as $repo
 | $repo.pullRequest as $pr

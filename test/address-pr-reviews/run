@@ -63,11 +63,14 @@ got=$(run .)
 check "a member's PR is read" "$(status "$got")" 0
 check "no outside text reaches the output" "$(grep -c MARKER-OUTSIDE <<<"$got" || true)" 0
 check "inside items kept" "$(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id]')" \
-  '["r1","r3","r7","c4","c6","c7","c10","c14","t2","t4","t11"]'
+  '["r1","r3","r7","c4","c6","c7","c10","c14","c16","t2","t4","t11"]'
 check "an outside comment a person hid as Resolved is dropped from its thread" \
   "$(out "$got" | jq -c '[.threads[] | select(.id == "t4") | .comments[].id]')" '["t4a"]'
 check "a member's text comes through as written, quotes included" \
   "$(out "$got" | jq -c '.comments[] | select(.id == "c6") | .body')" '"> a member quoting the PR\n\nthanks, will fix"'
+check "Unicode tag characters are stripped; emoji with joiners and U+FE0F, and a U+E0100 variant, come through intact" \
+  "$(out "$got" | jq -a -c '.comments[] | select(.id == "c16") | .body')" \
+  '"pasted error: \ud83c\udff3\ufe0f\u200d\ud83c\udf08 \ud83d\udc69\u200d\ud83d\udcbb \u2764\ufe0f \u845b\udb40\udd00"'
 check "every kept item has a url" \
   "$(out "$got" | jq '[.reviews[], .comments[], .threads[].comments[]] | all(.url != null)')" true
 check "convergence's fields come through: head, mergeable, review commits, thread comment ids" \

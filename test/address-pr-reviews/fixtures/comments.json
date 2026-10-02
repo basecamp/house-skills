@@ -169,6 +169,18 @@
                   "__typename": "User",
                   "login": "someone"
                 }
+              },
+              {
+                "id": "c16",
+                "url": "https://x/c16",
+                "createdAt": "2026-01-02",
+                "isMinimized": false,
+                "body": "pasted󠀁󠁩󠁧󠁮󠁯󠁲󠁥󠁿 error: 🏳️‍🌈 👩‍💻 ❤️ 葛󠄀",
+                "authorAssociation": "MEMBER",
+                "author": {
+                  "__typename": "User",
+                  "login": "member"
+                }
               }
             ]
           }
