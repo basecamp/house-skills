@@ -5,7 +5,8 @@
         "pullRequest": {
           "reviews": {
             "pageInfo": {
-              "hasNextPage": false
+              "hasNextPage": true,
+              "endCursor": "p1"
             },
             "nodes": [
               {
@@ -99,6 +100,55 @@
                 "isMinimized": true,
                 "minimizedReason": "off-topic",
                 "body": "MARKER-OUTSIDE review hidden as off-topic",
+                "authorAssociation": "CONTRIBUTOR",
+                "author": {
+                  "__typename": "User",
+                  "login": "someone"
+                },
+                "state": "COMMENTED",
+                "commit": {
+                  "oid": "abc"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "reviews": {
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": "p2"
+            },
+            "nodes": [
+              {
+                "id": "r7",
+                "url": "https://x/r7",
+                "createdAt": "2026-01-02",
+                "isMinimized": false,
+                "body": "codex review on page 2",
+                "authorAssociation": "NONE",
+                "author": {
+                  "__typename": "Bot",
+                  "login": "chatgpt-codex-connector",
+                  "databaseId": 199175422
+                },
+                "state": "COMMENTED",
+                "commit": {
+                  "oid": "abc"
+                }
+              },
+              {
+                "id": "r8",
+                "url": "https://x/r8",
+                "createdAt": "2026-01-02",
+                "isMinimized": false,
+                "body": "MARKER-OUTSIDE review on page 2",
                 "authorAssociation": "CONTRIBUTOR",
                 "author": {
                   "__typename": "User",

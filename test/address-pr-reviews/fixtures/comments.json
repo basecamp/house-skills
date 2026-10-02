@@ -5,7 +5,8 @@
         "pullRequest": {
           "comments": {
             "pageInfo": {
-              "hasNextPage": false
+              "hasNextPage": true,
+              "endCursor": "p1"
             },
             "nodes": [
               {
@@ -124,6 +125,46 @@
                 "minimizedReason": "spam",
                 "body": "MARKER-OUTSIDE comment hidden as spam",
                 "authorAssociation": "CONTRIBUTOR",
+                "author": {
+                  "__typename": "User",
+                  "login": "someone"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "comments": {
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": "p2"
+            },
+            "nodes": [
+              {
+                "id": "c14",
+                "url": "https://x/c14",
+                "createdAt": "2026-01-02",
+                "isMinimized": false,
+                "body": "member on page 2",
+                "authorAssociation": "MEMBER",
+                "author": {
+                  "__typename": "User",
+                  "login": "member"
+                }
+              },
+              {
+                "id": "c15",
+                "url": "https://x/c15",
+                "createdAt": "2026-01-02",
+                "isMinimized": false,
+                "body": "MARKER-OUTSIDE comment on page 2",
+                "authorAssociation": "NONE",
                 "author": {
                   "__typename": "User",
                   "login": "someone"

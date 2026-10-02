@@ -10,15 +10,35 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir "$tmp/bin"
 cat > "$tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
-# Answers only GraphQL; anything else is a fetch the skill shouldn't make.
+# Answers only GraphQL; anything else is a fetch the skill shouldn't make. A
+# fixture is the pages gh would fetch, in order. Like gh, the stub returns every
+# page with --paginate, as one array with --slurp too, and only the first page
+# without --paginate. Each field a fixture holds must be asked for in the query.
 [ "${1:-} ${2:-}" = "api graphql" ] || { echo "stub gh: not a GraphQL call: $*" >&2; exit 1; }
 [ -z "${FX_FAIL:-}" ] || { echo "stub gh: simulated failure" >&2; exit 1; }
-case "$*" in
-  *"reviewThreads("*) cat "$FX/threads.json" ;;
-  *"reviews("*) cat "$FX/reviews.json" ;;
-  *"comments(first"*) cat "$FX/comments.json" ;;
-  *) cat "$FX_HEAD" ;;
+paginate='' slurp='' query=''
+for arg in "$@"; do
+  case "$arg" in
+    --paginate) paginate=1 ;;
+    --slurp) slurp=1 ;;
+    query=*) query=${arg#query=} ;;
+  esac
+done
+case "$query" in
+  *"reviewThreads("*) file=$FX/threads.json ;;
+  *"reviews("*) file=$FX/reviews.json ;;
+  *"comments(first"*) file=$FX/comments.json ;;
+  *) file=$FX_HEAD ;;
 esac
+for key in $(jq -r '[.. | objects | keys[]] | unique[] | select(. != "data")' "$file"); do
+  grep -qw -- "$key" <<<"$query" || { echo "stub gh: the query doesn't ask for $key" >&2; exit 1; }
+done
+if [ "$file" = "$FX_HEAD" ]; then cat "$file"
+elif [ -z "$paginate" ]; then jq '.[0]' "$file"
+elif [[ $query != *'after: $endCursor'* ]]; then echo "stub gh: --paginate without \$endCursor" >&2; exit 1
+elif [ -n "$slurp" ]; then cat "$file"
+else jq -c '.[]' "$file"
+fi
 EOF
 chmod +x "$tmp/bin/gh"
 
@@ -40,7 +60,7 @@ got=$(run .)
 check "a member's PR is read" "$(status "$got")" 0
 check "no outside text reaches the output" "$(grep -c MARKER-OUTSIDE <<<"$got" || true)" 0
 check "inside items kept" "$(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id]')" \
-  '["r1","r3","c4","c6","c7","c10","t2","t4"]'
+  '["r1","r3","r7","c4","c6","c7","c10","c14","t2","t4","t11"]'
 check "an outside comment a person hid as Resolved is dropped from its thread" \
   "$(out "$got" | jq -c '[.threads[] | select(.id == "t4") | .comments[].id]')" '["t4a"]'
 check "a member's text comes through as written, quotes included" \
@@ -49,10 +69,14 @@ check "every kept item has a url" \
   "$(out "$got" | jq '[.reviews[], .comments[], .threads[].comments[]] | all(.url != null)')" true
 check "convergence's fields come through: head, mergeable, review commits, thread comment ids" \
   "$(out "$got" | jq -c '[.head, .mergeable, (.reviews[] | .commit), (.threads[0].comments[0] | .databaseId)]')" \
-  '["abc","MERGEABLE","abc","abc",1]'
+  '["abc","MERGEABLE","abc","abc","abc",1]'
 check "outside items listed by link, resolved threads included" \
   "$(out "$got" | jq -c '[.withheld[] | "\(.kind):\(.url | ltrimstr("https://x/"))"]')" \
-  '["thread:t1b","thread:t3a","thread:t7a","thread:t8b","thread:t10a","thread-comment:t5b","thread-comment:t9b","review:r2","review:r5","review:r6","comment:c1","comment:c2","comment:c3","comment:c8","comment:c13"]'
+  '["thread:t1b","thread:t3a","thread:t7a","thread:t8b","thread:t10a","thread:t12a","thread-comment:t5b","thread-comment:t9b","review:r2","review:r5","review:r6","review:r8","comment:c1","comment:c2","comment:c3","comment:c8","comment:c13","comment:c15"]'
+check "later pages are read: inside items kept, outside items withheld" \
+  "$(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id | select(IN("r7", "c14", "t11"))],
+    [.withheld[].url | ltrimstr("https://x/") | select(IN("r8", "c15", "t12a"))]')" \
+  "$(printf '%s\n%s' '["r7","c14","t11"]' '["t12a","r8","c15"]')"
 check "a PR comment from a bot off the list is withheld, not dropped" \
   "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c3") | [.kind, .by]]')" '[["comment","bot"]]'
 check "a resolved thread too long to fetch whole is withheld whole, like an unresolved one" \
@@ -86,7 +110,7 @@ refuses "outside the company's orgs, a member's PR refuses" "$elsewhere"
 got=$(run "$elsewhere | $pr.author.login = \"me\"")
 check "outside the company's orgs, only the token's account and review bots come through" \
   "$(status "$got") $(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id]')" \
-  '0 ["r1","r3","c7","c10","t2","t4"]'
+  '0 ["r1","r3","r7","c7","c10","t2","t4","t11"]'
 check "outside the company's orgs, a member's text is withheld" \
   "$(out "$got" | jq -c '[.withheld[].url | ltrimstr("https://x/") | select(IN("c4", "c6", "t6a"))]')" \
   '["t6a","c4","c6"]'

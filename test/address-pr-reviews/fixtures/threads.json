@@ -5,7 +5,8 @@
         "pullRequest": {
           "reviewThreads": {
             "pageInfo": {
-              "hasNextPage": false
+              "hasNextPage": true,
+              "endCursor": "p1"
             },
             "nodes": [
               {
@@ -374,6 +375,77 @@
                       "databaseId": 1,
                       "path": "p",
                       "line": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "reviewThreads": {
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": "p2"
+            },
+            "nodes": [
+              {
+                "id": "t11",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t11a",
+                      "url": "https://x/t11a",
+                      "createdAt": "2026-01-02",
+                      "isMinimized": false,
+                      "body": "cop thread on page 2",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "Bot",
+                        "login": "copilot-pull-request-reviewer",
+                        "databaseId": 175728472
+                      },
+                      "databaseId": 2,
+                      "path": "p",
+                      "line": 2
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "t12",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t12a",
+                      "url": "https://x/t12a",
+                      "createdAt": "2026-01-02",
+                      "isMinimized": false,
+                      "body": "MARKER-OUTSIDE t12a on page 2",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "User",
+                        "login": "someone"
+                      },
+                      "databaseId": 2,
+                      "path": "p",
+                      "line": 2
                     }
                   ]
                 }
