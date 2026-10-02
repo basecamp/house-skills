@@ -52,7 +52,9 @@ check "convergence's fields come through: head, mergeable, review commits, threa
   '["abc","MERGEABLE","abc","abc",1]'
 check "outside items listed by link, resolved threads included" \
   "$(out "$got" | jq -c '[.withheld[] | "\(.kind):\(.url | ltrimstr("https://x/"))"]')" \
-  '["thread:t1b","thread:t3a","thread:t7a","thread:t8b","thread:t10a","thread-comment:t5b","thread-comment:t9b","review:r2","review:r5","review:r6","comment:c1","comment:c2","comment:c8","comment:c13"]'
+  '["thread:t1b","thread:t3a","thread:t7a","thread:t8b","thread:t10a","thread-comment:t5b","thread-comment:t9b","review:r2","review:r5","review:r6","comment:c1","comment:c2","comment:c3","comment:c8","comment:c13"]'
+check "a PR comment from a bot off the list is withheld, not dropped" \
+  "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c3") | [.kind, .by]]')" '[["comment","bot"]]'
 check "a resolved thread too long to fetch whole is withheld whole, like an unresolved one" \
   "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/t10a") | .kind]')" '["thread"]'
 check "an outside item hidden for any reason but Resolved stays withheld, and holds its thread" \

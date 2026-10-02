@@ -61,7 +61,6 @@ repo as $repo
           + [$threads[] | select(.isResolved and .whole) | .comments.nodes[]
               | select(pending) | link("thread-comment")]
           + [$reviews[] | select(.body != "" and pending) | link("review")]
-          # Bots off the list aren't reviewers; their PR comments are skipped.
-          + [$comments[] | select(person and pending) | link("comment")])
+          + [$comments[] | select(pending) | link("comment")])
       }
   end
