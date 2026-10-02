@@ -42,7 +42,7 @@ repo as $repo
   # what it read: that agent decides whether to apply it.
   elif $pr.labels.pageInfo.hasNextPage != false then
     {refused: "the PR has more labels than one page holds, so outside-text can't be ruled out", url: $pr.url}
-  elif any($pr.labels.nodes[]; .name == "outside-text") then
+  elif any($pr.labels.nodes[]; .name | ascii_downcase == "outside-text") then
     {refused: "the PR is labeled outside-text: it was written from outside text", url: $pr.url}
   else
     nodes($reviews; .reviews) as $reviews

@@ -257,7 +257,8 @@ unresolved threads, not who spoke last. Probe convergence by re-running
 unanswered review-body findings and every `withheld` entry count too.
 
 A reviewer listed in `requested` hasn't reported yet: wait for it (a Copilot
-pass in progress shows there). A reviewer has reported on the head when its
+pass in progress shows there). If `requested_complete` is false, the list ran
+past a page, so the PR isn't converged. A reviewer has reported on the head when its
 latest review's `commit` is `head`, or, for Codex, when the latest row of its summary comment reads
 Completed on a short sha that `head` starts with. Codex posts no review when it
 finds nothing: it updates that comment (the entry in `comments` from

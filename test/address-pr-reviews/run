@@ -116,6 +116,7 @@ refuses "a bot's PR refuses" "$pr.author = {__typename: \"Bot\", login: \"depend
 refuses "a head in someone else's fork refuses" "$pr.headRepositoryOwner = {login: \"someone\"}"
 refuses "a head whose fork is gone refuses" "$pr.headRepositoryOwner = null"
 refuses "a PR labeled outside-text refuses" "$pr.labels.nodes += [{name: \"outside-text\"}]"
+refuses "the label matches whatever its case" "$pr.labels.nodes += [{name: \"Outside-Text\"}]"
 got=$(FX_FAIL=1 run .)
 check "a failed fetch exits 3 and reads nothing" "$(status "$got") $(out "$got" | jq -c .)" \
   '3 {"refused":"the fetch failed, so nothing was read"}'
