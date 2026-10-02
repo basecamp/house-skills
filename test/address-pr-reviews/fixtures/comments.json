@@ -64,7 +64,8 @@
                 "author": {
                   "__typename": "User",
                   "login": "someone"
-                }
+                },
+                "minimizedReason": "resolved"
               },
               {
                 "id": "c6",
@@ -113,6 +114,19 @@
                 "author": {
                   "__typename": "User",
                   "login": "me"
+                }
+              },
+              {
+                "id": "c13",
+                "url": "https://x/c13",
+                "createdAt": "2026-01-01",
+                "isMinimized": true,
+                "minimizedReason": "spam",
+                "body": "MARKER-OUTSIDE comment hidden as spam",
+                "authorAssociation": "CONTRIBUTOR",
+                "author": {
+                  "__typename": "User",
+                  "login": "someone"
                 }
               }
             ]

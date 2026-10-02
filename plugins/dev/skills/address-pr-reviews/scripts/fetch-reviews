@@ -31,7 +31,7 @@ args=(-F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$number")
 vars='$owner: String!, $name: String!, $number: Int!'
 pr='repository(owner: $owner, name: $name) { pullRequest(number: $number)'
 who='authorAssociation author { __typename login ... on Bot { databaseId } }'
-item="id url createdAt isMinimized body $who"
+item="id url createdAt isMinimized minimizedReason body $who"
 
 gh api graphql "${args[@]}" -f query="query($vars) {
   viewer { login }

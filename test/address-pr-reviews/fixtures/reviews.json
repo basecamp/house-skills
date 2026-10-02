@@ -72,7 +72,8 @@
                 "state": "COMMENTED",
                 "commit": {
                   "oid": "abc"
-                }
+                },
+                "minimizedReason": "resolved"
               },
               {
                 "id": "r5",
@@ -85,6 +86,23 @@
                   "__typename": "Bot",
                   "login": "some-app",
                   "databaseId": 99
+                },
+                "state": "COMMENTED",
+                "commit": {
+                  "oid": "abc"
+                }
+              },
+              {
+                "id": "r6",
+                "url": "https://x/r6",
+                "createdAt": "2026-01-01",
+                "isMinimized": true,
+                "minimizedReason": "off-topic",
+                "body": "MARKER-OUTSIDE review hidden as off-topic",
+                "authorAssociation": "CONTRIBUTOR",
+                "author": {
+                  "__typename": "User",
+                  "login": "someone"
                 },
                 "state": "COMMENTED",
                 "commit": {

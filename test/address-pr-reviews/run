@@ -41,7 +41,7 @@ check "a member's PR is read" "$(status "$got")" 0
 check "no outside text reaches the output" "$(grep -c MARKER-OUTSIDE <<<"$got" || true)" 0
 check "inside items kept" "$(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id]')" \
   '["r1","r3","c4","c6","c7","c10","t2","t4"]'
-check "an outside comment a person hid is dropped from its thread" \
+check "an outside comment a person hid as Resolved is dropped from its thread" \
   "$(out "$got" | jq -c '[.threads[] | select(.id == "t4") | .comments[].id]')" '["t4a"]'
 check "a member's text comes through as written, quotes included" \
   "$(out "$got" | jq -c '.comments[] | select(.id == "c6") | .body')" '"> a member quoting the PR\n\nthanks, will fix"'
@@ -52,7 +52,10 @@ check "convergence's fields come through: head, mergeable, review commits, threa
   '["abc","MERGEABLE","abc","abc",1]'
 check "outside items listed by link, resolved threads included" \
   "$(out "$got" | jq -c '[.withheld[] | "\(.kind):\(.url | ltrimstr("https://x/"))"]')" \
-  '["thread:t1b","thread:t3a","thread:t7a","thread-comment:t5b","review:r2","review:r5","comment:c1","comment:c2","comment:c8"]'
+  '["thread:t1b","thread:t3a","thread:t7a","thread:t8b","thread-comment:t5b","thread-comment:t9b","review:r2","review:r5","review:r6","comment:c1","comment:c2","comment:c8","comment:c13"]'
+check "an outside item hidden for any reason but Resolved stays withheld, and holds its thread" \
+  "$(out "$got" | jq -c '[.withheld[].url | ltrimstr("https://x/") | select(IN("t8b", "t9b", "r6", "c13"))], [.threads[].id | select(. == "t8")]')" \
+  "$(printf '%s\n%s' '["t8b","t9b","r6","c13"]' '[]')"
 
 refuses() {
   got=$(run "$2")

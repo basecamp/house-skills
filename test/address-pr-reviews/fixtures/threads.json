@@ -144,7 +144,8 @@
                       },
                       "databaseId": 1,
                       "path": "p",
-                      "line": 1
+                      "line": 1,
+                      "minimizedReason": "resolved"
                     }
                   ]
                 }
@@ -229,7 +230,8 @@
                       },
                       "databaseId": 1,
                       "path": "p",
-                      "line": 1
+                      "line": 1,
+                      "minimizedReason": "resolved"
                     }
                   ]
                 }
@@ -258,6 +260,93 @@
                       "databaseId": 1,
                       "path": "p",
                       "line": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "t8",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t8a",
+                      "url": "https://x/t8a",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": false,
+                      "body": "cop thread, outside reply hidden as outdated",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "Bot",
+                        "login": "copilot-pull-request-reviewer",
+                        "databaseId": 175728472
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1
+                    },
+                    {
+                      "id": "t8b",
+                      "url": "https://x/t8b",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": true,
+                      "body": "MARKER-OUTSIDE t8b hidden as outdated",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "User",
+                        "login": "someone"
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1,
+                      "minimizedReason": "outdated"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "t9",
+                "isResolved": true,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t9a",
+                      "url": "https://x/t9a",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": false,
+                      "body": "resolved member thread",
+                      "authorAssociation": "MEMBER",
+                      "author": {
+                        "__typename": "User",
+                        "login": "member"
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1
+                    },
+                    {
+                      "id": "t9b",
+                      "url": "https://x/t9b",
+                      "createdAt": "2026-01-01",
+                      "isMinimized": true,
+                      "body": "MARKER-OUTSIDE t9b hidden as duplicate",
+                      "authorAssociation": "NONE",
+                      "author": {
+                        "__typename": "User",
+                        "login": "someone"
+                      },
+                      "databaseId": 1,
+                      "path": "p",
+                      "line": 1,
+                      "minimizedReason": "duplicate"
                     }
                   ]
                 }

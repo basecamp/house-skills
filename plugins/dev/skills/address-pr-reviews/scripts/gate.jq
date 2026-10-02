@@ -15,7 +15,11 @@ def member: .author.__typename == "User"
   and ((in_company and (.authorAssociation | IN("OWNER", "MEMBER"))) or .author.login == viewer);
 def bot: .author.__typename == "Bot" and (.author.databaseId | IN(bots[]));
 def inside: member or bot;
-def shown: .isMinimized | not;
+# A person clears an outside item by hiding it as Resolved once they've read
+# it. Hidden for any other reason (spam, off-topic, outdated, duplicate, abuse),
+# it's still unread as far as anyone knows, so it stays withheld.
+def cleared: .isMinimized and ((.minimizedReason // "") | ascii_downcase) == "resolved";
+def pending: (inside or cleared) | not;
 def nodes($pages; f): [$pages[0][].data.repository.pullRequest | f | .nodes[]];
 def link($kind): {kind: $kind, url, by: (if person then "person" else "bot" end), association: .authorAssociation};
 def keep: {id, url, login: .author.login, body};
@@ -36,11 +40,11 @@ repo as $repo
     nodes($reviews; .reviews) as $reviews
     | nodes($comments; .comments) as $comments
     | nodes($threads; .reviewThreads) as $threads
-    # A thread comes through only when all of it was fetched and every comment in
-    # it that is still shown is inside. An outside comment a person hid is dropped.
+    # A thread comes through only when all of it was fetched and every outside
+    # comment in it has been cleared. A cleared outside comment is dropped.
     | [$threads[] | select(.isResolved | not)
         | . + {readable: ((.comments.pageInfo.hasNextPage | not)
-            and all(.comments.nodes[]; inside or (shown | not)))}] as $open
+            and (any(.comments.nodes[]; pending) | not))}] as $open
     | {
         url: $pr.url,
         head: $pr.headRefOid,
@@ -49,15 +53,15 @@ repo as $repo
         comments: [$comments[] | select(inside) | keep],
         threads: [$open[] | select(.readable) | {id, isOutdated,
           comments: [.comments.nodes[] | select(inside) | keep + {databaseId, path, line}]}],
-        # Each outside item stays listed until a person hides it, resolved threads
+        # Each outside item stays listed until a person clears it, resolved threads
         # included, so nothing outside merges unread.
         withheld: (
           [$open[] | select(.readable | not)
-            | ([.comments.nodes[] | select(shown and (inside | not))] + .comments.nodes)[0] | link("thread")]
+            | ([.comments.nodes[] | select(pending)] + .comments.nodes)[0] | link("thread")]
           + [$threads[] | select(.isResolved) | .comments.nodes[]
-              | select(shown and (inside | not)) | link("thread-comment")]
-          + [$reviews[] | select(.body != "" and shown and (inside | not)) | link("review")]
+              | select(pending) | link("thread-comment")]
+          + [$reviews[] | select(.body != "" and pending) | link("review")]
           # Bots off the list aren't reviewers; their PR comments are skipped.
-          + [$comments[] | select(person and shown and (inside | not)) | link("comment")])
+          + [$comments[] | select(person and pending) | link("comment")])
       }
   end
