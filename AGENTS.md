@@ -58,8 +58,10 @@ as above. On a repo in one of the company's GitHub orgs, its people are those th
 calls OWNER or MEMBER; on any other repo, only the token's own account. Everyone else's
 text (CONTRIBUTOR included), and a bot's that isn't one of the reviewers, doesn't reach
 an agent that can write: a script withholds it and lists it for a person, as
-address-pr-reviews' `scripts/fetch-reviews` does. Text derived from it counts the same,
-as above: label a PR an agent wrote from it `outside-text`, which fetch-reviews refuses
-until a person reads the diff and removes it. The label catches a lane that forgot it.
-It can't stop an agent steered by what it read, since that agent decides whether to
-apply it.
+address-pr-reviews' `scripts/fetch-reviews` does. A member's comment comes through
+whole, quotes included (less invisible Unicode tag characters), because what a member
+quotes is theirs to answer for. Text an agent derived from outside text stays
+untrusted, as above: label a PR an agent wrote from it `outside-text`, which
+fetch-reviews refuses until a person reads the diff and removes it. The label catches
+a lane that forgot it. It can't stop an agent steered by what it read, since that agent
+decides whether to apply it.
