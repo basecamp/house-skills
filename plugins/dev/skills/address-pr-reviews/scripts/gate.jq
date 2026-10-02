@@ -41,7 +41,8 @@ repo as $repo
     | nodes($comments; .comments) as $comments
     # A thread comes through only when all of it was fetched and every outside
     # comment in it has been cleared. A cleared outside comment is dropped.
-    | [nodes($threads; .reviewThreads)[] | . + {whole: (.comments.pageInfo.hasNextPage | not)}
+    # Whole only on an explicit false: a missing pageInfo withholds.
+    | [nodes($threads; .reviewThreads)[] | . + {whole: (.comments.pageInfo.hasNextPage == false)}
         | . + {readable: (.whole and (any(.comments.nodes[]; pending) | not))}] as $threads
     | {
         url: $pr.url,

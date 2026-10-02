@@ -13,7 +13,10 @@ cat > "$tmp/bin/gh" <<'EOF'
 # Answers only GraphQL; anything else is a fetch the skill shouldn't make. A
 # fixture is the pages gh would fetch, in order. Like gh, the stub returns every
 # page with --paginate, as one array with --slurp too, and only the first page
-# without --paginate. Each field a fixture holds must be asked for in the query.
+# without --paginate. Each field a fixture holds must be named somewhere in the
+# query: the check is by name over the whole query, so a field asked for in one
+# selection passes for another. A fixture with a field left out stands in for
+# what gh returns when one selection drops it.
 [ "${1:-} ${2:-}" = "api graphql" ] || { echo "stub gh: not a GraphQL call: $*" >&2; exit 1; }
 [ -z "${FX_FAIL:-}" ] || { echo "stub gh: simulated failure" >&2; exit 1; }
 paginate='' slurp='' query=''
@@ -72,7 +75,7 @@ check "convergence's fields come through: head, mergeable, review commits, threa
   '["abc","MERGEABLE","abc","abc","abc",1]'
 check "outside items listed by link, resolved threads included" \
   "$(out "$got" | jq -c '[.withheld[] | "\(.kind):\(.url | ltrimstr("https://x/"))"]')" \
-  '["thread:t1b","thread:t3a","thread:t7a","thread:t8b","thread:t10a","thread:t12a","thread-comment:t5b","thread-comment:t9b","review:r2","review:r5","review:r6","review:r8","comment:c1","comment:c2","comment:c3","comment:c8","comment:c13","comment:c15"]'
+  '["thread:t1b","thread:t3a","thread:t7a","thread:t8b","thread:t10a","thread:t12a","thread:t13a","thread-comment:t5b","thread-comment:t9b","review:r2","review:r5","review:r6","review:r8","comment:c1","comment:c2","comment:c3","comment:c8","comment:c13","comment:c15"]'
 check "later pages are read: inside items kept, outside items withheld" \
   "$(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id | select(IN("r7", "c14", "t11"))],
     [.withheld[].url | ltrimstr("https://x/") | select(IN("r8", "c15", "t12a"))]')" \
@@ -84,6 +87,10 @@ check "a resolved thread too long to fetch whole is withheld whole, like an unre
 check "an outside item hidden for any reason but Resolved stays withheld, and holds its thread" \
   "$(out "$got" | jq -c '[.withheld[].url | ltrimstr("https://x/") | select(IN("t8b", "t9b", "r6", "c13"))], [.threads[].id | select(. == "t8")]')" \
   "$(printf '%s\n%s' '["t8b","t9b","r6","c13"]' '[]')"
+
+check "a thread whose comments came back with no pageInfo is withheld whole, not read" \
+  "$(out "$got" | jq -c '[.threads[].id | select(. == "t13")], [.withheld[] | select(.url == "https://x/t13a") | .kind]')" \
+  "$(printf '%s\n%s' '[]' '["thread"]')"
 
 refuses() {
   got=$(run "$2")

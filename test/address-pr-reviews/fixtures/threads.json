@@ -449,6 +449,31 @@
                     }
                   ]
                 }
+              },
+              {
+                "id": "t13",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "nodes": [
+                    {
+                      "id": "t13a",
+                      "url": "https://x/t13a",
+                      "createdAt": "2026-01-02",
+                      "isMinimized": false,
+                      "body": "cop thread with no pageInfo",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "Bot",
+                        "login": "copilot-pull-request-reviewer",
+                        "databaseId": 175728472
+                      },
+                      "databaseId": 3,
+                      "path": "p",
+                      "line": 3
+                    }
+                  ]
+                }
               }
             ]
           }
