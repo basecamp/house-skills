@@ -1,0 +1,60 @@
+{
+  "data": {
+    "viewer": {
+      "login": "me"
+    },
+    "repository": {
+      "owner": {
+        "__typename": "Organization",
+        "login": "basecamp",
+        "viewerIsAMember": true
+      },
+      "pullRequest": {
+        "url": "https://x/pr",
+        "headRefOid": "abc",
+        "mergeable": "MERGEABLE",
+        "headRepositoryOwner": {
+          "login": "basecamp"
+        },
+        "labels": {
+          "nodes": [
+            {
+              "name": "bug"
+            }
+          ],
+          "pageInfo": {
+            "hasNextPage": false
+          }
+        },
+        "authorAssociation": "MEMBER",
+        "author": {
+          "__typename": "User",
+          "login": "member"
+        },
+        "reviewRequests": {
+          "pageInfo": {
+            "hasNextPage": false
+          },
+          "nodes": [
+            {
+              "requestedReviewer": {
+                "__typename": "Bot",
+                "login": "copilot-pull-request-reviewer",
+                "databaseId": 175728472
+              }
+            }
+          ]
+        },
+        "reviews": {
+          "totalCount": 7
+        },
+        "comments": {
+          "totalCount": 17
+        },
+        "reviewThreads": {
+          "totalCount": 13
+        }
+      }
+    }
+  }
+}

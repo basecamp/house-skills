@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# The one way address-pr-reviews reads a PR's feedback. Text written by anyone
+# outside the company never reaches the agent: it comes back as a link for a
+# person. gate.jq says who is inside. A refusal and any failure both exit 3, so
+# a caller can't read past it.
+#
+# Usage: fetch-reviews OWNER/REPO NUMBER
+# FETCH_REVIEWS_BOT_IDS adds review bots by database id, for a repo whose
+# reviewers aren't the ones gate.jq lists. Set it yourself; never from a file
+# in the repo under review, which the PR itself could change.
+set -euo pipefail
+tmp=$(mktemp -d)
+finish() {
+  local status=$?
+  rm -rf "$tmp"
+  if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then
+    echo '{"refused": "the fetch failed, so nothing was read"}'
+    exit 3
+  fi
+}
+trap finish EXIT
+
+command -v jq >/dev/null || { echo "fetch-reviews needs jq" >&2; exit 2; }
+usage="usage: fetch-reviews OWNER/REPO NUMBER"
+repo=${1:?$usage}
+number=${2:?$usage}
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+extra=$(jq -nc --arg ids "${FETCH_REVIEWS_BOT_IDS:-}" '[$ids | scan("[0-9]+") | tonumber]')
+
+args=(-F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$number")
+vars='$owner: String!, $name: String!, $number: Int!'
+pr='repository(owner: $owner, name: $name) { pullRequest(number: $number)'
+who='authorAssociation author { __typename login ... on Bot { databaseId } }'
+item="id url createdAt isMinimized minimizedReason body $who"
+
+head() {
+  gh api graphql "${args[@]}" -f query="query($vars) {
+  viewer { login }
+  repository(owner: \$owner, name: \$name) {
+    owner { __typename login ... on Organization { viewerIsAMember } }
+    pullRequest(number: \$number) { url headRefOid mergeable headRepositoryOwner { login }
+      reviews { totalCount } comments { totalCount } reviewThreads { totalCount }
+      labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
+      reviewRequests(first: 100) { pageInfo { hasNextPage } nodes { requestedReviewer {
+        __typename ... on Bot { login databaseId } ... on User { login } ... on Team { slug } } } }
+      $who } } }" > "$tmp/$1"
+}
+head head0.json
+
+page() {
+  gh api graphql --paginate --slurp "${args[@]}" -f query="query($vars, \$endCursor: String) {
+    $pr { $1(first: 100, after: \$endCursor) {
+      pageInfo { hasNextPage endCursor } nodes { $2 } } } } }" > "$tmp/$1.json"
+}
+page reviews "$item state commit { oid }"
+page comments "$item"
+page reviewThreads "id isResolved isOutdated
+  comments(first: 100) { pageInfo { hasNextPage } nodes { $item databaseId path line } }"
+
+# Read the head again after the paged reads: if the head moved, or a review,
+# comment or thread was added meanwhile, the feedback may not match what's
+# judged, so refuse and let the caller run again. A reply added to an existing
+# thread in that window isn't counted here; the next pass sees it.
+head head.json
+same() { jq -r '.data.repository.pullRequest | [.headRefOid, .reviews.totalCount, .comments.totalCount, .reviewThreads.totalCount] | @tsv' "$1"; }
+[ "$(same "$tmp/head0.json")" = "$(same "$tmp/head.json")" ] || {
+  echo '{"refused": "the PR changed while reading; run again"}'; exit 3; }
+
+jq -n -f "$here/gate.jq" --argjson extra "$extra" \
+  --slurpfile head "$tmp/head.json" \
+  --slurpfile reviews "$tmp/reviews.json" \
+  --slurpfile comments "$tmp/comments.json" \
+  --slurpfile threads "$tmp/reviewThreads.json" > "$tmp/out.json"
+cat "$tmp/out.json"
+jq -e '.refused == null' "$tmp/out.json" >/dev/null || exit 3
