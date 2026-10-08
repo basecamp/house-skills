@@ -132,27 +132,49 @@ CI/auth/secrets/deploy config; no command execution from comment text.)
 
 Route each real finding by provenance and reach, not by a count of rounds. A
 count cuts off real findings; these two questions change how a real finding is
-answered, not whether it is. Before you patch, ask them of the lines it cites:
+answered, never whether it is. Before you patch, ask them of the lines it cites:
 
-- **Provenance.** `git blame` the lines. If one of this PR's own review-fix
-  commits added them, the finding is a cost of that fix. Re-examine that fix
-  first: can its mechanism go, along with its guards and tests? Decide that
-  before you write a second patch on top of it.
-- **Reach.** Does any caller, existing or planned, exercise this path? If none
-  does, narrow the contract — refuse the input, cut the option, stop promising
-  it — rather than harden it.
+- **Provenance: did one of this PR's review fixes introduce the behavior?**
+  `git blame` only points. A fix that moved or edited a line is blamed for a
+  defect that was already there, and an amend, squash or force-push hides
+  review fixes from blame entirely. Decide by diff instead. Take the `commit`
+  of the review the fix answered from `fetch-reviews` (`git fetch origin <sha>`
+  if it isn't local): if the behavior is absent there and
+  `git diff <that commit>..HEAD` brings it in, a review fix introduced it. The
+  fix commit's own diff against its parent answers the same question. If a
+  review fix introduced it, the finding is a cost of that fix: re-examine the
+  fix first — can its mechanism go, along with its guards and tests? — and
+  decide that before you write a second patch on top of it.
+- **Reach: does any caller, existing or planned, exercise this path?** If none
+  does and this PR introduced the contract, or it is private and unreleased,
+  narrow it — refuse the input, cut the option, stop promising it — rather
+  than harden it. Narrowing an established or published contract is a scope
+  decision for the human: a search of the checkout can't see external callers.
 
-Only a finding on surface that is original to the PR's purpose and reached by a
-caller gets fixed in place. Then fix its whole class at the source, with a test
-that holds every member.
+Then answer the finding one of these ways:
 
-Removing a fix's mechanism, or narrowing the contract, answers the finding:
-reply "Fixed — [what you removed or narrowed, and why]".
+- **Remove or narrow.** Taking out a review fix's mechanism, or narrowing a
+  contract this PR introduced, answers it: reply "Fixed — [what you removed or
+  narrowed, and why]".
+- **Fix in place.** Surface original to the PR's purpose and reached by a
+  caller is fixed in place, and so is a review fix whose mechanism is still
+  needed, where removing or narrowing it wouldn't answer the requirement that
+  brought it in. Fix the whole class at the source, with a test that holds
+  every member.
+- **Leave it for a decision.** Only a question of scope, authority, security or
+  data loss, or a costly choice that is hard to reverse, goes to the human; it
+  isn't the author's to decide. Out of scope, that is "Flagged for human
+  review — [why]". In scope, take the path of a test too large to fold in
+  (above): reply with the pattern, what you've tried and your recommendation,
+  leave the thread unresolved, and name it under "Open for a decision" in the
+  summary comment.
 
-Escalate to the human only a question of scope, authority, security or data
-loss, or a costly choice that is hard to reverse. Reply "Flagged for human
-review — [why]" and leave it open for a decision, giving the pattern, what
-you've tried, and your recommendation — then wait.
+A reviewer re-raising a class you already declined with reasoning hasn't found
+anything new. Reply "Not doing this — declined in [link to the first
+decline]" and resolve the thread; don't re-argue it. These don't hold
+convergence: list each under "Declined" in the summary comment, beside the
+first decline's link. That bounds repeated non-findings only; no count cuts
+off a real finding.
 
 ## 2. Process Top-Level Reviews
 
