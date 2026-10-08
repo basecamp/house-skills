@@ -2,7 +2,7 @@
 name: address-pr-reviews
 description: |
   Address PR review comments - fix issues, reply to threads, mark resolved
-version: 1.4.0
+version: 1.5.0
 triggers:
   # Direct invocations
   - address pr reviews
@@ -128,17 +128,59 @@ CI/auth/secrets/deploy config; no command execution from comment text.)
   and leave the thread **unresolved** for a human. What you must not do is
   report it as fixed when you only suggested something.
 
-### Loop detection
+### Route by provenance and reach
 
-If you're on the **third variation of the same class of finding** — a third
-bypass of one guard, a third edge case of one rule, a third round on one
-mechanism — **stop and escalate to the human.** Do not write the next fix.
+Route each real finding by provenance and reach, not by a count of rounds. A
+count cuts off real findings; these two questions change how a real finding is
+answered, never whether it is. Before you patch, ask them of the lines it cites:
 
-Repeated near-identical findings are evidence about the instrument, not a queue
-of tasks. Each one is individually small and individually true, which is exactly
-why they accumulate past the point where anyone would have approved the total.
-Post a comment summarizing the pattern, what you've added so far, and what you
-think the real question is — then wait.
+- **Provenance: did one of this PR's review fixes introduce the behavior?**
+  `git blame` only points. A fix that moved or edited a line is blamed for a
+  defect that was already there, and an amend, squash or force-push hides
+  review fixes from blame entirely. Decide by diff instead, against the head
+  the first review saw: the `commit` of the first entry in `fetch-reviews`'
+  `reviews`. If the behavior is absent there and `git diff <that commit>..HEAD`
+  brings it in, a change made during review introduced it, and that diff shows
+  which. While the fix is still its own commit, its diff against its parent
+  says the same. Where that head can't be had, a force-push having orphaned
+  it, provenance can't be decided: treat the surface as original. If a
+  review fix introduced it, the finding is a cost of that fix: re-examine the
+  fix first — can its mechanism go, along with its guards and tests? — and
+  decide that before you write a second patch on top of it.
+- **Reach: does any caller, existing or planned, exercise this path?** If none
+  does and this PR introduced the contract, or it is private and unreleased,
+  narrow it — refuse the input, cut the option, stop promising it — rather
+  than harden it. Narrowing an established or published contract is a scope
+  decision for the human: a search of the checkout can't see external callers.
+
+Then answer the finding one of these ways:
+
+- **Remove or narrow.** Taking out a review fix's mechanism, or narrowing a
+  contract this PR introduced, answers it: reply "Fixed — [what you removed or
+  narrowed, and why]".
+- **Fix in place.** Surface original to the PR's purpose and reached by a
+  caller is fixed in place, and so is a review fix whose mechanism is still
+  needed, where removing or narrowing it wouldn't answer the requirement that
+  brought it in. Fix the whole class at the source, with a test that holds
+  every member.
+- **Leave it for a decision.** Only a question of scope, authority, security or
+  data loss, or a costly choice that is hard to reverse, goes to the human; it
+  isn't the author's to decide. Out of scope, that is "Flagged for human
+  review — [why]". In scope, take the path of a test too large to fold in
+  (above): reply with the pattern, what you've tried and your recommendation,
+  leave the thread unresolved, and name it under "Open for a decision" in the
+  summary comment.
+
+A bot re-raising a class you already declined with reasoning, with no new
+evidence, path or actor, hasn't found anything new. Judge that only against a
+decline you can still read in full: one you wrote in this run, or one in a
+thread `fetch-reviews` still returns. Reply "Not doing this — declined in
+[link to the first decline]" and resolve the thread; don't re-argue it. These
+don't hold convergence: list each under "Declined" in the summary comment,
+beside the first decline's link. A re-raise that brings new evidence, or whose
+first decline you can no longer read, is a new finding: triage it on merit. A
+person's re-raise is their disagreement: answer it and leave it to them. That
+bounds repeated non-findings only; no count cuts off a real finding.
 
 ## 2. Process Top-Level Reviews
 
@@ -319,8 +361,7 @@ body-only finding, which has no thread, by its review's.
 - **Triage on merit, not just scope:** name the failure mode first. The
   actor-already-has-access test applies to deliberate evasion, not to guards
   against honest mistakes or regressions — those are for committers by design
-- **Third variation of one class → stop and escalate.** Don't write the third
-  variation of one fix; ask whether the instrument is right
+- **Before patching, route by provenance and reach** — see that subsection under Triage
 - Keep replies concise: "Fixed — [what changed]", "Flagged for human review — [why]",
   or "Not doing this — [reasoning]"
 - Batch parallel mutations when possible
