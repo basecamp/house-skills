@@ -139,10 +139,11 @@ answered, never whether it is. Before you patch, ask them of the lines it cites:
   defect that was already there, and an amend, squash or force-push hides
   review fixes from blame entirely. Decide by diff instead, against the head
   the first review saw: the `commit` of the first entry in `fetch-reviews`'
-  `reviews` (`git fetch origin <sha>` if it isn't local). If the behavior is
-  absent there and `git diff <that commit>..HEAD` brings it in, a change made
-  during review introduced it, and that diff shows which. While the fix is
-  still its own commit, its diff against its parent says the same. If a
+  `reviews`. If the behavior is absent there and `git diff <that commit>..HEAD`
+  brings it in, a change made during review introduced it, and that diff shows
+  which. While the fix is still its own commit, its diff against its parent
+  says the same. Where that head can't be had, a force-push having orphaned
+  it, provenance can't be decided: treat the surface as original. If a
   review fix introduced it, the finding is a cost of that fix: re-examine the
   fix first — can its mechanism go, along with its guards and tests? — and
   decide that before you write a second patch on top of it.
