@@ -137,11 +137,12 @@ answered, never whether it is. Before you patch, ask them of the lines it cites:
 - **Provenance: did one of this PR's review fixes introduce the behavior?**
   `git blame` only points. A fix that moved or edited a line is blamed for a
   defect that was already there, and an amend, squash or force-push hides
-  review fixes from blame entirely. Decide by diff instead. Take the `commit`
-  of the review the fix answered from `fetch-reviews` (`git fetch origin <sha>`
-  if it isn't local): if the behavior is absent there and
-  `git diff <that commit>..HEAD` brings it in, a review fix introduced it. The
-  fix commit's own diff against its parent answers the same question. If a
+  review fixes from blame entirely. Decide by diff instead, against the head
+  the first review saw: the `commit` of the first entry in `fetch-reviews`'
+  `reviews` (`git fetch origin <sha>` if it isn't local). If the behavior is
+  absent there and `git diff <that commit>..HEAD` brings it in, a change made
+  during review introduced it, and that diff shows which. While the fix is
+  still its own commit, its diff against its parent says the same. If a
   review fix introduced it, the finding is a cost of that fix: re-examine the
   fix first — can its mechanism go, along with its guards and tests? — and
   decide that before you write a second patch on top of it.
@@ -170,13 +171,15 @@ Then answer the finding one of these ways:
   summary comment.
 
 A bot re-raising a class you already declined with reasoning, with no new
-evidence, path or actor, hasn't found anything new. Reply "Not doing this —
-declined in [link to the first decline]" and resolve the thread; don't re-argue
-it. These don't hold convergence: list each under "Declined" in the summary
-comment, beside the first decline's link. A re-raise that brings new evidence is
-a new finding: triage it on merit. A person's re-raise is their disagreement:
-answer it and leave it to them. That bounds repeated non-findings only; no
-count cuts off a real finding.
+evidence, path or actor, hasn't found anything new. Judge that only against a
+decline you can still read in full: one you wrote in this run, or one in a
+thread `fetch-reviews` still returns. Reply "Not doing this — declined in
+[link to the first decline]" and resolve the thread; don't re-argue it. These
+don't hold convergence: list each under "Declined" in the summary comment,
+beside the first decline's link. A re-raise that brings new evidence, or whose
+first decline you can no longer read, is a new finding: triage it on merit. A
+person's re-raise is their disagreement: answer it and leave it to them. That
+bounds repeated non-findings only; no count cuts off a real finding.
 
 ## 2. Process Top-Level Reviews
 
