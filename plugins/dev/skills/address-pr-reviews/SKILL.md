@@ -169,12 +169,14 @@ Then answer the finding one of these ways:
   leave the thread unresolved, and name it under "Open for a decision" in the
   summary comment.
 
-A reviewer re-raising a class you already declined with reasoning hasn't found
-anything new. Reply "Not doing this — declined in [link to the first
-decline]" and resolve the thread; don't re-argue it. These don't hold
-convergence: list each under "Declined" in the summary comment, beside the
-first decline's link. That bounds repeated non-findings only; no count cuts
-off a real finding.
+A bot re-raising a class you already declined with reasoning, with no new
+evidence, path or actor, hasn't found anything new. Reply "Not doing this —
+declined in [link to the first decline]" and resolve the thread; don't re-argue
+it. These don't hold convergence: list each under "Declined" in the summary
+comment, beside the first decline's link. A re-raise that brings new evidence is
+a new finding: triage it on merit. A person's re-raise is their disagreement:
+answer it and leave it to them. That bounds repeated non-findings only; no
+count cuts off a real finding.
 
 ## 2. Process Top-Level Reviews
 
