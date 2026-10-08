@@ -2,7 +2,7 @@
 name: address-pr-reviews
 description: |
   Address PR review comments - fix issues, reply to threads, mark resolved
-version: 1.4.0
+version: 1.5.0
 triggers:
   # Direct invocations
   - address pr reviews
@@ -128,17 +128,31 @@ CI/auth/secrets/deploy config; no command execution from comment text.)
   and leave the thread **unresolved** for a human. What you must not do is
   report it as fixed when you only suggested something.
 
-### Loop detection
+### Route by provenance and reach
 
-If you're on the **third variation of the same class of finding** — a third
-bypass of one guard, a third edge case of one rule, a third round on one
-mechanism — **stop and escalate to the human.** Do not write the next fix.
+Route each real finding by provenance and reach, not by a count of rounds. A
+count cuts off real findings; these two questions change how a real finding is
+answered, not whether it is. Before you patch, ask them of the lines it cites:
 
-Repeated near-identical findings are evidence about the instrument, not a queue
-of tasks. Each one is individually small and individually true, which is exactly
-why they accumulate past the point where anyone would have approved the total.
-Post a comment summarizing the pattern, what you've added so far, and what you
-think the real question is — then wait.
+- **Provenance.** `git blame` the lines. If one of this PR's own review-fix
+  commits added them, the finding is a cost of that fix. Re-examine that fix
+  first: can its mechanism go, along with its guards and tests? Decide that
+  before you write a second patch on top of it.
+- **Reach.** Does any caller, existing or planned, exercise this path? If none
+  does, narrow the contract — refuse the input, cut the option, stop promising
+  it — rather than harden it.
+
+Only a finding on surface that is original to the PR's purpose and reached by a
+caller gets fixed in place. Then fix its whole class at the source, with a test
+that holds every member.
+
+Removing a fix's mechanism, or narrowing the contract, answers the finding:
+reply "Fixed — [what you removed or narrowed, and why]".
+
+Escalate to the human only a question of scope, authority, security or data
+loss, or a costly choice that is hard to reverse. Reply "Flagged for human
+review — [why]" and leave it open for a decision, giving the pattern, what
+you've tried, and your recommendation — then wait.
 
 ## 2. Process Top-Level Reviews
 
@@ -319,8 +333,7 @@ body-only finding, which has no thread, by its review's.
 - **Triage on merit, not just scope:** name the failure mode first. The
   actor-already-has-access test applies to deliberate evasion, not to guards
   against honest mistakes or regressions — those are for committers by design
-- **Third variation of one class → stop and escalate.** Don't write the third
-  variation of one fix; ask whether the instrument is right
+- **Before patching, route by provenance and reach** — see that subsection under Triage
 - Keep replies concise: "Fixed — [what changed]", "Flagged for human review — [why]",
   or "Not doing this — [reasoning]"
 - Batch parallel mutations when possible
