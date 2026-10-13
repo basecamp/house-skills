@@ -137,16 +137,26 @@ answered, never whether it is. Before you patch, ask them of the lines it cites:
 - **Provenance: did one of this PR's review fixes introduce the behavior?**
   `git blame` only points. A fix that moved or edited a line is blamed for a
   defect that was already there, and an amend, squash or force-push hides
-  review fixes from blame entirely. Decide by diff instead, against the head
-  the first review saw: the `commit` of the first entry in `fetch-reviews`'
-  `reviews`. If the behavior is absent there and `git diff <that commit>..HEAD`
-  brings it in, a change made during review introduced it, and that diff shows
-  which. While the fix is still its own commit, its diff against its parent
-  says the same. Where that head can't be had, a force-push having orphaned
-  it, provenance can't be decided: treat the surface as original. If a
-  review fix introduced it, the finding is a cost of that fix: re-examine the
-  fix first — can its mechanism go, along with its guards and tests? — and
-  decide that before you write a second patch on top of it.
+  review fixes from blame entirely. Decide by diff instead, against the
+  earliest head a reviewer reported on: the `commit` of the first entry in
+  `fetch-reviews`' `reviews`, or, with no reviews, the head in the first
+  Completed row of Codex's summary comment (it shows only Codex's latest
+  pass, so that head may be later than the first, which errs toward
+  original). Compare the PR's own patch then and now,
+  `git diff <base>...<that head>` against `git diff <base>...HEAD`, with
+  `<base>` the base branch: three dots diff each head against its merge
+  base, so what a rebase or merge brought in from the base doesn't count as
+  the PR's. Behavior absent from the first patch and present in the second
+  came in during review, but coming later doesn't make it a review fix's: it
+  is one only if a commit answering a finding brought it in, the commit a
+  "Fixed —" reply names (name it in yours), as that commit's diff against its
+  parent shows. Other work pushed after the first review is original. Where
+  a head or that commit can't be had, a force-push having orphaned it, or no
+  reply you can read names one, provenance can't be decided: treat the
+  surface as original. If a review fix introduced it, the finding is a cost
+  of that fix: re-examine the fix first — can its mechanism go, along with
+  its guards and tests? — and decide that before you write a second patch on
+  top of it.
 - **Reach: does any caller, existing or planned, exercise this path?** If none
   does and this PR introduced the contract, or it is private and unreleased,
   narrow it — refuse the input, cut the option, stop promising it — rather
@@ -169,7 +179,9 @@ Then answer the finding one of these ways:
   review — [why]". In scope, take the path of a test too large to fold in
   (above): reply with the pattern, what you've tried and your recommendation,
   leave the thread unresolved, and name it under "Open for a decision" in the
-  summary comment.
+  summary comment. A finding from a review body or a PR comment has no thread
+  to leave open: give that reply as a PR comment, and its line under "Open for
+  a decision" is what keeps it open.
 
 A bot re-raising a class you already declined with reasoning, with no new
 evidence, path or actor, hasn't found anything new. Judge that only against a
