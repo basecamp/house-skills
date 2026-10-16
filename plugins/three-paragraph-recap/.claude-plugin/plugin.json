@@ -1,0 +1,12 @@
+{
+  "name": "three-paragraph-recap",
+  "version": "0.1.0",
+  "description": "Three paragraphs for one reader who has to decide — an agent that composes them and a contract that refuses the ones that miss",
+  "author": {
+    "name": "37signals",
+    "email": "support@37signals.com"
+  },
+  "homepage": "https://github.com/basecamp/house-skills",
+  "repository": "https://github.com/basecamp/house-skills",
+  "license": "MIT"
+}
