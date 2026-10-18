@@ -110,7 +110,7 @@ check "a PR comment from a bot off the list is withheld, not dropped" \
 check "a withheld thread or review holds convergence; a withheld plain comment, or a comment in a resolved thread, doesn't" \
   "$(out "$got" | jq -c '[.withheld[] | select(IN(.url; "https://x/t7a", "https://x/t5b", "https://x/r5", "https://x/c20")) | [.kind, .holds]]')" \
   '[["thread",true],["thread-comment",false],["review",true],["comment",false]]'
-check "on a company repo, github-actions[bot]'s note comes through as a bot's comment" \
+check "on a private company repo, github-actions[bot]'s note comes through as a bot's comment" \
   "$(out "$got" | jq -c '[.comments[] | select(.id == "c3") | [.login, .by]]')" '[["github-actions","bot"]]'
 check "the token's account comes through, so a pass can tell its own replies" "$(out "$got" | jq -r .viewer)" me
 check "a resolved thread too long to fetch whole is withheld whole, like an unresolved one" \
@@ -201,6 +201,20 @@ check "a company repo's .github/fetch-reviews-bots adds its bots; a number in a 
 got=$(run "$bots | $elsewhere | $pr.author.login = \"me\"")
 check "another org's .github/fetch-reviews-bots is ignored" \
   "$(out "$got" | jq -c '[.withheld[].url | select(test("r5|t7|c20"))]')" '["https://x/t7a","https://x/r5","https://x/c20"]'
+
+# On a public repo a fork PR can steer a workflow's comment, so github-actions
+# stays withheld there unless the repo's own file names it.
+got=$(run '.data.repository.isPrivate = false')
+check "on a public company repo, github-actions[bot]'s comment is withheld while a review bot's still comes through" \
+  "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c3") | .kind], [.comments[].id | select(IN("c3", "c7"))]')" \
+  "$(printf '%s\n%s' '["comment"]' '["c7"]')"
+got=$(run '.data.repository.isPrivate = false | .data.repository.bots = {text: "41898282 # github-actions[bot]: our workflows echo nothing\n"}')
+check "on a public company repo, its .github/fetch-reviews-bots can name github-actions[bot]" \
+  "$(out "$got" | jq -c '[.comments[].id | select(. == "c3")], [.withheld[].url | select(. == "https://x/c3")]')" \
+  "$(printf '%s\n%s' '["c3"]' '[]')"
+got=$(run '.data.repository.isPrivate = null')
+check "a repo whose visibility didn't come back is treated as public" \
+  "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c3") | .kind]')" '["comment"]'
 
 # resolve-thread: resolve THREAD fixed|declined, with CHECKS as the head's
 # check rollup: a bare state (no contexts), or contexts as

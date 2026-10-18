@@ -20,16 +20,10 @@ def review_bots: [
   62310815,  # github-advanced-security[bot]
   206951365  # cursor[bot]
 ];
-# The company's own automation is inside only on the company's repos, where
-# what it posts is the company's code at work: github-actions[bot] there is the
-# repo's own workflows, since a workflow's token reaches only its own repo, and
-# the apps are ones the company owns. On another org's repo, github-actions is
-# that org's workflows. A workflow or app that copies outside text (an issue's
-# title, an outsider's comment) into what it posts launders that text, as a
-# review bot quoting it would; that's the workflow's bug to fix, not one this
-# list can see.
+# The company's own apps are inside only on the company's repos, where what
+# they post is the company's code at work. Dependabot posts only its own canned
+# text, so it's here too.
 def company_bots: [
-  41898282,  # github-actions[bot]
   49699333,  # dependabot[bot]
   338590030, # 37s-banyan[bot], the landing queue
   343686697, # 37s-kitchen-line[bot]
@@ -49,7 +43,16 @@ def company_bots: [
 def repo_bots: if in_company then
     [(repo.bots.text // "") | split("\n")[] | sub("#.*"; "") | scan("[0-9]+") | tonumber]
   else [] end;
-def bots: review_bots + (if in_company then company_bots else [] end) + repo_bots + $extra;
+# github-actions[bot] is whatever the repo's own workflows post (a workflow's
+# token reaches only its own repo), and a workflow can copy text into a comment
+# from whoever triggered it: a pull_request_target or issue_comment workflow
+# echoing a PR's title or a comment's argument. On a public repo that can be
+# anyone with a GitHub account opening a fork PR, so there it stays outside
+# unless the repo's .github/fetch-reviews-bots names it, a word from those who
+# know what its workflows post. On a private company repo only people given
+# access can open a PR or trigger a workflow, so it's inside.
+def workflow_bots: if in_company and repo.isPrivate == true then [41898282] else [] end; # github-actions[bot]
+def bots: review_bots + (if in_company then company_bots else [] end) + workflow_bots + repo_bots + $extra;
 def person: .author == null or .author.__typename != "Bot";
 def member: .author.__typename == "User"
   and ((in_company and (.authorAssociation | IN("OWNER", "MEMBER"))) or .author.login == viewer);

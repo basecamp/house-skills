@@ -54,7 +54,8 @@
         "reviewThreads": {
           "totalCount": 15
         }
-      }
+      },
+      "isPrivate": true
     }
   }
 }
