@@ -26,6 +26,7 @@ for arg in "$@"; do
     --paginate) paginate=1 ;;
     --slurp) slurp=1 ;;
     query=*) query=${arg#query=} ;;
+    id=*) id=${arg#id=} ;;
   esac
 done
 case "$query" in
@@ -33,6 +34,11 @@ case "$query" in
   *"resolveReviewThread("*) echo "$query" >> "$FX_STATE.resolved"
     echo '{"data": {"resolveReviewThread": {"thread": {"id": "t", "isResolved": true}}}}'; exit 0 ;;
   *"statusCheckRollup"*) file=$FX_CHECKS ;;
+  # resolve-thread's recount: the thread's comments in the fixture, plus
+  # FX_REPLIES more, standing in for replies posted while it ran.
+  *"node(id:"*) jq -c --arg id "$id" --argjson more "${FX_REPLIES:-0}" '[.[].data.repository.pullRequest.reviewThreads.nodes[]
+      | select(.id == $id)][0] | {data: {node: {isResolved, comments: {totalCount: ((.comments.nodes | length) + $more)}}}}' \
+      "$FX/threads.json"; exit 0 ;;
   *"reviewThreads("*) file=$FX/threads.json ;;
   *"reviews("*) file=$FX/reviews.json ;;
   *"comments(first"*) file=$FX/comments.json ;;
@@ -224,6 +230,10 @@ holds "a fixed thread holds when the head moved after the read" "t14 fixed" SUCC
 holds "a thread whose last comment is the reviewer's holds: reply first" "t2 declined" NONE "reply with"
 holds "a thread a person other than the token wrote in is theirs to resolve" "t15 declined" NONE "a person wrote"
 holds "a person's thread holds even once the fix is green" "t15 fixed" SUCCESS "a person wrote"
+holds "a thread holding an outside comment a person cleared is a person's to resolve" "t4 declined" NONE "a person wrote"
+got=$(FX_REPLIES=1 resolve "t14 declined" NONE)
+check "a reply posted while it runs holds the thread" \
+  "$(status "$got") $(ran "$got") $(sed '$d' <<<"$got" | sed '$d' | jq -r '.refused | test("changed while")')" "3 untouched true"
 holds "a withheld thread can't be resolved" "t7 declined" NONE "no unresolved thread"
 holds "a thread not on the PR can't be resolved" "t99 declined" NONE "no unresolved thread"
 got=$(FX_FAIL=1 resolve "t14 declined" NONE)

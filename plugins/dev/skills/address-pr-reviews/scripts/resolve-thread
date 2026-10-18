@@ -10,7 +10,12 @@
 #   declined  the reasoning for not doing it is the thread's last reply
 # Either way the thread's last comment must be the token's own reply, and no
 # person but the token's account may have written in it: a person's thread is
-# answered and left to them.
+# answered and left to them. That includes an outside comment a person cleared,
+# which comes through without its text: it's still a person's, unread here.
+#
+# The thread is counted again just before resolving, so a reply that lands
+# while this runs holds it. That narrows the race; it can't close it, since
+# GitHub resolves with no condition on the thread's comments.
 set -euo pipefail
 tmp=$(mktemp -d)
 finish() {
@@ -38,8 +43,8 @@ verdict=$(jq -r --arg id "$thread" '
   .viewer as $me
   | [.threads[] | select(.id == $id)][0] as $t
   | if $t == null then "missing"
-    # A cleared outside comment has no author here, and a person cleared it.
-    elif any($t.comments[]; .by == "person" and .login != $me) then "person"
+    # A cleared outside comment comes through with no author: a person wrote it.
+    elif any($t.comments[]; .cleared or (.by == "person" and .login != $me)) then "person"
     elif ($t.comments[-1].login // "") != $me then "unanswered"
     else "ok" end' "$tmp/pr.json")
 case "$verdict" in
@@ -64,6 +69,12 @@ if [ "$how" = fixed ]; then
     *) refuse "the head's checks ended $state: the fix isn't green" ;;
   esac
 fi
+
+seen=$(jq -r --arg id "$thread" '.threads[] | select(.id == $id) | .comments | length' "$tmp/pr.json")
+gh api graphql -f id="$thread" -f query='
+  query($id: ID!) { node(id: $id) { ... on PullRequestReviewThread { isResolved comments { totalCount } } } }' > "$tmp/now.json"
+now=$(jq -r '.data.node | if .isResolved then "resolved" else .comments.totalCount end' "$tmp/now.json")
+[ "$now" = "$seen" ] || refuse "the thread changed while this ran ($seen comments read, now $now); run again"
 
 gh api graphql -f id="$thread" -f query='
   mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id isResolved } } }' > "$tmp/done.json"

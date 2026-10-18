@@ -240,8 +240,12 @@ the script, never the raw mutation:
 
 It re-reads the PR through `fetch-reviews` and resolves only a thread that
 comes back in its `threads` (so never a withheld one), whose last comment is
-your reply, and that no person but your own account wrote in: a person's thread
-is answered and left to them. `fixed` also waits for every check on the head to
+your reply, and that no person but your own account wrote in (a cleared
+outside comment counts as a person's): a person's thread is answered and left
+to them. It counts the thread's comments again just before resolving and holds
+if a reply landed meanwhile; GitHub can't make that atomic, so a reply in the
+last instant can still be resolved over, and it stays visible for anyone to
+reopen. `fixed` also waits for every check on the head to
 pass. Exit 3 with `refused` says which held it; fix that and run it again, or,
 for a person's thread, leave it open and name it in the summary. Run it in the
 same pass as the reply for a decline, and on the pass that sees the head green
@@ -263,7 +267,9 @@ comment on another org's repo, or a bot's, stays withheld however it's hidden.
 For a bot whose comments are routine, the person adds it to
 `FETCH_REVIEWS_BOT_IDS` for the session; otherwise that PR's convergence is the
 person's call. A cleared comment comes back in its thread as a link with
-`cleared: true` and no text, so the thread can still be linked and resolved. A
+`cleared: true` and no text, so the thread can still be linked; it's still a
+person's comment you haven't read, so the person resolves that thread, not
+you. A
 thread too long to fetch whole (more than 100 comments) stays
 withheld whether or not it's resolved, since part of it is unseen; that PR's
 convergence is the person's call. Hiding the comment hands you the rest of its
