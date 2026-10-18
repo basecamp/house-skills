@@ -107,6 +107,9 @@ check "later pages are read: inside items kept, outside items withheld" \
   "$(printf '%s\n%s' '["r7","c14","t11"]' '["t12a","r8","c15"]')"
 check "a PR comment from a bot off the list is withheld, not dropped" \
   "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c20") | [.kind, .by]]')" '[["comment","bot"]]'
+check "a withheld thread or review holds convergence; a withheld plain comment, or a comment in a resolved thread, doesn't" \
+  "$(out "$got" | jq -c '[.withheld[] | select(IN(.url; "https://x/t7a", "https://x/t5b", "https://x/r5", "https://x/c20")) | [.kind, .holds]]')" \
+  '[["thread",true],["thread-comment",false],["review",true],["comment",false]]'
 check "on a private company repo, github-actions[bot]'s note comes through as a bot's comment" \
   "$(out "$got" | jq -c '[.comments[] | select(.id == "c3") | [.login, .by]]')" '[["github-actions","bot"]]'
 check "the token's account comes through, so a pass can tell its own replies" "$(out "$got" | jq -r .viewer)" me
@@ -224,12 +227,39 @@ check "a repo whose visibility didn't come back is treated as public" \
   "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c3") | .kind]')" '["comment"]'
 
 # resolve-thread: resolve THREAD fixed|declined, with CHECKS as the head's
-# check rollup. Prints the output, a line saying whether the mutation ran, and
-# the exit status.
+# check rollup: a bare state (no contexts), or contexts as
+# "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests", req marking a check the
+# base's ruleset requires, PENDING one still running, and missing one the ruleset
+# requires that has no context on the head; the rollup's state is derived as
+# GitHub combines the contexts. Prints the output, a line saying whether the
+# mutation ran, and the exit status.
 resolve() {
   jq . "$here/fixtures/head.json" > "$tmp/head.json"
-  jq -n --arg oid "${3:-abc}" --arg state "$2" '{data: {repository: {pullRequest: {commits: {nodes: [{commit:
-    {oid: $oid, statusCheckRollup: (if $state == "NONE" then null else {state: $state} end)}}]}}}}}' > "$tmp/checks.json"
+  if [[ $2 == *=* ]]; then
+    jq -n --arg oid "${3:-abc}" --arg spec "$2" '
+      [$spec | split(",")[] | select(test("=")) | capture("(?<kind>req|opt):(?<name>[^=]+)=(?<c>.+)")
+        | {__typename: "CheckRun", name, isRequired: (.kind == "req"),
+           status: (if .c == "PENDING" then "IN_PROGRESS" else "COMPLETED" end),
+           conclusion: (if .c == "PENDING" then null else .c end)}] as $nodes
+      | [$spec | split(",")[] | capture("^(?:req:(?<r>[^=]+)=|missing:(?<m>.+))") | .r // .m] as $named
+      | ([$spec | split(",")[] | capture("^pattern:(?<p>.+)") | .p] | if length > 0 then . else ["~DEFAULT_BRANCH"] end) as $include
+      | [$spec | split(",")[] | capture("^exclude:(?<p>.+)") | .p] as $exclude
+      | ([$spec | split(",")[] | capture("^base:(?<b>.+)") | .b][0] // "main") as $basename
+      | ($spec | split(",") | any(. == "workflows")) as $workflows
+      | {data: {repository: {
+          defaultBranchRef: {name: "main"},
+          rulesets: {pageInfo: {hasNextPage: false}, nodes: [{enforcement: "ACTIVE", target: "BRANCH",
+            conditions: {refName: {include: $include, exclude: $exclude}},
+            rules: {nodes: ([{type: "REQUIRED_STATUS_CHECKS", parameters: {requiredStatusChecks: [$named[] | {context: .}]}}]
+              + (if $workflows then [{type: "WORKFLOWS", parameters: {}}] else [] end))}}]},
+          pullRequest: {baseRef: {name: $basename, branchProtectionRule: null}, commits: {nodes: [{commit: {oid: $oid, statusCheckRollup: {
+          state: (if any($nodes[]; .conclusion == "FAILURE") then "FAILURE"
+                  elif any($nodes[]; .conclusion == null) then "PENDING" else "SUCCESS" end),
+          contexts: {pageInfo: {hasNextPage: false}, nodes: $nodes}}}}]}}}}}' > "$tmp/checks.json"
+  else
+    jq -n --arg oid "${3:-abc}" --arg state "$2" '{data: {repository: {pullRequest: {commits: {nodes: [{commit:
+      {oid: $oid, statusCheckRollup: (if $state == "NONE" then null else {state: $state} end)}}]}}}}}' > "$tmp/checks.json"
+  fi
   rm -f "$tmp/head-read" "$tmp/head-read.resolved"
   local status=0
   PATH="$tmp/bin:$PATH" FX="$here/fixtures" FX_HEAD="$tmp/head.json" FX_STATE="$tmp/head-read" FX_CHECKS="$tmp/checks.json" \
@@ -251,6 +281,31 @@ holds "a fixed thread holds while the head's checks run" "t14 fixed" PENDING "ha
 holds "a fixed thread holds before any check reports" "t14 fixed" NONE "no checks"
 holds "a fixed thread holds when the head's checks failed" "t14 fixed" FAILURE "ended FAILURE"
 holds "a fixed thread holds when the head moved after the read" "t14 fixed" SUCCESS "head moved" def
+resolves "a fixed thread resolves when the required check passed, though an optional runner's failed" \
+  "t14 fixed" "req:gate=SUCCESS,opt:setup-check/linux=FAILURE"
+resolves "a required check skipped counts as passed, as GitHub counts it" "t14 fixed" "req:gate=SKIPPED,opt:linux=SUCCESS"
+holds "a fixed thread holds when the required check failed, though every other passed" \
+  "t14 fixed" "req:gate=FAILURE,opt:linux=SUCCESS" "required check failed"
+holds "a fixed thread holds while the required check runs, though every other passed" \
+  "t14 fixed" "req:gate=PENDING,opt:linux=SUCCESS" "required check hasn.t finished"
+holds "a check the base's ruleset requires that hasn't reported holds, though the required one that did passed and an optional one failed" \
+  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests" "requires hasn.t reported"
+holds "a ruleset whose glob reaches the base names its required checks" \
+  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/ma*" "requires hasn.t reported"
+resolves "a ruleset whose pattern doesn't reach the base names nothing" \
+  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/release/*"
+holds "a ruleset pattern this script can't convert (fnmatch's [...]) is read as reaching, so it fails closed" \
+  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/rel[0-9]" "requires hasn.t reported"
+holds "a ruleset naming a base with a literal dot reaches it, the dot escaped and not a wildcard" \
+  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,base:release/v1.0,pattern:refs/heads/release/v1.0" "requires hasn.t reported"
+resolves "a dotted pattern matches only its own name, so release/v1x0 is not release/v1.0" \
+  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,base:release/v1x0,pattern:refs/heads/release/v1.0"
+holds "an unconvertible pattern in a ruleset's exclusions is read as not excluding, so the ruleset's checks stay required" \
+  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:~ALL,exclude:refs/heads/rel[0-9]" "requires hasn.t reported"
+holds "a Workflows rule reaching the base holds a fix as unjudged, since it names runs rather than contexts" \
+  "t14 fixed" "req:gate=SUCCESS,workflows" "requires workflows"
+holds "where the base requires no check, every check counts" "t14 fixed" "opt:gate=SUCCESS,opt:linux=FAILURE" "ended FAILURE"
+resolves "where the base requires no check, all green resolves" "t14 fixed" "opt:gate=SUCCESS,opt:publish=SKIPPED"
 holds "a thread whose last comment is the reviewer's holds: reply first" "t2 declined" NONE "reply with"
 holds "a thread a person other than the token wrote in is theirs to resolve" "t15 declined" NONE "a person wrote"
 holds "a person's thread holds even once the fix is green" "t15 fixed" SUCCESS "a person wrote"
