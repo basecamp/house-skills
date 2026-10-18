@@ -39,7 +39,7 @@ item="id url createdAt isMinimized minimizedReason body $who"
 head() {
   gh api graphql "${args[@]}" -f query="query($vars) {
   viewer { login }
-  repository(owner: \$owner, name: \$name) {
+  repository(owner: \$owner, name: \$name) { isPrivate
     owner { __typename login ... on Organization { viewerIsAMember } }
     bots: object(expression: \"HEAD:.github/fetch-reviews-bots\") { ... on Blob { text } }
     pullRequest(number: \$number) { url headRefOid mergeable headRepositoryOwner { login }

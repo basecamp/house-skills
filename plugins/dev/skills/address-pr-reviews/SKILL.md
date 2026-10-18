@@ -92,9 +92,12 @@ own replies.
 
 Bots are recognised by database id, never by login. The script knows the review
 bots (Copilot, Codex, cubic, Cursor, GitHub Advanced Security) everywhere, and,
-on the company's repos only, the company's own automation: `github-actions[bot]`
-(the repo's own workflows), Dependabot, and the apps the company owns, Banyan's
-landing queue included. A company repo lists more of its own in
+on the company's repos only, the company's own automation: Dependabot, the apps
+the company owns (Banyan's landing queue included), and, on a private company
+repo, `github-actions[bot]`, the repo's own workflows. On a public repo a fork
+PR can get a workflow to echo its text into a comment, so there
+`github-actions[bot]` is withheld unless the repo's file below names it
+(41898282). A company repo lists more of its own in
 `.github/fetch-reviews-bots` on its default branch, one id a line (`gh api
 users/NAME%5Bbot%5D --jq .id` finds one); a PR's own change to that file
 doesn't count until it lands. A bot still unknown comes back withheld; the
