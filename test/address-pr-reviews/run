@@ -204,18 +204,26 @@ check "another org's .github/fetch-reviews-bots is ignored" \
 
 # resolve-thread: resolve THREAD fixed|declined, with CHECKS as the head's
 # check rollup: a bare state (no contexts), or contexts as
-# "req:gate=SUCCESS,opt:linux=FAILURE", req marking a required check and
-# PENDING one still running, the rollup's state derived as GitHub combines them.
-# Prints the output, a line saying whether the mutation ran, and the exit status.
+# "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests", req marking a check the
+# base's ruleset requires, PENDING one still running, and missing one the ruleset
+# requires that has no context on the head; the rollup's state is derived as
+# GitHub combines the contexts. Prints the output, a line saying whether the
+# mutation ran, and the exit status.
 resolve() {
   jq . "$here/fixtures/head.json" > "$tmp/head.json"
   if [[ $2 == *=* ]]; then
     jq -n --arg oid "${3:-abc}" --arg spec "$2" '
-      [$spec | split(",")[] | capture("(?<kind>req|opt):(?<name>[^=]+)=(?<c>.+)")
+      [$spec | split(",")[] | select(test("=")) | capture("(?<kind>req|opt):(?<name>[^=]+)=(?<c>.+)")
         | {__typename: "CheckRun", name, isRequired: (.kind == "req"),
            status: (if .c == "PENDING" then "IN_PROGRESS" else "COMPLETED" end),
            conclusion: (if .c == "PENDING" then null else .c end)}] as $nodes
-      | {data: {repository: {pullRequest: {commits: {nodes: [{commit: {oid: $oid, statusCheckRollup: {
+      | [$spec | split(",")[] | capture("^(?:req:(?<r>[^=]+)=|missing:(?<m>.+))") | .r // .m] as $named
+      | {data: {repository: {
+          defaultBranchRef: {name: "main"},
+          rulesets: {pageInfo: {hasNextPage: false}, nodes: [{enforcement: "ACTIVE", target: "BRANCH",
+            conditions: {refName: {include: ["~DEFAULT_BRANCH"], exclude: []}},
+            rules: {nodes: [{type: "REQUIRED_STATUS_CHECKS", parameters: {requiredStatusChecks: [$named[] | {context: .}]}}]}}]},
+          pullRequest: {baseRef: {name: "main", branchProtectionRule: null}, commits: {nodes: [{commit: {oid: $oid, statusCheckRollup: {
           state: (if any($nodes[]; .conclusion == "FAILURE") then "FAILURE"
                   elif any($nodes[]; .conclusion == null) then "PENDING" else "SUCCESS" end),
           contexts: {pageInfo: {hasNextPage: false}, nodes: $nodes}}}}]}}}}}' > "$tmp/checks.json"
@@ -251,6 +259,8 @@ holds "a fixed thread holds when the required check failed, though every other p
   "t14 fixed" "req:gate=FAILURE,opt:linux=SUCCESS" "required check failed"
 holds "a fixed thread holds while the required check runs, though every other passed" \
   "t14 fixed" "req:gate=PENDING,opt:linux=SUCCESS" "required check hasn.t finished"
+holds "a check the base's ruleset requires that hasn't reported holds, though the required one that did passed and an optional one failed" \
+  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests" "requires hasn.t reported"
 holds "where the base requires no check, every check counts" "t14 fixed" "opt:gate=SUCCESS,opt:linux=FAILURE" "ended FAILURE"
 resolves "where the base requires no check, all green resolves" "t14 fixed" "opt:gate=SUCCESS,opt:publish=SKIPPED"
 holds "a thread whose last comment is the reviewer's holds: reply first" "t2 declined" NONE "reply with"

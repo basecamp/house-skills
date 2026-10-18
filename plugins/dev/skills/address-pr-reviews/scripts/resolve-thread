@@ -59,22 +59,44 @@ esac
 # contexts and a queue's own runs on the pull request, which a red or cancelled
 # one turns FAILURE while the required check is green (hey-native-apps' tools/land
 # ignores those for the same reason), so it judges only a repo that requires
-# nothing. A required check that hasn't reported yet isn't among the contexts;
-# the rollup reads EXPECTED then, which holds.
+# nothing. What the base requires is read from the repository's active rulesets
+# whose ref conditions reach the base (~ALL, ~DEFAULT_BRANCH, refs/heads/<name>,
+# or a glob), and from classic branch protection; a required check that hasn't
+# reported yet has no context on the head, so it's found by name, not by
+# isRequired, and holds. mergeStateStatus can't stand in for this: a ruleset
+# that lets only the landing queue push reads BLOCKED with every check green.
 if [ "$how" = fixed ]; then
   head=$(jq -r .head "$tmp/pr.json")
   gh api graphql -F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$number" -f query='
     query($owner: String!, $name: String!, $number: Int!) {
-      repository(owner: $owner, name: $name) { pullRequest(number: $number) {
-        commits(last: 1) { nodes { commit { oid statusCheckRollup { state
-          contexts(first: 100) { pageInfo { hasNextPage } nodes { __typename
-            ... on CheckRun { name status conclusion isRequired(pullRequestNumber: $number) }
-            ... on StatusContext { context state isRequired(pullRequestNumber: $number) } } } } } } } } } }' > "$tmp/checks.json"
-  state=$(jq -r --arg head "$head" '.data.repository.pullRequest.commits.nodes[0].commit
+      repository(owner: $owner, name: $name) {
+        defaultBranchRef { name }
+        rulesets(first: 100, includeParents: true) { pageInfo { hasNextPage } nodes { enforcement target
+          conditions { refName { include exclude } }
+          rules(first: 100) { nodes { type parameters {
+            ... on RequiredStatusChecksParameters { requiredStatusChecks { context } } } } } } }
+        pullRequest(number: $number) {
+          baseRef { name branchProtectionRule { requiredStatusCheckContexts } }
+          commits(last: 1) { nodes { commit { oid statusCheckRollup { state
+            contexts(first: 100) { pageInfo { hasNextPage } nodes { __typename
+              ... on CheckRun { name status conclusion isRequired(pullRequestNumber: $number) }
+              ... on StatusContext { context state isRequired(pullRequestNumber: $number) } } } } } } } } } }' > "$tmp/checks.json"
+  state=$(jq -r --arg head "$head" '
+    def glob: "^" + (ltrimstr("refs/heads/") | gsub("[.+?^${}()|\\[\\]\\\\]"; "\\\(.)") | gsub("\\*\\*"; "\u0000") | gsub("\\*"; "[^/]*") | gsub("\u0000"; ".*")) + "$";
+    .data.repository as $repo
+    | $repo.pullRequest.baseRef.name as $base
+    | def reaches: . == "~ALL" or (. == "~DEFAULT_BRANCH" and $base == $repo.defaultBranchRef.name) or ($base | test(glob));
+    [$repo.rulesets.nodes[]? | select(.enforcement == "ACTIVE" and .target == "BRANCH"
+        and any(.conditions.refName.include[]?; reaches) and (any(.conditions.refName.exclude[]?; reaches) | not))
+      | .rules.nodes[]? | select(.type == "REQUIRED_STATUS_CHECKS") | .parameters.requiredStatusChecks[]?.context]
+      + ($repo.pullRequest.baseRef.branchProtectionRule.requiredStatusCheckContexts // []) | unique as $named
+    | $repo.pullRequest.commits.nodes[0].commit
     | if .oid != $head then "MOVED" else
       (.statusCheckRollup // {}) as $rollup
-      | [$rollup.contexts.nodes[]? | select(.isRequired == true)] as $required
-      | if ($rollup.contexts.pageInfo.hasNextPage // false) then "PAGED"
+      | [$rollup.contexts.nodes[]? | select(.isRequired == true or ((.name // .context) | IN($named[])))] as $required
+      | [$required[] | .name // .context] as $reported
+      | if ($rollup.contexts.pageInfo.hasNextPage // false) or ($repo.rulesets.pageInfo.hasNextPage // false) then "PAGED"
+        elif any($named[]; IN($reported[]) | not) then "REQUIRED_MISSING"
         elif ($required | length) == 0 then $rollup.state // "NONE"
         elif any($required[]; (.__typename == "CheckRun" and .status != "COMPLETED")
             or (.__typename == "StatusContext" and (.state | IN("PENDING", "EXPECTED")))) then "REQUIRED_PENDING"
@@ -86,7 +108,8 @@ if [ "$how" = fixed ]; then
   case "$state" in
     MOVED) refuse "the PR's head moved since it was read; run again" ;;
     SUCCESS) ;;
-    PAGED) refuse "the head has more check contexts than one page holds, so the required ones can't be judged here" ;;
+    PAGED) refuse "the head's check contexts or the repo's rulesets run past one page, so the required checks can't be judged here" ;;
+    REQUIRED_MISSING) refuse "a check the base requires hasn't reported on the head; resolve once it passes" ;;
     REQUIRED_PENDING) refuse "a required check hasn't finished on the head; resolve once it passes" ;;
     REQUIRED_FAILED) refuse "a required check failed on the head: the fix isn't green" ;;
     NONE) refuse "no checks have reported on the head yet; resolve once they pass" ;;
