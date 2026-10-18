@@ -233,14 +233,16 @@ resolve() {
            conclusion: (if .c == "PENDING" then null else .c end)}] as $nodes
       | [$spec | split(",")[] | capture("^(?:req:(?<r>[^=]+)=|missing:(?<m>.+))") | .r // .m] as $named
       | ([$spec | split(",")[] | capture("^pattern:(?<p>.+)") | .p] | if length > 0 then . else ["~DEFAULT_BRANCH"] end) as $include
+      | [$spec | split(",")[] | capture("^exclude:(?<p>.+)") | .p] as $exclude
+      | ([$spec | split(",")[] | capture("^base:(?<b>.+)") | .b][0] // "main") as $basename
       | ($spec | split(",") | any(. == "workflows")) as $workflows
       | {data: {repository: {
           defaultBranchRef: {name: "main"},
           rulesets: {pageInfo: {hasNextPage: false}, nodes: [{enforcement: "ACTIVE", target: "BRANCH",
-            conditions: {refName: {include: $include, exclude: []}},
+            conditions: {refName: {include: $include, exclude: $exclude}},
             rules: {nodes: ([{type: "REQUIRED_STATUS_CHECKS", parameters: {requiredStatusChecks: [$named[] | {context: .}]}}]
               + (if $workflows then [{type: "WORKFLOWS", parameters: {}}] else [] end))}}]},
-          pullRequest: {baseRef: {name: "main", branchProtectionRule: null}, commits: {nodes: [{commit: {oid: $oid, statusCheckRollup: {
+          pullRequest: {baseRef: {name: $basename, branchProtectionRule: null}, commits: {nodes: [{commit: {oid: $oid, statusCheckRollup: {
           state: (if any($nodes[]; .conclusion == "FAILURE") then "FAILURE"
                   elif any($nodes[]; .conclusion == null) then "PENDING" else "SUCCESS" end),
           contexts: {pageInfo: {hasNextPage: false}, nodes: $nodes}}}}]}}}}}' > "$tmp/checks.json"
@@ -284,6 +286,12 @@ resolves "a ruleset whose pattern doesn't reach the base names nothing" \
   "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/release/*"
 holds "a ruleset pattern this script can't convert (fnmatch's [...]) is read as reaching, so it fails closed" \
   "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/rel[0-9]" "requires hasn.t reported"
+holds "a ruleset naming a base with a literal dot reaches it, the dot escaped and not a wildcard" \
+  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,base:release/v1.0,pattern:refs/heads/release/v1.0" "requires hasn.t reported"
+resolves "a dotted pattern matches only its own name, so release/v1x0 is not release/v1.0" \
+  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,base:release/v1x0,pattern:refs/heads/release/v1.0"
+holds "an unconvertible pattern in a ruleset's exclusions is read as not excluding, so the ruleset's checks stay required" \
+  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:~ALL,exclude:refs/heads/rel[0-9]" "requires hasn.t reported"
 holds "a Workflows rule reaching the base holds a fix as unjudged, since it names runs rather than contexts" \
   "t14 fixed" "req:gate=SUCCESS,workflows" "requires workflows"
 holds "where the base requires no check, every check counts" "t14 fixed" "opt:gate=SUCCESS,opt:linux=FAILURE" "ended FAILURE"

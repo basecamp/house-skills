@@ -88,13 +88,15 @@ if [ "$how" = fixed ]; then
   # GitHub App is matched by name alone, since a same-named context from another
   # app on the same head is not a case worth a selector.
   state=$(jq -r --arg head "$head" '
-    def glob: "^" + (ltrimstr("refs/heads/") | gsub("[.+^${}()|\\\\]"; "\\\(.)") | gsub("\\*\\*"; "\u0000") | gsub("\\*"; "[^/]*") | gsub("\u0000"; ".*")) + "$";
+    def glob: "^" + (ltrimstr("refs/heads/") | gsub("(?<c>[.+^${}()|\\\\])"; "\\\(.c)") | gsub("\\*\\*"; "\u0000") | gsub("\\*"; "[^/]*") | gsub("\u0000"; ".*")) + "$";
     .data.repository as $repo
     | $repo.pullRequest.baseRef.name as $base
-    | def reaches: . as $pattern | $pattern == "~ALL" or ($pattern == "~DEFAULT_BRANCH" and $base == $repo.defaultBranchRef.name)
-        or ($pattern | test("[?\\[]")) or ($base | test($pattern | glob));
+    # A pattern the converter cannot express (fnmatch ? or [...]) is read the way
+    # that keeps more required: as reaching when it includes, as not when it excludes.
+    | def reaches($unconvertible): . as $pattern | $pattern == "~ALL" or ($pattern == "~DEFAULT_BRANCH" and $base == $repo.defaultBranchRef.name)
+        or (if ($pattern | test("[?\\[]")) then $unconvertible else ($base | test($pattern | glob)) end);
     [$repo.rulesets.nodes[]? | select(.enforcement == "ACTIVE" and .target == "BRANCH"
-        and any(.conditions.refName.include[]?; reaches) and (any(.conditions.refName.exclude[]?; reaches) | not))] as $rulesets
+        and any(.conditions.refName.include[]?; reaches(true)) and (any(.conditions.refName.exclude[]?; reaches(false)) | not))] as $rulesets
     | ([$rulesets[].rules.nodes[]? | select(.type == "REQUIRED_STATUS_CHECKS") | .parameters.requiredStatusChecks[]?.context]
       + ($repo.pullRequest.baseRef.branchProtectionRule.requiredStatusCheckContexts // []) | unique) as $named
     | any($rulesets[].rules.nodes[]?; .type | IN("WORKFLOWS", "REQUIRED_WORKFLOW_STATUS_CHECKS")) as $workflows
