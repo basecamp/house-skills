@@ -5,9 +5,12 @@
 # a caller can't read past it.
 #
 # Usage: fetch-reviews OWNER/REPO NUMBER
-# FETCH_REVIEWS_BOT_IDS adds review bots by database id, for a repo whose
-# reviewers aren't the ones gate.jq lists. Set it yourself; never from a file
-# in the repo under review, which the PR itself could change.
+# gate.jq lists the review bots, and the company's own automation for the
+# company's repos. A company repo adds its own in .github/fetch-reviews-bots on
+# its default branch, which a PR can't change for its own read.
+# FETCH_REVIEWS_BOT_IDS adds bots by database id for the session, anywhere. A
+# person sets it; never from a file in the repo under review, whose PR head
+# could change it.
 set -euo pipefail
 tmp=$(mktemp -d)
 finish() {
@@ -38,6 +41,7 @@ head() {
   viewer { login }
   repository(owner: \$owner, name: \$name) {
     owner { __typename login ... on Organization { viewerIsAMember } }
+    bots: object(expression: \"HEAD:.github/fetch-reviews-bots\") { ... on Blob { text } }
     pullRequest(number: \$number) { url headRefOid mergeable headRepositoryOwner { login }
       reviews { totalCount } comments { totalCount } reviewThreads { totalCount }
       labels(first: 100) { pageInfo { hasNextPage } nodes { name } }

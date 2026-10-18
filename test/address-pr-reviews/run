@@ -4,7 +4,8 @@
 # output. Variants of head.json are made here, each named by what it changes.
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-fetch=$here/../../plugins/dev/skills/address-pr-reviews/scripts/fetch-reviews
+scripts=$here/../../plugins/dev/skills/address-pr-reviews/scripts
+fetch=$scripts/fetch-reviews
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir "$tmp/bin"
@@ -28,6 +29,10 @@ for arg in "$@"; do
   esac
 done
 case "$query" in
+  # resolve-thread's mutation: recorded, so a test can tell whether it ran.
+  *"resolveReviewThread("*) echo "$query" >> "$FX_STATE.resolved"
+    echo '{"data": {"resolveReviewThread": {"thread": {"id": "t", "isResolved": true}}}}'; exit 0 ;;
+  *"statusCheckRollup"*) file=$FX_CHECKS ;;
   *"reviewThreads("*) file=$FX/threads.json ;;
   *"reviews("*) file=$FX/reviews.json ;;
   *"comments(first"*) file=$FX/comments.json ;;
@@ -40,7 +45,7 @@ esac
 for key in $(jq -r '[.. | objects | keys[]] | unique[] | select(. != "data")' "$file"); do
   grep -qw -- "$key" <<<"$query" || { echo "stub gh: the query doesn't ask for $key" >&2; exit 1; }
 done
-if [ "$file" = "$FX_HEAD" ] || [ "$file" = "${FX_HEAD_LATER:-}" ]; then cat "$file"
+if [ "$file" = "$FX_HEAD" ] || [ "$file" = "${FX_HEAD_LATER:-}" ] || [ "$file" = "${FX_CHECKS:-}" ]; then cat "$file"
 elif [ -z "$paginate" ]; then jq '.[0]' "$file"
 elif [[ $query != *'after: $endCursor'* ]]; then echo "stub gh: --paginate without \$endCursor" >&2; exit 1
 elif [ -n "$slurp" ]; then cat "$file"
@@ -68,7 +73,7 @@ got=$(run .)
 check "a member's PR is read" "$(status "$got")" 0
 check "no outside text reaches the output" "$(grep -c MARKER-OUTSIDE <<<"$got" || true)" 0
 check "inside items kept" "$(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id]')" \
-  '["r1","r3","r7","c4","c6","c7","c10","c18","c14","c16","t2","t4","t11"]'
+  '["r1","r3","r7","c3","c4","c6","c7","c10","c18","c14","c16","t2","t4","t11","t14","t15"]'
 check "an outside comment a person hid as Resolved comes through as a link, marked cleared, without its text" \
   "$(out "$got" | jq -c '[.threads[] | select(.id == "t4") | .comments[] | [.id, (.cleared // false), has("body")]]')" '[["t4a",false,true],["t4b",true,false]]'
 check "a member's text comes through as written, quotes included" \
@@ -89,13 +94,16 @@ check "convergence's fields come through: head, mergeable, review commits, threa
   '["abc","MERGEABLE","abc","abc","abc",1]'
 check "outside items listed by link, resolved threads included" \
   "$(out "$got" | jq -c '[.withheld[] | "\(.kind):\(.url | ltrimstr("https://x/"))"]')" \
-  '["thread:t1b","thread:t3a","thread:t7a","thread:t8b","thread:t10a","thread:t12a","thread:t13a","thread-comment:t5b","thread-comment:t9b","review:r2","review:r5","review:r6","review:r8","comment:c1","comment:c2","comment:c3","comment:c8","comment:c13","comment:c17","comment:c19","comment:c15"]'
+  '["thread:t1b","thread:t3a","thread:t7a","thread:t8b","thread:t10a","thread:t12a","thread:t13a","thread-comment:t5b","thread-comment:t9b","review:r2","review:r5","review:r6","review:r8","comment:c1","comment:c2","comment:c8","comment:c13","comment:c17","comment:c19","comment:c15","comment:c20"]'
 check "later pages are read: inside items kept, outside items withheld" \
   "$(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id | select(IN("r7", "c14", "t11"))],
     [.withheld[].url | ltrimstr("https://x/") | select(IN("r8", "c15", "t12a"))]')" \
   "$(printf '%s\n%s' '["r7","c14","t11"]' '["t12a","r8","c15"]')"
 check "a PR comment from a bot off the list is withheld, not dropped" \
-  "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c3") | [.kind, .by]]')" '[["comment","bot"]]'
+  "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c20") | [.kind, .by]]')" '[["comment","bot"]]'
+check "on a company repo, github-actions[bot]'s note comes through as a bot's comment" \
+  "$(out "$got" | jq -c '[.comments[] | select(.id == "c3") | [.login, .by]]')" '[["github-actions","bot"]]'
+check "the token's account comes through, so a pass can tell its own replies" "$(out "$got" | jq -r .viewer)" me
 check "a resolved thread too long to fetch whole is withheld whole, like an unresolved one" \
   "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/t10a") | .kind]')" '["thread"]'
 check "an outside item hidden for any reason but Resolved stays withheld, and holds its thread" \
@@ -132,7 +140,9 @@ refuses "outside the company's orgs, a member's PR refuses" "$elsewhere"
 got=$(run "$elsewhere | $pr.author.login = \"me\"")
 check "outside the company's orgs, only the token's account and review bots come through" \
   "$(status "$got") $(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id]')" \
-  '0 ["r1","r3","r7","c7","c10","t2","t4","t11"]'
+  '0 ["r1","r3","r7","c7","c10","t2","t4","t11","t14"]'
+check "outside the company's orgs, github-actions[bot] is that org's workflows, so its comment is withheld" \
+  "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c3") | [.kind, .by]]')" '[["comment","bot"]]'
 check "outside the company's orgs, a member's text is withheld" \
   "$(out "$got" | jq -c '[.withheld[].url | ltrimstr("https://x/") | select(IN("c4", "c6", "t6a"))]')" \
   '["t6a","c4","c6"]'
@@ -172,5 +182,51 @@ check "outside the company's orgs, a member's own Resolved hide doesn't clear it
   "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c18") | .kind]')" '["comment"]'
 check "an off-list bot's own Resolved hide doesn't clear it" \
   "$(out "$(run .)" | jq -c '[.withheld[] | select(.url == "https://x/c19") | .kind]')" '["comment"]'
+
+# A company repo's own bots, from .github/fetch-reviews-bots on its default branch.
+bots='.data.repository.bots = {text: "# our CI bot, app 12345\n99   # some-app[bot]\n"}'
+got=$(run "$bots")
+check "a company repo's .github/fetch-reviews-bots adds its bots; a number in a comment doesn't" \
+  "$(out "$got" | jq -c '[(.reviews[], .comments[], .threads[]) | select(IN(.id; "r5", "t7", "c20")) | .id], [.withheld[].url | select(test("r5|t7|c20"))]')" \
+  "$(printf '%s\n%s' '["r5","c20","t7"]' '[]')"
+got=$(run "$bots | $elsewhere | $pr.author.login = \"me\"")
+check "another org's .github/fetch-reviews-bots is ignored" \
+  "$(out "$got" | jq -c '[.withheld[].url | select(test("r5|t7|c20"))]')" '["https://x/t7a","https://x/r5","https://x/c20"]'
+
+# resolve-thread: resolve THREAD fixed|declined, with CHECKS as the head's
+# check rollup. Prints the output, a line saying whether the mutation ran, and
+# the exit status.
+resolve() {
+  jq . "$here/fixtures/head.json" > "$tmp/head.json"
+  jq -n --arg oid "${3:-abc}" --arg state "$2" '{data: {repository: {pullRequest: {commits: {nodes: [{commit:
+    {oid: $oid, statusCheckRollup: (if $state == "NONE" then null else {state: $state} end)}}]}}}}}' > "$tmp/checks.json"
+  rm -f "$tmp/head-read" "$tmp/head-read.resolved"
+  local status=0
+  PATH="$tmp/bin:$PATH" FX="$here/fixtures" FX_HEAD="$tmp/head.json" FX_STATE="$tmp/head-read" FX_CHECKS="$tmp/checks.json" \
+    "$scripts/resolve-thread" o/r 1 $1 > "$tmp/out.json" 2>/dev/null || status=$?
+  cat "$tmp/out.json"
+  if [ -e "$tmp/head-read.resolved" ]; then echo resolved; else echo untouched; fi
+  echo "$status"
+}
+ran() { tail -n 2 <<<"$1" | head -n 1; }
+resolves() { got=$(resolve "$2" "$3"); check "$1" "$(status "$got") $(ran "$got")" "0 resolved"; }
+# holds NAME "THREAD HOW" CHECKS WHY [HEAD_OID]: refused, for the reason WHY names.
+holds() {
+  got=$(resolve "$2" "$3" "${5:-abc}")
+  check "$1" "$(status "$got") $(ran "$got") $(sed '$d' <<<"$got" | sed '$d' | jq -r --arg why "$4" '.refused | test($why)')" "3 untouched true"
+}
+resolves "a declined thread whose last reply is the token's resolves" "t14 declined" NONE
+resolves "a fixed thread resolves once the head's checks pass" "t14 fixed" SUCCESS
+holds "a fixed thread holds while the head's checks run" "t14 fixed" PENDING "haven't finished"
+holds "a fixed thread holds before any check reports" "t14 fixed" NONE "no checks"
+holds "a fixed thread holds when the head's checks failed" "t14 fixed" FAILURE "ended FAILURE"
+holds "a fixed thread holds when the head moved after the read" "t14 fixed" SUCCESS "head moved" def
+holds "a thread whose last comment is the reviewer's holds: reply first" "t2 declined" NONE "reply with"
+holds "a thread a person other than the token wrote in is theirs to resolve" "t15 declined" NONE "a person wrote"
+holds "a person's thread holds even once the fix is green" "t15 fixed" SUCCESS "a person wrote"
+holds "a withheld thread can't be resolved" "t7 declined" NONE "no unresolved thread"
+holds "a thread not on the PR can't be resolved" "t99 declined" NONE "no unresolved thread"
+got=$(FX_FAIL=1 resolve "t14 declined" NONE)
+check "a failed fetch resolves nothing" "$(status "$got") $(ran "$got")" "3 untouched"
 
 exit $fail

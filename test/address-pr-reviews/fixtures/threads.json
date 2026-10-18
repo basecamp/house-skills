@@ -474,6 +474,107 @@
                     }
                   ]
                 }
+              },
+              {
+                "id": "t14",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t14a",
+                      "url": "https://x/t14a",
+                      "createdAt": "2026-01-02",
+                      "isMinimized": false,
+                      "body": "cop thread the token answered",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "Bot",
+                        "login": "copilot-pull-request-reviewer",
+                        "databaseId": 175728472
+                      },
+                      "databaseId": 4,
+                      "path": "p",
+                      "line": 4
+                    },
+                    {
+                      "id": "t14b",
+                      "url": "https://x/t14b",
+                      "createdAt": "2026-01-02",
+                      "isMinimized": false,
+                      "body": "Not doing this — reasoning",
+                      "authorAssociation": "MEMBER",
+                      "author": {
+                        "__typename": "User",
+                        "login": "me"
+                      },
+                      "databaseId": 5,
+                      "path": "p",
+                      "line": 4
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "t15",
+                "isResolved": false,
+                "isOutdated": false,
+                "comments": {
+                  "pageInfo": {
+                    "hasNextPage": false
+                  },
+                  "nodes": [
+                    {
+                      "id": "t15a",
+                      "url": "https://x/t15a",
+                      "createdAt": "2026-01-02",
+                      "isMinimized": false,
+                      "body": "cop thread a member weighed in on",
+                      "authorAssociation": "CONTRIBUTOR",
+                      "author": {
+                        "__typename": "Bot",
+                        "login": "copilot-pull-request-reviewer",
+                        "databaseId": 175728472
+                      },
+                      "databaseId": 6,
+                      "path": "p",
+                      "line": 4
+                    },
+                    {
+                      "id": "t15b",
+                      "url": "https://x/t15b",
+                      "createdAt": "2026-01-02",
+                      "isMinimized": false,
+                      "body": "member disagrees",
+                      "authorAssociation": "MEMBER",
+                      "author": {
+                        "__typename": "User",
+                        "login": "member"
+                      },
+                      "databaseId": 7,
+                      "path": "p",
+                      "line": 4
+                    },
+                    {
+                      "id": "t15c",
+                      "url": "https://x/t15c",
+                      "createdAt": "2026-01-02",
+                      "isMinimized": false,
+                      "body": "Fixed — reasoning",
+                      "authorAssociation": "MEMBER",
+                      "author": {
+                        "__typename": "User",
+                        "login": "me"
+                      },
+                      "databaseId": 8,
+                      "path": "p",
+                      "line": 4
+                    }
+                  ]
+                }
               }
             ]
           }

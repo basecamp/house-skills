@@ -35,7 +35,7 @@
                 "url": "https://x/c3",
                 "createdAt": "2026-01-01",
                 "isMinimized": false,
-                "body": "MARKER-OUTSIDE actions",
+                "body": "flaky, not your change: a note from this repo's own workflow",
                 "authorAssociation": "NONE",
                 "author": {
                   "__typename": "Bot",
@@ -220,6 +220,19 @@
                 "author": {
                   "__typename": "User",
                   "login": "member"
+                }
+              },
+              {
+                "id": "c20",
+                "url": "https://x/c20",
+                "createdAt": "2026-01-02",
+                "isMinimized": false,
+                "body": "MARKER-OUTSIDE off-list bot comment",
+                "authorAssociation": "NONE",
+                "author": {
+                  "__typename": "Bot",
+                  "login": "some-app",
+                  "databaseId": 99
                 }
               }
             ]

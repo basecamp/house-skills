@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Resolves one review thread once it's been answered, and refuses when the
+# answer isn't in yet or the thread isn't the agent's to close. It reads the PR
+# through fetch-reviews, so a thread it won't return (resolved already,
+# withheld, on another PR) can't be resolved here. A refusal and any failure
+# both exit 3, and nothing is resolved.
+#
+# Usage: resolve-thread OWNER/REPO NUMBER THREAD_ID fixed|declined
+#   fixed     the fix is pushed and every check on the PR's head has passed
+#   declined  the reasoning for not doing it is the thread's last reply
+# Either way the thread's last comment must be the token's own reply, and no
+# person but the token's account may have written in it: a person's thread is
+# answered and left to them.
+set -euo pipefail
+tmp=$(mktemp -d)
+finish() {
+  local status=$?
+  rm -rf "$tmp"
+  if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then
+    echo '{"refused": "resolving failed, so the thread was left as it was"}'
+    exit 3
+  fi
+}
+trap finish EXIT
+
+usage="usage: resolve-thread OWNER/REPO NUMBER THREAD_ID fixed|declined"
+repo=${1:?$usage}
+number=${2:?$usage}
+thread=${3:?$usage}
+how=${4:?$usage}
+case "$how" in fixed | declined) ;; *) echo "$usage" >&2; exit 2 ;; esac
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+refuse() { jq -nc --arg why "$1" --arg thread "$thread" '{refused: $why, thread: $thread}'; exit 3; }
+
+"$here/fetch-reviews" "$repo" "$number" > "$tmp/pr.json" || { cat "$tmp/pr.json"; exit 3; }
+
+verdict=$(jq -r --arg id "$thread" '
+  .viewer as $me
+  | [.threads[] | select(.id == $id)][0] as $t
+  | if $t == null then "missing"
+    # A cleared outside comment has no author here, and a person cleared it.
+    elif any($t.comments[]; .by == "person" and .login != $me) then "person"
+    elif ($t.comments[-1].login // "") != $me then "unanswered"
+    else "ok" end' "$tmp/pr.json")
+case "$verdict" in
+  missing) refuse "fetch-reviews returns no unresolved thread $thread on this PR: it's resolved already, withheld for a person, or on another PR" ;;
+  person) refuse "a person wrote in this thread: answer them and leave it to them to resolve" ;;
+  unanswered) refuse "the thread's last comment isn't yours: reply with the fix or the decline first" ;;
+esac
+
+if [ "$how" = fixed ]; then
+  head=$(jq -r .head "$tmp/pr.json")
+  gh api graphql -F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$number" -f query='
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+        commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } } } } }' > "$tmp/checks.json"
+  state=$(jq -r --arg head "$head" '.data.repository.pullRequest.commits.nodes[0].commit
+    | if .oid != $head then "MOVED" else .statusCheckRollup.state // "NONE" end' "$tmp/checks.json")
+  case "$state" in
+    MOVED) refuse "the PR's head moved since it was read; run again" ;;
+    SUCCESS) ;;
+    NONE) refuse "no checks have reported on the head yet; resolve once they pass" ;;
+    PENDING | EXPECTED) refuse "the head's checks haven't finished; resolve once they pass" ;;
+    *) refuse "the head's checks ended $state: the fix isn't green" ;;
+  esac
+fi
+
+gh api graphql -f id="$thread" -f query='
+  mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id isResolved } } }' > "$tmp/done.json"
+jq -e '.data.resolveReviewThread.thread.isResolved == true' "$tmp/done.json" >/dev/null ||
+  refuse "GitHub didn't report the thread resolved"
+jq -nc --arg thread "$thread" --arg how "$how" '{resolved: $thread, as: $how}'
