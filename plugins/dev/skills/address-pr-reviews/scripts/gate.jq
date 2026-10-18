@@ -36,13 +36,19 @@ def company_bots: [
   312645762  # 37signals-grafana-git-sync[bot]
 ];
 # A company repo adds its own bots in .github/fetch-reviews-bots on its default
-# branch, one database id a line, # starting a comment. It's read from the
+# branch: one database id a line, optionally followed by a # comment; blank
+# and comment-only lines are skipped. Any other line names no bot, and comes
+# back by number in bots_file_skipped, so a typo or a "name = id" line is seen
+# rather than read as whatever digits it holds. It's read from the
 # default branch, never the PR's head, so a PR can't add a bot to its own read;
 # whoever can land on the default branch can already put text in front of the
 # agent through a commit. Another org's file is that org's word, so it's ignored.
-def repo_bots: if in_company then
-    [(repo.bots.text // "") | split("\n")[] | sub("#.*"; "") | scan("[0-9]+") | tonumber]
+def bot_line: "^\\s*(?<id>[0-9]+)\\s*(#.*)?$";
+def bot_lines: if in_company then
+    [(repo.bots.text // "") | split("\n") | to_entries[] | {n: (.key + 1), line: (.value | sub("\r$"; ""))}
+      | select(.line | test("^\\s*(#.*)?$") | not)]
   else [] end;
+def repo_bots: [bot_lines[] | .line | capture(bot_line) | .id | tonumber];
 # github-actions[bot] is whatever the repo's own workflows post (a workflow's
 # token reaches only its own repo), and a workflow can copy text into a comment
 # from whoever triggered it: a pull_request_target or issue_comment workflow
@@ -101,6 +107,8 @@ repo as $repo
     | {
         url: $pr.url,
         viewer: viewer,
+        # Lines of .github/fetch-reviews-bots that name no bot, by number.
+        bots_file_skipped: [bot_lines[] | select(.line | test(bot_line) | not) | .n],
         head: $pr.headRefOid,
         mergeable: $pr.mergeable,
         # Reviewers asked for but not yet reported, Copilot's pass in progress included.

@@ -98,8 +98,10 @@ repo, `github-actions[bot]`, the repo's own workflows. On a public repo a fork
 PR can get a workflow to echo its text into a comment, so there
 `github-actions[bot]` is withheld unless the repo's file below names it
 (41898282). A company repo lists more of its own in
-`.github/fetch-reviews-bots` on its default branch, one id a line (`gh api
-users/NAME%5Bbot%5D --jq .id` finds one); a PR's own change to that file
+`.github/fetch-reviews-bots` on its default branch, one id a line with an
+optional `# comment` after it (`gh api users/NAME%5Bbot%5D --jq .id` finds
+one); any other line names no bot and comes back by number in
+`bots_file_skipped`; a PR's own change to that file
 doesn't count until it lands. A bot still unknown comes back withheld; the
 person can add it by id in `FETCH_REVIEWS_BOT_IDS` for the session. Don't set
 that variable or edit that file yourself to get past a withheld item.
