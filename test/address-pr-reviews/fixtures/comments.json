@@ -35,12 +35,12 @@
                 "url": "https://x/c3",
                 "createdAt": "2026-01-01",
                 "isMinimized": false,
-                "body": "MARKER-OUTSIDE actions",
+                "body": "MARKER-OUTSIDE ci app",
                 "authorAssociation": "NONE",
                 "author": {
                   "__typename": "Bot",
-                  "login": "github-actions",
-                  "databaseId": 41898282
+                  "login": "ci-app",
+                  "databaseId": 424243
                 }
               },
               {

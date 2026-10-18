@@ -17,8 +17,21 @@ cat > "$tmp/bin/gh" <<'EOF'
 # query: the check is by name over the whole query, so a field asked for in one
 # selection passes for another. A fixture with a field left out stands in for
 # what gh returns when one selection drops it.
-[ "${1:-} ${2:-}" = "api graphql" ] || { echo "stub gh: not a GraphQL call: $*" >&2; exit 1; }
+# The one REST call it answers is an app lookup, GET apps/<slug> with --jq, from
+# $FX/apps.json keyed by slug: a slug not in it is a 404, as for an app that
+# doesn't exist or another org's private one. Each lookup is logged to FX_CALLS.
 [ -z "${FX_FAIL:-}" ] || { echo "stub gh: simulated failure" >&2; exit 1; }
+if [ "${1:-}" = api ] && [[ ${2:-} == apps/* ]]; then
+  slug=${2#apps/} filter=. prev=''
+  echo "$slug" >> "$FX_CALLS"
+  for arg in "$@"; do [ "$prev" != --jq ] || filter=$arg; prev=$arg; done
+  [ -z "${FX_APPS_FAIL:-}" ] || { echo "stub gh: simulated failure" >&2; exit 1; }
+  jq -e --arg s "$slug" 'has($s)' "$FX/apps.json" >/dev/null 2>&1 \
+    || { echo '{"message":"Not Found","status":"404"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+  jq --arg s "$slug" '.[$s]' "$FX/apps.json" | jq -c "$filter"
+  exit
+fi
+[ "${1:-} ${2:-}" = "api graphql" ] || { echo "stub gh: not a GraphQL call: $*" >&2; exit 1; }
 paginate='' slurp='' query=''
 for arg in "$@"; do
   case "$arg" in
@@ -55,8 +68,9 @@ check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: got $2, w
 run() {
   jq "$1" "$here/fixtures/head.json" > "$tmp/head.json"
   rm -f "$tmp/head-read"
+  : > "$tmp/calls"
   local status=0
-  PATH="$tmp/bin:$PATH" FX="${FXDIR:-$here/fixtures}" FX_HEAD="$tmp/head.json" FX_STATE="$tmp/head-read" \
+  PATH="$tmp/bin:$PATH" FX="${FXDIR:-$here/fixtures}" FX_HEAD="$tmp/head.json" FX_STATE="$tmp/head-read" FX_CALLS="$tmp/calls" \
     "$fetch" o/r 1 > "$tmp/out.json" 2>/dev/null || status=$?
   cat "$tmp/out.json"; echo "$status"
 }
@@ -172,5 +186,71 @@ check "outside the company's orgs, a member's own Resolved hide doesn't clear it
   "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c18") | .kind]')" '["comment"]'
 check "an off-list bot's own Resolved hide doesn't clear it" \
   "$(out "$(run .)" | jq -c '[.withheld[] | select(.url == "https://x/c19") | .kind]')" '["comment"]'
+
+# A bot whose GitHub App the repo's owner owns is inside, wherever it posts; a
+# bot of another owner's app, an app whose lookup fails or comes back without
+# an owner or for another slug, and a User named like an app's bot stay
+# withheld. These fixtures are made up: the apps and their ids belong to no one.
+mkdir "$tmp/fx-apps"; cp "$here"/fixtures/*.json "$tmp/fx-apps/"
+node() { jq -nc --arg id "$1" --arg type "$2" --arg login "$3" --argjson db "$4" --arg assoc "$5" \
+  '{id: $id, url: "https://x/\($id)", createdAt: "2026-01-03", isMinimized: false,
+    body: "\(if $assoc == "outside" then "MARKER-OUTSIDE " else "" end)\($login) as \($type)",
+    authorAssociation: "NONE", author: ({__typename: $type, login: $login}
+      + if $type == "Bot" then {databaseId: $db} else {} end)}'; }
+comment() { node "$@" inside; }
+outside() { node "$@" outside; }
+jq --argjson add "[$(comment a1 Bot house-app 900001),
+    $(outside a3 Bot elsewhere-app 900002), $(outside a4 User 'house-app[bot]' 0),
+    $(comment a5 Bot github-actions 41898282), $(outside a6 User 'github-actions[bot]' 0),
+    $(outside a7 Bot ownerless-app 900003), $(outside a8 Bot renamed-app 900004),
+    $(outside a9 Bot 'bad/slug' 900005), $(outside a10 Bot my-app 900006),
+    $(outside a11 Bot $'house-app\n' 900007)]" \
+  '.[0].data.repository.pullRequest.comments.nodes += $add' \
+  "$here/fixtures/comments.json" > "$tmp/fx-apps/comments.json"
+jq --argjson add "$(comment a2 Bot house-app 900001)" \
+  '.[0].data.repository.pullRequest.reviews.nodes += [$add + {state: "COMMENTED", commit: {oid: "abc"}}]' \
+  "$here/fixtures/reviews.json" > "$tmp/fx-apps/reviews.json"
+jq --argjson add "$(comment ta1 Bot house-app 900001)" \
+  '.[0].data.repository.pullRequest.reviewThreads.nodes += [{id: "ta", isResolved: false, isOutdated: false,
+    comments: {pageInfo: {hasNextPage: false}, nodes: [$add + {databaseId: 90, path: "p", line: 1}]}}]' \
+  "$here/fixtures/threads.json" > "$tmp/fx-apps/threads.json"
+cat > "$tmp/fx-apps/apps.json" <<'EOF'
+{
+  "house-app": {"slug": "house-app", "name": "MARKER-OUTSIDE name", "description": "MARKER-OUTSIDE description", "owner": {"login": "BaseCamp", "type": "Organization"}},
+  "elsewhere-app": {"slug": "elsewhere-app", "owner": {"login": "other-org", "type": "Organization"}},
+  "github-actions": {"slug": "github-actions", "owner": {"login": "github", "type": "Organization"}},
+  "ownerless-app": {"slug": "ownerless-app"},
+  "renamed-app": {"slug": "another-app", "owner": {"login": "basecamp", "type": "Organization"}},
+  "my-app": {"slug": "my-app", "owner": {"login": "me", "type": "User"}}
+}
+EOF
+apps() { FXDIR="$tmp/fx-apps" run "$@"; }
+kept='[.reviews[].id, .comments[].id, .threads[].id] | map(select(test("^(a|ta)")))'
+withheld='[.withheld[].url | ltrimstr("https://x/") | select(test("^(a|ta)"))]'
+got=$(apps .)
+check "an app the repo's org owns is inside in a review, a comment and a thread, its owner matched whatever its case" \
+  "$(status "$got") $(out "$got" | jq -c "$kept")" '0 ["a2","a1","a5","ta"]'
+check "another org's app, a failed or ownerless lookup, an answer for another slug, a login that isn't a slug, and a User named like a bot are withheld" \
+  "$(out "$got" | jq -c "$withheld")" '["a3","a4","a6","a7","a8","a9","a10","a11"]'
+check "no outside text, nor an app's name or description, reaches the output" \
+  "$(grep -c MARKER-OUTSIDE <<<"$got" || true)" 0
+check "github-actions[bot] is inside by type and id; a User named github-actions[bot] is withheld" \
+  "$(out "$got" | jq -c '[.comments[].id | select(. == "a5")], [.withheld[].url | select(. == "https://x/a6")]')" \
+  "$(printf '%s\n%s' '["a5"]' '["https://x/a6"]')"
+check "each off-list bot is looked up once, a listed bot or a User never, and a login that isn't a slug never" \
+  "$(sort "$tmp/calls" | jq -Rsc 'split("\n")[:-1]')" \
+  '["ci-app","elsewhere-app","house-app","my-app","ownerless-app","renamed-app","some-app","somebot"]'
+got=$(FX_APPS_FAIL=1 apps .)
+check "a failed app lookup is tried once, leaves the app's bot withheld, and the rest is still read" \
+  "$(status "$got") $(grep -cx house-app "$tmp/calls") $(out "$got" | jq -c "$kept") $(out "$got" | jq -c "[.withheld[].url | select(test(\"/(a1|a2|ta1)\$\"))]")" \
+  '0 1 ["a5"] ["https://x/ta1","https://x/a2","https://x/a1"]'
+got=$(apps "$elsewhere | $pr.author.login = \"me\"")
+check "on another org's repo, that org's app is inside and the company's is withheld" \
+  "$(out "$got" | jq -c "$kept"), $(out "$got" | jq -c "$withheld" | jq -c 'map(select(IN("a1", "a3")))')" \
+  '["a3","a5"], ["a1"]'
+got=$(apps ".data.repository.owner = {__typename: \"User\", login: \"me\"}
+  | $pr.author.login = \"me\" | $pr.authorAssociation = \"OWNER\" | $pr.headRepositoryOwner = {login: \"me\"}")
+check "on a personal repo, its owner's own app is inside" \
+  "$(out "$got" | jq -c "$kept" | jq -c 'map(select(IN("a1", "a10")))')" '["a10"]'
 
 exit $fail
