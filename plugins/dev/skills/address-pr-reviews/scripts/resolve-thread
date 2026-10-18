@@ -6,7 +6,8 @@
 # both exit 3, and nothing is resolved.
 #
 # Usage: resolve-thread OWNER/REPO NUMBER THREAD_ID fixed|declined
-#   fixed     the fix is pushed and every check on the PR's head has passed
+#   fixed     the fix is pushed and the head's required checks have passed, or,
+#             where the base requires none, every check on the head
 #   declined  the reasoning for not doing it is the thread's last reply
 # Either way the thread's last comment must be the token's own reply, and no
 # person but the token's account may have written in it: a person's thread is
@@ -53,17 +54,41 @@ case "$verdict" in
   unanswered) refuse "the thread's last comment isn't yours: reply with the fix or the decline first" ;;
 esac
 
+# A fix is green when the checks the base requires passed on the head: the ones
+# the landing waits on. The combined rollup also counts optional runners' status
+# contexts and a queue's own runs on the pull request, which a red or cancelled
+# one turns FAILURE while the required check is green (hey-native-apps' tools/land
+# ignores those for the same reason), so it judges only a repo that requires
+# nothing. A required check that hasn't reported yet isn't among the contexts;
+# the rollup reads EXPECTED then, which holds.
 if [ "$how" = fixed ]; then
   head=$(jq -r .head "$tmp/pr.json")
   gh api graphql -F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$number" -f query='
     query($owner: String!, $name: String!, $number: Int!) {
       repository(owner: $owner, name: $name) { pullRequest(number: $number) {
-        commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } } } } }' > "$tmp/checks.json"
+        commits(last: 1) { nodes { commit { oid statusCheckRollup { state
+          contexts(first: 100) { pageInfo { hasNextPage } nodes { __typename
+            ... on CheckRun { name status conclusion isRequired(pullRequestNumber: $number) }
+            ... on StatusContext { context state isRequired(pullRequestNumber: $number) } } } } } } } } } }' > "$tmp/checks.json"
   state=$(jq -r --arg head "$head" '.data.repository.pullRequest.commits.nodes[0].commit
-    | if .oid != $head then "MOVED" else .statusCheckRollup.state // "NONE" end' "$tmp/checks.json")
+    | if .oid != $head then "MOVED" else
+      (.statusCheckRollup // {}) as $rollup
+      | [$rollup.contexts.nodes[]? | select(.isRequired == true)] as $required
+      | if ($rollup.contexts.pageInfo.hasNextPage // false) then "PAGED"
+        elif ($required | length) == 0 then $rollup.state // "NONE"
+        elif any($required[]; (.__typename == "CheckRun" and .status != "COMPLETED")
+            or (.__typename == "StatusContext" and (.state | IN("PENDING", "EXPECTED")))) then "REQUIRED_PENDING"
+        elif all($required[]; (.__typename == "CheckRun" and (.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED")))
+            or (.__typename == "StatusContext" and .state == "SUCCESS")) then
+          (if $rollup.state == "EXPECTED" then "REQUIRED_PENDING" else "SUCCESS" end)
+        else "REQUIRED_FAILED" end
+      end' "$tmp/checks.json")
   case "$state" in
     MOVED) refuse "the PR's head moved since it was read; run again" ;;
     SUCCESS) ;;
+    PAGED) refuse "the head has more check contexts than one page holds, so the required ones can't be judged here" ;;
+    REQUIRED_PENDING) refuse "a required check hasn't finished on the head; resolve once it passes" ;;
+    REQUIRED_FAILED) refuse "a required check failed on the head: the fix isn't green" ;;
     NONE) refuse "no checks have reported on the head yet; resolve once they pass" ;;
     PENDING | EXPECTED) refuse "the head's checks haven't finished; resolve once they pass" ;;
     *) refuse "the head's checks ended $state: the fix isn't green" ;;
