@@ -76,4 +76,6 @@ jq -n -f "$here/gate.jq" --argjson extra "$extra" \
   --slurpfile comments "$tmp/comments.json" \
   --slurpfile threads "$tmp/reviewThreads.json" > "$tmp/out.json"
 cat "$tmp/out.json"
+skipped=$(jq -r '.bots_file_skipped // [] | map(tostring) | join(", ")' "$tmp/out.json")
+[ -z "$skipped" ] || echo "fetch-reviews: .github/fetch-reviews-bots line(s) $skipped name no bot id, so they were skipped" >&2
 jq -e '.refused == null' "$tmp/out.json" >/dev/null || exit 3

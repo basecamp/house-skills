@@ -198,6 +198,16 @@ got=$(run "$bots")
 check "a company repo's .github/fetch-reviews-bots adds its bots; a number in a comment doesn't" \
   "$(out "$got" | jq -c '[(.reviews[], .comments[], .threads[]) | select(IN(.id; "r5", "t7", "c20")) | .id], [.withheld[].url | select(test("r5|t7|c20"))]')" \
   "$(printf '%s\n%s' '["r5","c20","t7"]' '[]')"
+# One id a line: a line with digits in it but not an id names no bot. Bot
+# 424242 wrote c19, so reading digits out of "foo = 424242" would let it through.
+got=$(run '.data.repository.bots = {text: "foo = 424242\n\n  # a comment\n99 # some-app\n424242 extra\r\n"}')
+check "a .github/fetch-reviews-bots line that isn't one id names no bot, and is listed by number" \
+  "$(out "$got" | jq -c '[.comments[].id | select(. == "c19")], [.withheld[].url | select(test("c19|r5"))], .bots_file_skipped')" \
+  "$(printf '%s\n%s\n%s' '[]' '["https://x/c19"]' '[1,5]')"
+check "the skipped lines are named on stderr" \
+  "$(jq '.data.repository.bots = {text: "foo = 424242\n"}' "$here/fixtures/head.json" > "$tmp/head.json"; rm -f "$tmp/head-read"
+     PATH="$tmp/bin:$PATH" FX="$here/fixtures" FX_HEAD="$tmp/head.json" FX_STATE="$tmp/head-read" "$fetch" o/r 1 2>&1 >/dev/null)" \
+  "fetch-reviews: .github/fetch-reviews-bots line(s) 1 name no bot id, so they were skipped"
 got=$(run "$bots | $elsewhere | $pr.author.login = \"me\"")
 check "another org's .github/fetch-reviews-bots is ignored" \
   "$(out "$got" | jq -c '[.withheld[].url | select(test("r5|t7|c20"))]')" '["https://x/t7a","https://x/r5","https://x/c20"]'
