@@ -8,6 +8,18 @@
 # FETCH_REVIEWS_BOT_IDS adds review bots by database id, for a repo whose
 # reviewers aren't the ones gate.jq lists. Set it yourself; never from a file
 # in the repo under review, which the PR itself could change.
+#
+# A bot off that list is also inside when its GitHub App is owned by the repo's
+# owner (gate.jq's owned_app), so an org's own apps need no list or setting.
+# GraphQL's Bot carries no app or owner, and REST's performed_via_github_app
+# is on issue comments but not reviews, so the owner comes from one
+# GET /apps/<slug> per distinct off-list bot login per run (a bot's login is
+# its app's slug), whatever it posted. Copilot, Codex and github-actions are on
+# the list, so a usual PR needs one lookup or none. Only the app's slug and owner
+# login are kept; its name and description never leave this script. A lookup
+# that fails (a 404 for another org's private app, a rate limit, a network
+# error), an owner missing from the answer, or an answer for a different slug
+# leaves that bot out of the map, so it stays outside, as it was before.
 set -euo pipefail
 tmp=$(mktemp -d)
 finish() {
@@ -66,10 +78,22 @@ same() { jq -r '.data.repository.pullRequest | [.headRefOid, .reviews.totalCount
 [ "$(same "$tmp/head0.json")" = "$(same "$tmp/head.json")" ] || {
   echo '{"refused": "the PR changed while reading; run again"}'; exit 3; }
 
-jq -n -f "$here/gate.jq" --argjson extra "$extra" \
-  --slurpfile head "$tmp/head.json" \
-  --slurpfile reviews "$tmp/reviews.json" \
-  --slurpfile comments "$tmp/comments.json" \
-  --slurpfile threads "$tmp/reviewThreads.json" > "$tmp/out.json"
+gate() {
+  jq -n -f "$here/gate.jq" --argjson extra "$extra" --arg phase "$1" --slurpfile apps "$tmp/apps.json" \
+    --slurpfile head "$tmp/head.json" \
+    --slurpfile reviews "$tmp/reviews.json" \
+    --slurpfile comments "$tmp/comments.json" \
+    --slurpfile threads "$tmp/reviewThreads.json"
+}
+echo '{}' > "$tmp/apps.json"
+gate bots | jq -r . > "$tmp/bots.txt"
+: > "$tmp/apps.jsonl"
+while IFS= read -r slug; do
+  app=$(gh api "apps/$slug" --jq '{slug, owner: .owner.login}' </dev/null 2>/dev/null) &&
+    jq -c --arg asked "$slug" '{asked: $asked} + .' <<<"$app" >> "$tmp/apps.jsonl" 2>/dev/null || true
+done < "$tmp/bots.txt"
+jq -s 'map(select((.slug | type) == "string" and (.slug | ascii_downcase) == .asked
+    and (.owner | type) == "string") | {(.asked): .owner}) | add // {}' "$tmp/apps.jsonl" > "$tmp/apps.json"
+gate judge > "$tmp/out.json"
 cat "$tmp/out.json"
 jq -e '.refused == null' "$tmp/out.json" >/dev/null || exit 3
