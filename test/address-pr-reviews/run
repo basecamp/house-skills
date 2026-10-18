@@ -107,6 +107,9 @@ check "later pages are read: inside items kept, outside items withheld" \
   "$(printf '%s\n%s' '["r7","c14","t11"]' '["t12a","r8","c15"]')"
 check "a PR comment from a bot off the list is withheld, not dropped" \
   "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c20") | [.kind, .by]]')" '[["comment","bot"]]'
+check "a withheld thread or review holds convergence; a withheld plain comment, or a comment in a resolved thread, doesn't" \
+  "$(out "$got" | jq -c '[.withheld[] | select(IN(.url; "https://x/t7a", "https://x/t5b", "https://x/r5", "https://x/c20")) | [.kind, .holds]]')" \
+  '[["thread",true],["thread-comment",false],["review",true],["comment",false]]'
 check "on a company repo, github-actions[bot]'s note comes through as a bot's comment" \
   "$(out "$got" | jq -c '[.comments[] | select(.id == "c3") | [.login, .by]]')" '[["github-actions","bot"]]'
 check "the token's account comes through, so a pass can tell its own replies" "$(out "$got" | jq -r .viewer)" me
@@ -200,12 +203,26 @@ check "another org's .github/fetch-reviews-bots is ignored" \
   "$(out "$got" | jq -c '[.withheld[].url | select(test("r5|t7|c20"))]')" '["https://x/t7a","https://x/r5","https://x/c20"]'
 
 # resolve-thread: resolve THREAD fixed|declined, with CHECKS as the head's
-# check rollup. Prints the output, a line saying whether the mutation ran, and
-# the exit status.
+# check rollup: a bare state (no contexts), or contexts as
+# "req:gate=SUCCESS,opt:linux=FAILURE", req marking a required check and
+# PENDING one still running, the rollup's state derived as GitHub combines them.
+# Prints the output, a line saying whether the mutation ran, and the exit status.
 resolve() {
   jq . "$here/fixtures/head.json" > "$tmp/head.json"
-  jq -n --arg oid "${3:-abc}" --arg state "$2" '{data: {repository: {pullRequest: {commits: {nodes: [{commit:
-    {oid: $oid, statusCheckRollup: (if $state == "NONE" then null else {state: $state} end)}}]}}}}}' > "$tmp/checks.json"
+  if [[ $2 == *=* ]]; then
+    jq -n --arg oid "${3:-abc}" --arg spec "$2" '
+      [$spec | split(",")[] | capture("(?<kind>req|opt):(?<name>[^=]+)=(?<c>.+)")
+        | {__typename: "CheckRun", name, isRequired: (.kind == "req"),
+           status: (if .c == "PENDING" then "IN_PROGRESS" else "COMPLETED" end),
+           conclusion: (if .c == "PENDING" then null else .c end)}] as $nodes
+      | {data: {repository: {pullRequest: {commits: {nodes: [{commit: {oid: $oid, statusCheckRollup: {
+          state: (if any($nodes[]; .conclusion == "FAILURE") then "FAILURE"
+                  elif any($nodes[]; .conclusion == null) then "PENDING" else "SUCCESS" end),
+          contexts: {pageInfo: {hasNextPage: false}, nodes: $nodes}}}}]}}}}}' > "$tmp/checks.json"
+  else
+    jq -n --arg oid "${3:-abc}" --arg state "$2" '{data: {repository: {pullRequest: {commits: {nodes: [{commit:
+      {oid: $oid, statusCheckRollup: (if $state == "NONE" then null else {state: $state} end)}}]}}}}}' > "$tmp/checks.json"
+  fi
   rm -f "$tmp/head-read" "$tmp/head-read.resolved"
   local status=0
   PATH="$tmp/bin:$PATH" FX="$here/fixtures" FX_HEAD="$tmp/head.json" FX_STATE="$tmp/head-read" FX_CHECKS="$tmp/checks.json" \
@@ -227,6 +244,15 @@ holds "a fixed thread holds while the head's checks run" "t14 fixed" PENDING "ha
 holds "a fixed thread holds before any check reports" "t14 fixed" NONE "no checks"
 holds "a fixed thread holds when the head's checks failed" "t14 fixed" FAILURE "ended FAILURE"
 holds "a fixed thread holds when the head moved after the read" "t14 fixed" SUCCESS "head moved" def
+resolves "a fixed thread resolves when the required check passed, though an optional runner's failed" \
+  "t14 fixed" "req:gate=SUCCESS,opt:setup-check/linux=FAILURE"
+resolves "a required check skipped counts as passed, as GitHub counts it" "t14 fixed" "req:gate=SKIPPED,opt:linux=SUCCESS"
+holds "a fixed thread holds when the required check failed, though every other passed" \
+  "t14 fixed" "req:gate=FAILURE,opt:linux=SUCCESS" "required check failed"
+holds "a fixed thread holds while the required check runs, though every other passed" \
+  "t14 fixed" "req:gate=PENDING,opt:linux=SUCCESS" "required check hasn.t finished"
+holds "where the base requires no check, every check counts" "t14 fixed" "opt:gate=SUCCESS,opt:linux=FAILURE" "ended FAILURE"
+resolves "where the base requires no check, all green resolves" "t14 fixed" "opt:gate=SUCCESS,opt:publish=SKIPPED"
 holds "a thread whose last comment is the reviewer's holds: reply first" "t2 declined" NONE "reply with"
 holds "a thread a person other than the token wrote in is theirs to resolve" "t15 declined" NONE "a person wrote"
 holds "a person's thread holds even once the fix is green" "t15 fixed" SUCCESS "a person wrote"
