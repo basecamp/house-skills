@@ -81,21 +81,30 @@ if [ "$how" = fixed ]; then
             contexts(first: 100) { pageInfo { hasNextPage } nodes { __typename
               ... on CheckRun { name status conclusion isRequired(pullRequestNumber: $number) }
               ... on StatusContext { context state isRequired(pullRequestNumber: $number) } } } } } } } } } }' > "$tmp/checks.json"
+  # The ruleset read is bounded on purpose, and fails closed past its bound: a
+  # ref pattern it can't convert (fnmatch's ? or [...]) is read as reaching the
+  # base, so its checks are required; a Workflows rule, which names runs rather
+  # than contexts, holds the fix as unjudged. A required check restricted to one
+  # GitHub App is matched by name alone, since a same-named context from another
+  # app on the same head is not a case worth a selector.
   state=$(jq -r --arg head "$head" '
-    def glob: "^" + (ltrimstr("refs/heads/") | gsub("[.+?^${}()|\\[\\]\\\\]"; "\\\(.)") | gsub("\\*\\*"; "\u0000") | gsub("\\*"; "[^/]*") | gsub("\u0000"; ".*")) + "$";
+    def glob: "^" + (ltrimstr("refs/heads/") | gsub("[.+^${}()|\\\\]"; "\\\(.)") | gsub("\\*\\*"; "\u0000") | gsub("\\*"; "[^/]*") | gsub("\u0000"; ".*")) + "$";
     .data.repository as $repo
     | $repo.pullRequest.baseRef.name as $base
-    | def reaches: . == "~ALL" or (. == "~DEFAULT_BRANCH" and $base == $repo.defaultBranchRef.name) or ($base | test(glob));
+    | def reaches: . as $pattern | $pattern == "~ALL" or ($pattern == "~DEFAULT_BRANCH" and $base == $repo.defaultBranchRef.name)
+        or ($pattern | test("[?\\[]")) or ($base | test($pattern | glob));
     [$repo.rulesets.nodes[]? | select(.enforcement == "ACTIVE" and .target == "BRANCH"
-        and any(.conditions.refName.include[]?; reaches) and (any(.conditions.refName.exclude[]?; reaches) | not))
-      | .rules.nodes[]? | select(.type == "REQUIRED_STATUS_CHECKS") | .parameters.requiredStatusChecks[]?.context]
-      + ($repo.pullRequest.baseRef.branchProtectionRule.requiredStatusCheckContexts // []) | unique as $named
+        and any(.conditions.refName.include[]?; reaches) and (any(.conditions.refName.exclude[]?; reaches) | not))] as $rulesets
+    | ([$rulesets[].rules.nodes[]? | select(.type == "REQUIRED_STATUS_CHECKS") | .parameters.requiredStatusChecks[]?.context]
+      + ($repo.pullRequest.baseRef.branchProtectionRule.requiredStatusCheckContexts // []) | unique) as $named
+    | any($rulesets[].rules.nodes[]?; .type | IN("WORKFLOWS", "REQUIRED_WORKFLOW_STATUS_CHECKS")) as $workflows
     | $repo.pullRequest.commits.nodes[0].commit
     | if .oid != $head then "MOVED" else
       (.statusCheckRollup // {}) as $rollup
       | [$rollup.contexts.nodes[]? | select(.isRequired == true or ((.name // .context) | IN($named[])))] as $required
       | [$required[] | .name // .context] as $reported
       | if ($rollup.contexts.pageInfo.hasNextPage // false) or ($repo.rulesets.pageInfo.hasNextPage // false) then "PAGED"
+        elif $workflows then "REQUIRED_WORKFLOWS"
         elif any($named[]; IN($reported[]) | not) then "REQUIRED_MISSING"
         elif ($required | length) == 0 then $rollup.state // "NONE"
         elif any($required[]; (.__typename == "CheckRun" and .status != "COMPLETED")
@@ -109,6 +118,7 @@ if [ "$how" = fixed ]; then
     MOVED) refuse "the PR's head moved since it was read; run again" ;;
     SUCCESS) ;;
     PAGED) refuse "the head's check contexts or the repo's rulesets run past one page, so the required checks can't be judged here" ;;
+    REQUIRED_WORKFLOWS) refuse "a ruleset reaching the base requires workflows to pass, which this script can't judge by name; resolve the thread by hand once they pass" ;;
     REQUIRED_MISSING) refuse "a check the base requires hasn't reported on the head; resolve once it passes" ;;
     REQUIRED_PENDING) refuse "a required check hasn't finished on the head; resolve once it passes" ;;
     REQUIRED_FAILED) refuse "a required check failed on the head: the fix isn't green" ;;
