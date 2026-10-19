@@ -2,7 +2,7 @@
 name: address-pr-reviews
 description: |
   Address PR review comments - fix issues, reply to threads, mark resolved
-version: 1.6.0
+version: 1.7.0
 triggers:
   # Direct invocations
   - address pr reviews
