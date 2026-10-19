@@ -253,4 +253,25 @@ got=$(apps ".data.repository.owner = {__typename: \"User\", login: \"me\"}
 check "on a personal repo, its owner's own app is inside" \
   "$(out "$got" | jq -c "$kept" | jq -c 'map(select(IN("a1", "a10")))')" '["a10"]'
 
+# A person accepts an answer by a reply, an approval, or a thumbs-up on it. The
+# thumbs-up comes through only from the token's account and the people who
+# wrote in the thread: a stranger's login never reaches the output.
+mkdir "$tmp/fx-agree"; cp "$here"/fixtures/*.json "$tmp/fx-agree/"
+jq '.[0].data.repository.pullRequest.reviewThreads.nodes += [{id: "tp", isResolved: false, isOutdated: false,
+    comments: {pageInfo: {hasNextPage: false}, nodes: [
+      {id: "tp1", url: "https://x/tp1", createdAt: "2026-01-04", isMinimized: false, body: "rename this",
+       authorAssociation: "MEMBER", author: {__typename: "User", login: "member"}, databaseId: 91, path: "p", line: 1,
+       reactions: {nodes: []}},
+      {id: "tp2", url: "https://x/tp2", createdAt: "2026-01-05", isMinimized: false, body: "Not doing this — reasons",
+       authorAssociation: "MEMBER", author: {__typename: "User", login: "me"}, databaseId: 92, path: "p", line: 1,
+       reactions: {nodes: [{user: {login: "member"}}, {user: {login: "me"}}, {user: {login: "MARKER-OUTSIDE-stranger"}}]}}]}}]' \
+  "$here/fixtures/threads.json" > "$tmp/fx-agree/threads.json"
+got=$(FXDIR="$tmp/fx-agree" run .)
+check "a thumbs-up comes through for the token's account and the thread's people, never a stranger's" \
+  "$(status "$got") $(out "$got" | jq -c '[.threads[] | select(.id == "tp") | .comments[] | [.id, .thumbs_up]]')" \
+  '0 [["tp1",[]],["tp2",["me","member"]]]'
+check "no stranger's login reaches the output" "$(grep -c MARKER-OUTSIDE <<<"$got" || true)" 0
+check "each kept item says when it was written, and the output names the token's account" \
+  "$(out "$got" | jq -c '[.viewer, ([.reviews[], .comments[], (.threads[].comments[] | select(.cleared | not))] | all(.at != null))]')" '["me",true]'
+
 exit $fail

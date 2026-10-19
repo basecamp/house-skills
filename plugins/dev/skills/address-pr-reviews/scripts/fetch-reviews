@@ -67,7 +67,8 @@ page() {
 page reviews "$item state commit { oid }"
 page comments "$item"
 page reviewThreads "id isResolved isOutdated
-  comments(first: 100) { pageInfo { hasNextPage } nodes { $item databaseId path line } }"
+  comments(first: 100) { pageInfo { hasNextPage } nodes { $item databaseId path line
+    reactions(content: THUMBS_UP, first: 100) { nodes { user { login } } } } }"
 
 # Read the head again after the paged reads: if the head moved, or a review,
 # comment or thread was added meanwhile, the feedback may not match what's
