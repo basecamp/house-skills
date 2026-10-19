@@ -64,11 +64,13 @@ page() {
     $pr { $1(first: 100, after: \$endCursor) {
       pageInfo { hasNextPage endCursor } nodes { $2 } } } } }" > "$tmp/$1.json"
 }
-page reviews "$item state commit { oid }"
+page reviews "$item submittedAt state commit { oid }"
 page comments "$item"
+# 100 threads x 100 comments x 40 reactions keeps this query under GitHub's
+# 500,000-node limit, which counts every connection's page size, not what's there.
 page reviewThreads "id isResolved isOutdated
   comments(first: 100) { pageInfo { hasNextPage } nodes { $item databaseId path line
-    reactions(content: THUMBS_UP, first: 100) { nodes { user { login } } } } }"
+    reactions(content: THUMBS_UP, first: 40) { totalCount nodes { user { login } } } } }"
 
 # Read the head again after the paged reads: if the head moved, or a review,
 # comment or thread was added meanwhile, the feedback may not match what's

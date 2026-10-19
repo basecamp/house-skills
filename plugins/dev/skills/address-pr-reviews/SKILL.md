@@ -80,11 +80,14 @@ state, `viewer` (the token's account), and:
   last finished on.
 - `threads`: unresolved review threads, with each comment's `databaseId`,
   `path`, `line` and `thumbs_up`: who gave it a 👍, among the token's account
-  and the people who wrote in that thread.
+  and the people who wrote in that thread. Only the first 40 👍 are read; when
+  `thumbs_up_complete` is false, a 👍 missing from the list may still be there,
+  so don't count its absence either way: it holds the thread, as no signal does.
 - `withheld`: what you may not read, as `{kind, url, by, association}` with no
   text. See **Withheld items** in §3.
 
-Every item has a `url` to cite, and each with text an `at`, when it was written.
+Every item has a `url` to cite, and each with text an `at`, when it was written
+(for a review, when it was submitted).
 A member's text comes through as they posted it, quotes included: what a member
 quotes is theirs to answer for, and you judge it on merit like the rest of what
 they wrote. The one thing taken out of any text is Unicode tag characters
