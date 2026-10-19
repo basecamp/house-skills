@@ -4,7 +4,8 @@
 # output. Variants of head.json are made here, each named by what it changes.
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-fetch=$here/../../plugins/dev/skills/address-pr-reviews/scripts/fetch-reviews
+scripts=$here/../../plugins/dev/skills/address-pr-reviews/scripts
+fetch=$scripts/fetch-reviews
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir "$tmp/bin"
@@ -38,9 +39,20 @@ for arg in "$@"; do
     --paginate) paginate=1 ;;
     --slurp) slurp=1 ;;
     query=*) query=${arg#query=} ;;
+    id=*) id=${arg#id=} ;;
   esac
 done
 case "$query" in
+  # resolve-thread's mutation: recorded, so a test can tell whether it ran.
+  *"resolveReviewThread("*) echo "$query" >> "$FX_STATE.resolved"
+    echo '{"data": {"resolveReviewThread": {"thread": {"id": "t", "isResolved": true}}}}'; exit 0 ;;
+  *"statusCheckRollup"*) file=$FX_CHECKS ;;
+  # resolve-thread's recount: the thread's comments in the fixture, plus
+  # FX_REPLIES more, standing in for replies posted while it ran.
+  *"node(id:"*) jq -c --arg id "$id" --argjson more "${FX_REPLIES:-0}" '[.[].data.repository.pullRequest.reviewThreads.nodes[]
+      | select(.id == $id)][0] | {data: {node: {isResolved, comments: {totalCount: ((.comments.nodes | length) + $more)},
+        pullRequest: {headRefOid: (env.FX_HEAD_NOW // "abc")}}}}' \
+      "$FX/threads.json"; exit 0 ;;
   *"reviewThreads("*) file=$FX/threads.json ;;
   *"reviews("*) file=$FX/reviews.json ;;
   *"comments(first"*) file=$FX/comments.json ;;
@@ -53,7 +65,7 @@ esac
 for key in $(jq -r '[.. | objects | keys[]] | unique[] | select(. != "data")' "$file"); do
   grep -qw -- "$key" <<<"$query" || { echo "stub gh: the query doesn't ask for $key" >&2; exit 1; }
 done
-if [ "$file" = "$FX_HEAD" ] || [ "$file" = "${FX_HEAD_LATER:-}" ]; then cat "$file"
+if [ "$file" = "$FX_HEAD" ] || [ "$file" = "${FX_HEAD_LATER:-}" ] || [ "$file" = "${FX_CHECKS:-}" ]; then cat "$file"
 elif [ -z "$paginate" ]; then jq '.[0]' "$file"
 elif [[ $query != *'after: $endCursor'* ]]; then echo "stub gh: --paginate without \$endCursor" >&2; exit 1
 elif [ -n "$slurp" ]; then cat "$file"
@@ -108,6 +120,11 @@ check "later pages are read: inside items kept, outside items withheld" \
   "$(out "$got" | jq -c '[.reviews[].id, .comments[].id, .threads[].id | select(IN("r7", "c14", "t11"))],
     [.withheld[].url | ltrimstr("https://x/") | select(IN("r8", "c15", "t12a"))]')" \
   "$(printf '%s\n%s' '["r7","c14","t11"]' '["t12a","r8","c15"]')"
+check "a withheld thread or review holds convergence; a withheld plain comment, or a comment in a resolved thread, doesn't" \
+  "$(out "$got" | jq -c '[.withheld[] | select(IN(.url; "https://x/t7a", "https://x/t5b", "https://x/r5", "https://x/c3")) | [.kind, .holds]]')" \
+  '[["thread",true],["thread-comment",false],["review",true],["comment",false]]'
+check "each kept item says whether a person or a bot wrote it" \
+  "$(out "$got" | jq -c '[.comments[] | select(IN(.id; "c6", "c7")) | .by]')" '["person","bot"]'
 check "a PR comment from a bot off the list is withheld, not dropped" \
   "$(out "$got" | jq -c '[.withheld[] | select(.url == "https://x/c3") | [.kind, .by]]')" '[["comment","bot"]]'
 check "a resolved thread too long to fetch whole is withheld whole, like an unresolved one" \
@@ -298,5 +315,186 @@ check "thumbs_up_complete says whether every thumbs-up was read" \
 check "no stranger's login reaches the output" "$(grep -c MARKER-OUTSIDE <<<"$got" || true)" 0
 check "each kept item says when it was written, and the output names the token's account" \
   "$(out "$got" | jq -c '[.viewer, ([.reviews[], .comments[], (.threads[].comments[] | select(.cleared | not))] | all(.at != null))]')" '["me",true]'
+
+# resolve-thread. Its threads, beside the shared fixtures: each node is
+# [id, login, association, body, thumbs-up logins], a Bot when the login is
+# copilot's, "me" the token's account.
+mkdir "$tmp/fx-resolve"; cp "$here"/fixtures/*.json "$tmp/fx-resolve/"
+jq '.[0].data.repository.pullRequest.reviewThreads.nodes += ($threads | map(. as [$id, $nodes]
+    | {id: $id, isResolved: false, isOutdated: false, comments: {pageInfo: {hasNextPage: false},
+        nodes: [$nodes | to_entries[] | .key as $k | .value as [$cid, $login, $assoc, $body, $up]
+          | {id: $cid, url: "https://x/\($cid)", createdAt: "2026-02-0\($k + 1)", isMinimized: false, body: $body,
+             authorAssociation: $assoc, databaseId: 100, path: "p", line: 1,
+             reactions: {totalCount: ($up | length), nodes: [$up[] | {user: {login: .}}]},
+             author: (if $login == "copilot-pull-request-reviewer" then {__typename: "Bot", login: $login, databaseId: 175728472}
+                      else {__typename: "User", login: $login} end)}]}}))' \
+  --argjson threads '[
+    ["t14", [["t14a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
+             ["t14b", "me", "MEMBER", "Not doing this — reasoning", []]]],
+    ["t15", [["t15a", "member", "MEMBER", "please rename it", []],
+             ["t15b", "me", "MEMBER", "Fixed — renamed", []]]],
+    ["t16", [["t16a", "member", "MEMBER", "please rename it", []],
+             ["t16b", "me", "MEMBER", "Not doing this — reasoning", []],
+             ["t16c", "member", "MEMBER", "agreed, resolve it", []]]],
+    ["t17", [["t17a", "member", "MEMBER", "please rename it", []],
+             ["t17b", "me", "MEMBER", "Not doing this — reasoning", ["member"]]]],
+    ["t18", [["t18a", "member", "MEMBER", "please rename it", []],
+             ["t18b", "me", "MEMBER", "Not doing this — reasoning", []]]],
+    ["t19", [["t19a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
+             ["t19b", "me", "MEMBER", "Fixed — done", []],
+             ["t19c", "copilot-pull-request-reviewer", "NONE", "still wrong", []]]],
+    ["t21", [["t21a", "member", "MEMBER", "please rename it", []],
+             ["t21b", "me", "MEMBER", "Not doing this — reasoning", ["member"]],
+             ["t21c", "member", "MEMBER", "still wrong", []]]],
+    ["t22", [["t22a", "member", "MEMBER", "please rename it", []],
+             ["t22b", "me", "MEMBER", "Not doing this — reasoning", []],
+             ["t22c", "member", "MEMBER", "still wrong", []]]],
+    ["t23", [["t23a", "member", "MEMBER", "please rename it", []],
+             ["t23b", "other", "MEMBER", "why rename it?", []],
+             ["t23c", "me", "MEMBER", "Fixed — renamed", []]]],
+    ["t24", [["t24a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
+             ["t24b", "me", "MEMBER", "Fixed — done", []]]],
+    ["t25", [["t25a", "member", "MEMBER", "please rename it", []],
+             ["t25b", "me", "MEMBER", "Fixed — moved it instead", ["member"]]]],
+    ["t26", [["t26a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
+             ["t26b", "me", "MEMBER", "Flagged for human review — out of scope", []]]],
+    ["t20", [["t20a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
+             ["t20b", "me", "MEMBER", "Not doing this — reasoning", []],
+             ["t20c", "me", "MEMBER", "no, do it", []]]]]' \
+  "$here/fixtures/threads.json" > "$tmp/fx-resolve/threads.json"
+cp "$tmp/fx-resolve/reviews.json" "$tmp/fx-resolve/reviews-base.json"
+# approve AT: the member approves the PR, submitted at AT.
+approve() {
+  jq --arg at "$1" '.[0].data.repository.pullRequest.reviews.nodes += [{id: "ra", url: "https://x/ra",
+      createdAt: "2026-01-01", submittedAt: $at, isMinimized: false, body: "", authorAssociation: "MEMBER",
+      author: {__typename: "User", login: "member"}, state: "APPROVED", commit: {oid: "abc"}}]' \
+    "$tmp/fx-resolve/reviews-base.json" > "$tmp/fx-resolve/reviews.json"
+}
+
+# resolve "THREAD HOW [--agreed LOGIN]" CHECKS [HEAD_OID]: CHECKS is the head's
+# check rollup, a bare state (no contexts), or contexts as
+# "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests", req marking a check the
+# base's ruleset requires, PENDING one still running, and missing one the
+# ruleset requires that has no context on the head. Prints the output, a line
+# saying whether the mutation ran, and the exit status.
+resolve() {
+  jq . "$here/fixtures/head.json" > "$tmp/head.json"
+  if [[ $2 == *=* ]]; then
+    jq -n --arg oid "${3:-abc}" --arg spec "$2" '
+      [$spec | split(",")[] | select(test("=")) | capture("(?<kind>req|opt):(?<name>[^=]+)=(?<c>.+)")
+        | {__typename: "CheckRun", name, isRequired: (.kind == "req"),
+           status: (if .c == "PENDING" then "IN_PROGRESS" else "COMPLETED" end),
+           conclusion: (if .c == "PENDING" then null else .c end)}] as $nodes
+      | [$spec | split(",")[] | capture("^(?:req:(?<r>[^=]+)=|missing:(?<m>.+))") | .r // .m] as $named
+      | ([$spec | split(",")[] | capture("^pattern:(?<p>.+)") | .p] | if length > 0 then . else ["~DEFAULT_BRANCH"] end) as $include
+      | [$spec | split(",")[] | capture("^exclude:(?<p>.+)") | .p] as $exclude
+      | ([$spec | split(",")[] | capture("^base:(?<b>.+)") | .b][0] // "main") as $basename
+      | ($spec | split(",") | any(. == "workflows")) as $workflows
+      | {data: {repository: {
+          defaultBranchRef: {name: "main"},
+          rulesets: {pageInfo: {hasNextPage: false}, nodes: [{enforcement: "ACTIVE", target: "BRANCH",
+            conditions: {refName: {include: $include, exclude: $exclude}},
+            rules: {nodes: ([{type: "REQUIRED_STATUS_CHECKS", parameters: {requiredStatusChecks: [$named[] | {context: .}]}}]
+              + (if $workflows then [{type: "WORKFLOWS", parameters: {}}] else [] end))}}]},
+          pullRequest: {baseRef: {name: $basename, branchProtectionRule: null}, commits: {nodes: [{commit: {oid: $oid, statusCheckRollup: {
+          state: (if any($nodes[]; .conclusion == "FAILURE") then "FAILURE"
+                  elif any($nodes[]; .conclusion == null) then "PENDING" else "SUCCESS" end),
+          contexts: {pageInfo: {hasNextPage: false}, nodes: $nodes}}}}]}}}}}' > "$tmp/checks.json"
+  else
+    jq -n --arg oid "${3:-abc}" --arg state "$2" '{data: {repository: {pullRequest: {commits: {nodes: [{commit:
+      {oid: $oid, statusCheckRollup: (if $state == "NONE" then null else {state: $state} end)}}]}}}}}' > "$tmp/checks.json"
+  fi
+  rm -f "$tmp/head-read" "$tmp/head-read.resolved"
+  : > "$tmp/calls"
+  local status=0
+  PATH="$tmp/bin:$PATH" FX="$tmp/fx-resolve" FX_HEAD="$tmp/head.json" FX_STATE="$tmp/head-read" FX_CHECKS="$tmp/checks.json" \
+    FX_CALLS="$tmp/calls" "$scripts/resolve-thread" o/r 1 $1 > "$tmp/out.json" 2>/dev/null || status=$?
+  cat "$tmp/out.json"
+  if [ -e "$tmp/head-read.resolved" ]; then echo resolved; else echo untouched; fi
+  echo "$status"
+}
+ran() { tail -n 2 <<<"$1" | head -n 1; }
+resolves() { got=$(resolve "$2" "$3"); check "$1" "$(status "$got") $(ran "$got")" "0 resolved"; }
+# holds NAME "THREAD HOW" CHECKS WHY [HEAD_OID]: refused, for the reason WHY names.
+holds() {
+  got=$(resolve "$2" "$3" "${5:-abc}")
+  check "$1" "$(status "$got") $(ran "$got") $(sed '$d' <<<"$got" | sed '$d' | jq -r --arg why "$4" '.refused | test($why)')" "3 untouched true"
+}
+approve 2026-01-01
+resolves "a declined thread whose last reply is the token's resolves" "t14 declined" NONE
+resolves "a fixed thread resolves once the head's checks pass" "t24 fixed" SUCCESS
+holds "a fixed thread holds while the head's checks run" "t24 fixed" PENDING "haven't finished"
+holds "a fixed thread holds before any check reports" "t24 fixed" NONE "no checks"
+holds "a fixed thread holds when the head's checks failed" "t24 fixed" FAILURE "ended FAILURE"
+holds "a fixed thread holds when the head moved after the read" "t24 fixed" SUCCESS "head moved" def
+resolves "a fixed thread resolves when the required check passed, though an optional runner's failed" \
+  "t24 fixed" "req:gate=SUCCESS,opt:setup-check/linux=FAILURE"
+resolves "a required check skipped counts as passed, as GitHub counts it" "t24 fixed" "req:gate=SKIPPED,opt:linux=SUCCESS"
+holds "a fixed thread holds when the required check failed, though every other passed" \
+  "t24 fixed" "req:gate=FAILURE,opt:linux=SUCCESS" "required check failed"
+holds "a fixed thread holds while the required check runs, though every other passed" \
+  "t24 fixed" "req:gate=PENDING,opt:linux=SUCCESS" "required check hasn.t finished"
+holds "a check the base's ruleset requires that hasn't reported holds, though the required one that did passed and an optional one failed" \
+  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests" "requires hasn.t reported"
+holds "a ruleset whose glob reaches the base names its required checks" \
+  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/ma*" "requires hasn.t reported"
+resolves "a ruleset whose pattern doesn't reach the base names nothing" \
+  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/release/*"
+holds "a ruleset pattern this script can't convert (fnmatch's [...]) is read as reaching, so it fails closed" \
+  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/rel[0-9]" "requires hasn.t reported"
+holds "a ruleset naming a base with a literal dot reaches it, the dot escaped and not a wildcard" \
+  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,base:release/v1.0,pattern:refs/heads/release/v1.0" "requires hasn.t reported"
+resolves "a dotted pattern matches only its own name, so release/v1x0 is not release/v1.0" \
+  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,base:release/v1x0,pattern:refs/heads/release/v1.0"
+holds "an unconvertible pattern in a ruleset's exclusions is read as not excluding, so the ruleset's checks stay required" \
+  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:~ALL,exclude:refs/heads/rel[0-9]" "requires hasn.t reported"
+holds "a Workflows rule reaching the base holds a fix as unjudged, since it names runs rather than contexts" \
+  "t24 fixed" "req:gate=SUCCESS,workflows" "requires workflows"
+holds "where the base requires no check, every check counts" "t24 fixed" "opt:gate=SUCCESS,opt:linux=FAILURE" "ended FAILURE"
+resolves "where the base requires no check, all green resolves" "t24 fixed" "opt:gate=SUCCESS,opt:publish=SKIPPED"
+# Whose answer, and who has accepted it.
+holds "a thread whose last comment is the reviewer's holds: reply first" "t2 declined" NONE "no answer of yours"
+holds "a bot's finding after your answer holds: answer it first" "t19 fixed" SUCCESS "no answer of yours"
+resolves "a change a person asked for, made as asked, resolves once green" "t15 fixed" SUCCESS
+holds "a person's request you declined holds until they accept" "t18 declined" NONE "hasn.t accepted.*member"
+holds "a person's reply after your answer holds unless you read it as agreement" "t16 declined" NONE "hasn.t accepted.*member"
+resolves "a person's reply named by --agreed resolves" "t16 declined --agreed member" NONE
+holds "--agreed for someone who hasn't replied since your answer refuses" "t16 declined --agreed member --agreed other" NONE "hasn.t replied"
+holds "--agreed doesn't stand in for a reply that came before your answer" "t18 declined --agreed member" NONE "hasn.t replied"
+resolves "a person's thumbs-up on your answer resolves" "t17 declined" NONE
+holds "an approval from before your answer doesn't count" "t18 declined" NONE "hasn.t accepted.*member"
+approve 2026-03-01
+resolves "an approval submitted after your answer resolves" "t18 declined" NONE
+approve 2026-01-01
+holds "a comment from the token's account off the forms is the person's, and holds" "t20 declined" NONE "hasn.t accepted.*me"
+resolves "--agreed for the token's account's own reply resolves" "t20 declined --agreed me" NONE
+holds "a thumbs-up stops counting once that person writes again" "t21 declined" NONE "hasn.t accepted.*member"
+approve 2026-02-02T12
+holds "an approval from before that person's own later reply doesn't count" "t22 declined" NONE "hasn.t accepted.*member"
+approve 2026-03-01
+resolves "an approval after both your answer and their last reply resolves" "t22 declined" NONE
+approve 2026-01-01
+holds "fixed exempts only the person whose finding opened the thread" "t23 fixed" SUCCESS "hasn.t accepted.*other"
+holds "changed needs the person who asked to accept it" "t15 changed" SUCCESS "hasn.t accepted.*member"
+resolves "changed resolves once accepted and green" "t25 changed" SUCCESS
+holds "changed waits for the head's checks like fixed" "t25 changed" PENDING "haven't finished"
+holds "a ** pattern is read as reaching the base, so its required checks stay required" \
+  "t24 fixed" "req:gate=SUCCESS,missing:tests,pattern:refs/heads/**/main" "requires hasn.t reported"
+holds "a **/* pattern that could match with no directory between is read as reaching" \
+  "t24 fixed" "req:gate=SUCCESS,missing:tests,base:release/v1,pattern:refs/heads/release/**/*" "requires hasn.t reported"
+got=$(FX_HEAD_NOW=def resolve "t24 fixed" SUCCESS)
+check "a push after the checks were judged holds a fix" \
+  "$(status "$got") $(ran "$got") $(sed '$d' <<<"$got" | sed '$d' | jq -r '.refused | test("since its checks")')" "3 untouched true"
+holds "a flagged thread never resolves here" "t26 declined" NONE "flags the thread"
+holds "a Fixed answer can't resolve as declined, which skips the checks" "t24 declined" NONE "doesn.t match declined"
+holds "a Not doing this answer can't resolve as fixed" "t14 fixed" SUCCESS "doesn.t match fixed"
+holds "a thread holding an outside comment a person cleared is a person's to resolve" "t4 declined" NONE "cleared but not read"
+got=$(FX_REPLIES=1 resolve "t14 declined" NONE)
+check "a reply posted while it runs holds the thread" \
+  "$(status "$got") $(ran "$got") $(sed '$d' <<<"$got" | sed '$d' | jq -r '.refused | test("changed while")')" "3 untouched true"
+holds "a withheld thread can't be resolved" "t7 declined" NONE "no unresolved thread"
+holds "a thread not on the PR can't be resolved" "t99 declined" NONE "no unresolved thread"
+got=$(FX_FAIL=1 resolve "t14 declined" NONE)
+check "a failed fetch resolves nothing" "$(status "$got") $(ran "$got")" "3 untouched"
 
 exit $fail
