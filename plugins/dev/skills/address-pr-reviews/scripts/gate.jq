@@ -74,11 +74,18 @@ def cleared: .isMinimized and ((.minimizedReason // "") | ascii_downcase) == "re
   and person and (.authorAssociation | IN("NONE", "CONTRIBUTOR", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR", "MANNEQUIN"));
 def pending: (inside or cleared) | not;
 def nodes($pages; f): [$pages[0][].data.repository.pullRequest | f | .nodes[]];
-def link($kind): {kind: $kind, url, by: (if person then "person" else "bot" end), association: .authorAssociation};
+# What holds convergence is what the fleet's convergence rule counts: an
+# unresolved review thread, and a review body nobody has answered. A withheld
+# thread is an unresolved thread, and a withheld review may carry findings, so
+# each holds. A plain PR comment (a CI note, a queue note, an outsider's remark)
+# and a comment in a thread already resolved hold nothing: they're listed so a
+# person can read them, not so the PR waits.
+def link($kind): {kind: $kind, url, by: (if person then "person" else "bot" end), association: .authorAssociation,
+  holds: ($kind | IN("thread", "review"))};
 # Unicode tag characters (U+E0000-U+E007F) render as nothing on GitHub, so a
 # member who pastes them from an outsider's text can't see what they pass on.
 # Only that block goes: emoji joiners and variation selectors stay intact.
-def keep: {id, url, login: .author.login, at: .createdAt, body: (.body | gsub("[\\x{E0000}-\\x{E007F}]+"; ""))};
+def keep: {id, url, login: .author.login, by: (if person then "person" else "bot" end), at: .createdAt, body: (.body | gsub("[\\x{E0000}-\\x{E007F}]+"; ""))};
 # Who gave a thread comment a thumbs-up, kept only for the token's account and
 # the people who wrote in that thread, so no other login reaches the output. A
 # person's thumbs-up on an answer is one way they accept it (SKILL.md §3). Only

@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# Resolves one review thread once it's been answered, and refuses when the
+# answer isn't in yet or the thread isn't the agent's to close. It reads the PR
+# through fetch-reviews, so a thread it won't return (resolved already,
+# withheld, on another PR) can't be resolved here. A refusal and any failure
+# both exit 3, and nothing is resolved.
+#
+# Usage: resolve-thread OWNER/REPO NUMBER THREAD_ID fixed|declined [--agreed LOGIN]...
+#   fixed     the fix is pushed and the head's required checks have passed, or,
+#             where the base requires none, every check on the head
+#   declined  your answer was anything but the change asked for, made as asked:
+#             a decline, a different change, or an answer to a question
+#   --agreed  LOGIN replied after your answer, and you read the reply as
+#             agreement asking nothing more (SKILL.md §3); repeat per person
+#
+# Your answer is the thread's last comment from the token's account that opens
+# with one of the skill's reply forms ("Fixed —", "Flagged for human review —",
+# "Not doing this —"). Agents post under the person's account, so any other
+# comment from it is the person's. After your answer, only people may have
+# written: a bot after it is a finding still unanswered.
+#
+# Each person who wrote in the thread must have accepted the answer, or, for
+# fixed, asked for the change and said nothing since. A person accepted when,
+# after your answer, they gave it a thumbs-up, approved the PR, or replied and
+# are named by --agreed. --agreed is your reading of their words, which this
+# can't check; it does check that they replied after your answer. An outside
+# comment a person cleared comes through without its text, so it's a person's
+# that nobody here has read, and holds the thread whatever else is true.
+#
+# The thread is counted again just before resolving, so a reply that lands
+# while this runs holds it. That narrows the race; it can't close it, since
+# GitHub resolves with no condition on the thread's comments.
+set -euo pipefail
+tmp=$(mktemp -d)
+finish() {
+  local status=$?
+  rm -rf "$tmp"
+  if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then
+    echo '{"refused": "resolving failed, so the thread was left as it was"}'
+    exit 3
+  fi
+}
+trap finish EXIT
+
+usage="usage: resolve-thread OWNER/REPO NUMBER THREAD_ID fixed|declined [--agreed LOGIN]..."
+repo=${1:?$usage}
+number=${2:?$usage}
+thread=${3:?$usage}
+how=${4:?$usage}
+case "$how" in fixed | declined) ;; *) echo "$usage" >&2; exit 2 ;; esac
+shift 4
+agreed=()
+while [ $# -gt 0 ]; do
+  case "$1" in --agreed) agreed+=("${2:?$usage}"); shift 2 ;; *) echo "$usage" >&2; exit 2 ;; esac
+done
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+refuse() { jq -nc --arg why "$1" --arg thread "$thread" '{refused: $why, thread: $thread}'; exit 3; }
+
+"$here/fetch-reviews" "$repo" "$number" > "$tmp/pr.json" || { cat "$tmp/pr.json"; exit 3; }
+
+verdict=$(jq -r --arg id "$thread" --arg how "$how" --argjson agreed "$(jq -nc '$ARGS.positional' --args ${agreed[@]+"${agreed[@]}"})" '
+  .viewer as $me
+  | ([.reviews[] | select(.state == "APPROVED")]) as $approvals
+  | [.threads[] | select(.id == $id)][0] as $t
+  | def answer: .login == $me and (.body // "" | test("^\\s*(Fixed|Flagged for human review|Not doing this) —"));
+    def person: (.cleared // false) or (.by == "person" and (answer | not));
+  if $t == null then "missing"
+  # A cleared outside comment comes through with no author or text: unread here.
+  elif any($t.comments[]; .cleared // false) then "cleared"
+  else
+    ([$t.comments | to_entries[] | select(.value | answer) | .key] | last) as $i
+    | if $i == null then "unanswered" else
+      $t.comments[$i] as $a | $t.comments[$i + 1:] as $after
+      | if any($after[]; person | not) then "unanswered"
+        elif any($agreed[]; . as $l | any($after[]; .login == $l) | not) then "agreed-without-reply"
+        else
+          [$t.comments[] | select(person) | .login] | unique
+          | map(. as $p | select(
+              (($a.thumbs_up // []) | index($p)) == null
+              and (any($approvals[]; .login == $p and (.at // "") > ($a.at // "")) | not)
+              and (($agreed | index($p)) == null)
+              and ($how != "fixed" or any($after[]; .login == $p))))
+          | if length > 0 then "person:" + join(",") else "ok" end
+        end
+      end
+  end' "$tmp/pr.json")
+case "$verdict" in
+  missing) refuse "fetch-reviews returns no unresolved thread $thread on this PR: it's resolved already, withheld for a person, or on another PR" ;;
+  cleared) refuse "a person's outside comment in this thread was cleared but not read here: leave the thread to them" ;;
+  unanswered) refuse "the thread has no answer of yours after its last finding: reply with the fix or the decline first" ;;
+  agreed-without-reply) refuse "--agreed names someone who hasn't replied since your answer" ;;
+  person:*) refuse "a person in this thread hasn't accepted your answer (${verdict#person:}): answer them and leave it to them" ;;
+esac
+
+# A fix is green when the checks the base requires passed on the head: the ones
+# the landing waits on. The combined rollup also counts optional runners' status
+# contexts and a queue's own runs on the pull request, which a red or cancelled
+# one turns FAILURE while the required check is green (hey-native-apps' tools/land
+# ignores those for the same reason), so it judges only a repo that requires
+# nothing. What the base requires is read from the repository's active rulesets
+# whose ref conditions reach the base (~ALL, ~DEFAULT_BRANCH, refs/heads/<name>,
+# or a glob), and from classic branch protection; a required check that hasn't
+# reported yet has no context on the head, so it's found by name, not by
+# isRequired, and holds. mergeStateStatus can't stand in for this: a ruleset
+# that lets only the landing queue push reads BLOCKED with every check green.
+if [ "$how" = fixed ]; then
+  head=$(jq -r .head "$tmp/pr.json")
+  gh api graphql -F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$number" -f query='
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        defaultBranchRef { name }
+        rulesets(first: 100, includeParents: true) { pageInfo { hasNextPage } nodes { enforcement target
+          conditions { refName { include exclude } }
+          rules(first: 100) { nodes { type parameters {
+            ... on RequiredStatusChecksParameters { requiredStatusChecks { context } } } } } } }
+        pullRequest(number: $number) {
+          baseRef { name branchProtectionRule { requiredStatusCheckContexts } }
+          commits(last: 1) { nodes { commit { oid statusCheckRollup { state
+            contexts(first: 100) { pageInfo { hasNextPage } nodes { __typename
+              ... on CheckRun { name status conclusion isRequired(pullRequestNumber: $number) }
+              ... on StatusContext { context state isRequired(pullRequestNumber: $number) } } } } } } } } } }' > "$tmp/checks.json"
+  # The ruleset read is bounded on purpose, and fails closed past its bound: a
+  # ref pattern it can't convert (fnmatch's ? or [...]) is read as reaching the
+  # base, so its checks are required; a Workflows rule, which names runs rather
+  # than contexts, holds the fix as unjudged. A required check restricted to one
+  # GitHub App is matched by name alone, since a same-named context from another
+  # app on the same head is not a case worth a selector.
+  state=$(jq -r --arg head "$head" '
+    def glob: "^" + (ltrimstr("refs/heads/") | gsub("(?<c>[.+^${}()|\\\\])"; "\\\(.c)") | gsub("\\*\\*"; "\u0000") | gsub("\\*"; "[^/]*") | gsub("\u0000"; ".*")) + "$";
+    .data.repository as $repo
+    | $repo.pullRequest.baseRef.name as $base
+    # A pattern the converter cannot express (fnmatch ? or [...]) is read the way
+    # that keeps more required: as reaching when it includes, as not when it excludes.
+    | def reaches($unconvertible): . as $pattern | $pattern == "~ALL" or ($pattern == "~DEFAULT_BRANCH" and $base == $repo.defaultBranchRef.name)
+        or (if ($pattern | test("[?\\[]")) then $unconvertible else ($base | test($pattern | glob)) end);
+    [$repo.rulesets.nodes[]? | select(.enforcement == "ACTIVE" and .target == "BRANCH"
+        and any(.conditions.refName.include[]?; reaches(true)) and (any(.conditions.refName.exclude[]?; reaches(false)) | not))] as $rulesets
+    | ([$rulesets[].rules.nodes[]? | select(.type == "REQUIRED_STATUS_CHECKS") | .parameters.requiredStatusChecks[]?.context]
+      + ($repo.pullRequest.baseRef.branchProtectionRule.requiredStatusCheckContexts // []) | unique) as $named
+    | any($rulesets[].rules.nodes[]?; .type | IN("WORKFLOWS", "REQUIRED_WORKFLOW_STATUS_CHECKS")) as $workflows
+    | $repo.pullRequest.commits.nodes[0].commit
+    | if .oid != $head then "MOVED" else
+      (.statusCheckRollup // {}) as $rollup
+      | [$rollup.contexts.nodes[]? | select(.isRequired == true or ((.name // .context) | IN($named[])))] as $required
+      | [$required[] | .name // .context] as $reported
+      | if ($rollup.contexts.pageInfo.hasNextPage // false) or ($repo.rulesets.pageInfo.hasNextPage // false) then "PAGED"
+        elif $workflows then "REQUIRED_WORKFLOWS"
+        elif any($named[]; IN($reported[]) | not) then "REQUIRED_MISSING"
+        elif ($required | length) == 0 then $rollup.state // "NONE"
+        elif any($required[]; (.__typename == "CheckRun" and .status != "COMPLETED")
+            or (.__typename == "StatusContext" and (.state | IN("PENDING", "EXPECTED")))) then "REQUIRED_PENDING"
+        elif all($required[]; (.__typename == "CheckRun" and (.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED")))
+            or (.__typename == "StatusContext" and .state == "SUCCESS")) then
+          (if $rollup.state == "EXPECTED" then "REQUIRED_PENDING" else "SUCCESS" end)
+        else "REQUIRED_FAILED" end
+      end' "$tmp/checks.json")
+  case "$state" in
+    MOVED) refuse "the PR's head moved since it was read; run again" ;;
+    SUCCESS) ;;
+    PAGED) refuse "the head's check contexts or the repo's rulesets run past one page, so the required checks can't be judged here" ;;
+    REQUIRED_WORKFLOWS) refuse "a ruleset reaching the base requires workflows to pass, which this script can't judge by name; resolve the thread by hand once they pass" ;;
+    REQUIRED_MISSING) refuse "a check the base requires hasn't reported on the head; resolve once it passes" ;;
+    REQUIRED_PENDING) refuse "a required check hasn't finished on the head; resolve once it passes" ;;
+    REQUIRED_FAILED) refuse "a required check failed on the head: the fix isn't green" ;;
+    NONE) refuse "no checks have reported on the head yet; resolve once they pass" ;;
+    PENDING | EXPECTED) refuse "the head's checks haven't finished; resolve once they pass" ;;
+    *) refuse "the head's checks ended $state: the fix isn't green" ;;
+  esac
+fi
+
+seen=$(jq -r --arg id "$thread" '.threads[] | select(.id == $id) | .comments | length' "$tmp/pr.json")
+gh api graphql -f id="$thread" -f query='
+  query($id: ID!) { node(id: $id) { ... on PullRequestReviewThread { isResolved comments { totalCount } } } }' > "$tmp/now.json"
+now=$(jq -r '.data.node | if .isResolved then "resolved" else .comments.totalCount end' "$tmp/now.json")
+[ "$now" = "$seen" ] || refuse "the thread changed while this ran ($seen comments read, now $now); run again"
+
+gh api graphql -f id="$thread" -f query='
+  mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id isResolved } } }' > "$tmp/done.json"
+jq -e '.data.resolveReviewThread.thread.isResolved == true' "$tmp/done.json" >/dev/null ||
+  refuse "GitHub didn't report the thread resolved"
+jq -nc --arg thread "$thread" --arg how "$how" '{resolved: $thread, as: $how}'
