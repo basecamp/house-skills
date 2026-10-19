@@ -17,7 +17,9 @@
 #
 # Your answer is the thread's last comment from the token's account that opens
 # with one of the skill's reply forms ("Fixed —", "Flagged for human review —",
-# "Not doing this —"). Agents post under the person's account, so any other
+# "Not doing this —"). Its form has to match the mode: "Fixed —" for fixed and
+# changed, "Not doing this —" for declined. A flagged thread is a person's to
+# decide, so it never resolves here. Agents post under the person's account, so any other
 # comment from it is the person's. After your answer, only people may have
 # written: a bot after it is a finding still unanswered.
 #
@@ -74,7 +76,10 @@ verdict=$(jq -r --arg id "$thread" --arg how "$how" --argjson agreed "$(jq -nc '
     ([$t.comments | to_entries[] | select(.value | answer) | .key] | last) as $i
     | if $i == null then "unanswered" else
       $t.comments[$i] as $a | $t.comments[$i + 1:] as $after
+      | ($a.body | capture("^\\s*(?<f>Fixed|Flagged for human review|Not doing this) —").f) as $form
       | if any($after[]; person | not) then "unanswered"
+        elif $form == "Flagged for human review" then "flagged"
+        elif ($form == "Fixed") != ($how != "declined") then "form:" + $form
         elif any($agreed[]; . as $l | any($after[]; .login == $l) | not) then "agreed-without-reply"
         else
           [$t.comments[] | select(person) | .login] | unique
@@ -94,6 +99,8 @@ case "$verdict" in
   missing) refuse "fetch-reviews returns no unresolved thread $thread on this PR: it's resolved already, withheld for a person, or on another PR" ;;
   cleared) refuse "a person's outside comment in this thread was cleared but not read here: leave the thread to them" ;;
   unanswered) refuse "the thread has no answer of yours after its last finding: reply with the fix or the decline first" ;;
+  flagged) refuse "your answer flags the thread for a person: it stays open for them" ;;
+  form:*) refuse "your answer opens \"${verdict#form:} —\", which doesn't match $how: fixed and changed answer \"Fixed —\", declined \"Not doing this —\"" ;;
   agreed-without-reply) refuse "--agreed names someone who hasn't replied since your answer" ;;
   person:*) refuse "a person in this thread hasn't accepted your answer (${verdict#person:}): answer them and leave it to them" ;;
 esac

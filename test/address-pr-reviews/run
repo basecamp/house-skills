@@ -352,6 +352,12 @@ jq '.[0].data.repository.pullRequest.reviewThreads.nodes += ($threads | map(. as
     ["t23", [["t23a", "member", "MEMBER", "please rename it", []],
              ["t23b", "other", "MEMBER", "why rename it?", []],
              ["t23c", "me", "MEMBER", "Fixed — renamed", []]]],
+    ["t24", [["t24a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
+             ["t24b", "me", "MEMBER", "Fixed — done", []]]],
+    ["t25", [["t25a", "member", "MEMBER", "please rename it", []],
+             ["t25b", "me", "MEMBER", "Fixed — moved it instead", ["member"]]]],
+    ["t26", [["t26a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
+             ["t26b", "me", "MEMBER", "Flagged for human review — out of scope", []]]],
     ["t20", [["t20a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
              ["t20b", "me", "MEMBER", "Not doing this — reasoning", []],
              ["t20c", "me", "MEMBER", "no, do it", []]]]]' \
@@ -416,41 +422,41 @@ holds() {
 }
 approve 2026-01-01
 resolves "a declined thread whose last reply is the token's resolves" "t14 declined" NONE
-resolves "a fixed thread resolves once the head's checks pass" "t14 fixed" SUCCESS
-holds "a fixed thread holds while the head's checks run" "t14 fixed" PENDING "haven't finished"
-holds "a fixed thread holds before any check reports" "t14 fixed" NONE "no checks"
-holds "a fixed thread holds when the head's checks failed" "t14 fixed" FAILURE "ended FAILURE"
-holds "a fixed thread holds when the head moved after the read" "t14 fixed" SUCCESS "head moved" def
+resolves "a fixed thread resolves once the head's checks pass" "t24 fixed" SUCCESS
+holds "a fixed thread holds while the head's checks run" "t24 fixed" PENDING "haven't finished"
+holds "a fixed thread holds before any check reports" "t24 fixed" NONE "no checks"
+holds "a fixed thread holds when the head's checks failed" "t24 fixed" FAILURE "ended FAILURE"
+holds "a fixed thread holds when the head moved after the read" "t24 fixed" SUCCESS "head moved" def
 resolves "a fixed thread resolves when the required check passed, though an optional runner's failed" \
-  "t14 fixed" "req:gate=SUCCESS,opt:setup-check/linux=FAILURE"
-resolves "a required check skipped counts as passed, as GitHub counts it" "t14 fixed" "req:gate=SKIPPED,opt:linux=SUCCESS"
+  "t24 fixed" "req:gate=SUCCESS,opt:setup-check/linux=FAILURE"
+resolves "a required check skipped counts as passed, as GitHub counts it" "t24 fixed" "req:gate=SKIPPED,opt:linux=SUCCESS"
 holds "a fixed thread holds when the required check failed, though every other passed" \
-  "t14 fixed" "req:gate=FAILURE,opt:linux=SUCCESS" "required check failed"
+  "t24 fixed" "req:gate=FAILURE,opt:linux=SUCCESS" "required check failed"
 holds "a fixed thread holds while the required check runs, though every other passed" \
-  "t14 fixed" "req:gate=PENDING,opt:linux=SUCCESS" "required check hasn.t finished"
+  "t24 fixed" "req:gate=PENDING,opt:linux=SUCCESS" "required check hasn.t finished"
 holds "a check the base's ruleset requires that hasn't reported holds, though the required one that did passed and an optional one failed" \
-  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests" "requires hasn.t reported"
+  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests" "requires hasn.t reported"
 holds "a ruleset whose glob reaches the base names its required checks" \
-  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/ma*" "requires hasn.t reported"
+  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/ma*" "requires hasn.t reported"
 resolves "a ruleset whose pattern doesn't reach the base names nothing" \
-  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/release/*"
+  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/release/*"
 holds "a ruleset pattern this script can't convert (fnmatch's [...]) is read as reaching, so it fails closed" \
-  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/rel[0-9]" "requires hasn.t reported"
+  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/rel[0-9]" "requires hasn.t reported"
 holds "a ruleset naming a base with a literal dot reaches it, the dot escaped and not a wildcard" \
-  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,base:release/v1.0,pattern:refs/heads/release/v1.0" "requires hasn.t reported"
+  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,base:release/v1.0,pattern:refs/heads/release/v1.0" "requires hasn.t reported"
 resolves "a dotted pattern matches only its own name, so release/v1x0 is not release/v1.0" \
-  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,base:release/v1x0,pattern:refs/heads/release/v1.0"
+  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,base:release/v1x0,pattern:refs/heads/release/v1.0"
 holds "an unconvertible pattern in a ruleset's exclusions is read as not excluding, so the ruleset's checks stay required" \
-  "t14 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:~ALL,exclude:refs/heads/rel[0-9]" "requires hasn.t reported"
+  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:~ALL,exclude:refs/heads/rel[0-9]" "requires hasn.t reported"
 holds "a Workflows rule reaching the base holds a fix as unjudged, since it names runs rather than contexts" \
-  "t14 fixed" "req:gate=SUCCESS,workflows" "requires workflows"
-holds "where the base requires no check, every check counts" "t14 fixed" "opt:gate=SUCCESS,opt:linux=FAILURE" "ended FAILURE"
-resolves "where the base requires no check, all green resolves" "t14 fixed" "opt:gate=SUCCESS,opt:publish=SKIPPED"
+  "t24 fixed" "req:gate=SUCCESS,workflows" "requires workflows"
+holds "where the base requires no check, every check counts" "t24 fixed" "opt:gate=SUCCESS,opt:linux=FAILURE" "ended FAILURE"
+resolves "where the base requires no check, all green resolves" "t24 fixed" "opt:gate=SUCCESS,opt:publish=SKIPPED"
 # Whose answer, and who has accepted it.
 holds "a thread whose last comment is the reviewer's holds: reply first" "t2 declined" NONE "no answer of yours"
 holds "a bot's finding after your answer holds: answer it first" "t19 fixed" SUCCESS "no answer of yours"
 resolves "a change a person asked for, made as asked, resolves once green" "t15 fixed" SUCCESS
-holds "a person's request you answered otherwise holds until they accept" "t15 declined" NONE "hasn.t accepted.*member"
+holds "a person's request you declined holds until they accept" "t18 declined" NONE "hasn.t accepted.*member"
 holds "a person's reply after your answer holds unless you read it as agreement" "t16 declined" NONE "hasn.t accepted.*member"
 resolves "a person's reply named by --agreed resolves" "t16 declined --agreed member" NONE
 holds "--agreed for someone who hasn't replied since your answer refuses" "t16 declined --agreed member --agreed other" NONE "hasn.t replied"
@@ -470,15 +476,18 @@ resolves "an approval after both your answer and their last reply resolves" "t22
 approve 2026-01-01
 holds "fixed exempts only the person whose finding opened the thread" "t23 fixed" SUCCESS "hasn.t accepted.*other"
 holds "changed needs the person who asked to accept it" "t15 changed" SUCCESS "hasn.t accepted.*member"
-resolves "changed resolves once accepted and green" "t17 changed" SUCCESS
-holds "changed waits for the head's checks like fixed" "t17 changed" PENDING "haven't finished"
+resolves "changed resolves once accepted and green" "t25 changed" SUCCESS
+holds "changed waits for the head's checks like fixed" "t25 changed" PENDING "haven't finished"
 holds "a ** pattern is read as reaching the base, so its required checks stay required" \
-  "t14 fixed" "req:gate=SUCCESS,missing:tests,pattern:refs/heads/**/main" "requires hasn.t reported"
+  "t24 fixed" "req:gate=SUCCESS,missing:tests,pattern:refs/heads/**/main" "requires hasn.t reported"
 holds "a **/* pattern that could match with no directory between is read as reaching" \
-  "t14 fixed" "req:gate=SUCCESS,missing:tests,base:release/v1,pattern:refs/heads/release/**/*" "requires hasn.t reported"
-got=$(FX_HEAD_NOW=def resolve "t14 fixed" SUCCESS)
+  "t24 fixed" "req:gate=SUCCESS,missing:tests,base:release/v1,pattern:refs/heads/release/**/*" "requires hasn.t reported"
+got=$(FX_HEAD_NOW=def resolve "t24 fixed" SUCCESS)
 check "a push after the checks were judged holds a fix" \
   "$(status "$got") $(ran "$got") $(sed '$d' <<<"$got" | sed '$d' | jq -r '.refused | test("since its checks")')" "3 untouched true"
+holds "a flagged thread never resolves here" "t26 declined" NONE "flags the thread"
+holds "a Fixed answer can't resolve as declined, which skips the checks" "t24 declined" NONE "doesn.t match declined"
+holds "a Not doing this answer can't resolve as fixed" "t14 fixed" SUCCESS "doesn.t match fixed"
 holds "a thread holding an outside comment a person cleared is a person's to resolve" "t4 declined" NONE "cleared but not read"
 got=$(FX_REPLIES=1 resolve "t14 declined" NONE)
 check "a reply posted while it runs holds the thread" \

@@ -370,7 +370,10 @@ It re-reads the PR through `fetch-reviews` and holds the rules above in code:
   one, and never one holding a cleared outside comment, which nobody here has
   read.
 - Your answer is the thread's last comment from `viewer` in one of the three
-  forms. A bot after it means a finding still unanswered, so the thread holds.
+  forms, and its form has to match the mode: "Fixed —" for `fixed` and
+  `changed`, "Not doing this —" for `declined`. A "Flagged for human review —"
+  answer never resolves here. A bot after it means a finding still
+  unanswered, so the thread holds.
 - Each person who wrote in the thread has to have accepted that answer: an
   approval submitted after it and after their own last comment, a 👍 on it
   with nothing written since, or a reply after it that you name with
@@ -382,6 +385,9 @@ It re-reads the PR through `fetch-reviews` and holds the rules above in code:
   (every check, where the base requires none): the checks the landing waits
   on, not an optional runner's status or a queue's own run on the PR. The head
   is read again just before resolving, so a push in between holds the fix.
+  This is a check that the fix is green, not a copy of GitHub's merge gate.
+  The gate still decides whether the PR can merge, and a thread resolved a
+  little early stays visible for anyone to reopen.
 - It counts the thread's comments again just before resolving, and holds if a
   reply landed meanwhile. GitHub can't make that atomic, so a reply in the
   last instant can still be resolved over; it stays visible for anyone to
