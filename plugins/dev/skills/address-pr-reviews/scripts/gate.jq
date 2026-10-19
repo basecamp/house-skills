@@ -84,12 +84,15 @@ def thumbs_up($people): [.reactions.nodes[]?.user.login // empty | select(IN($pe
 def thumbs_up_complete: (.reactions.totalCount // 0) <= ([.reactions.nodes[]?] | length);
 
 # fetch-reviews runs this twice. The first run ($phase "bots") lists the
-# slugs of the bots that need an app lookup: those typed Bot and on neither
+# slugs of the bots that need an app lookup: those typed Bot and not on the
 # list, the PR's author included, each once. Only a slug-shaped login goes out,
 # since it becomes a URL path. The second run judges, with $apps filled in.
-def unlisted_bots: [(repo.pullRequest, nodes($reviews; .reviews)[], nodes($comments; .comments)[],
-    (nodes($threads; .reviewThreads)[] | .comments.nodes[]))
-  | select(.author.__typename == "Bot" and (.author.databaseId | IN(bots[], authors[]) | not))
+# The PR's author is checked against authors only, since FETCH_REVIEWS_BOT_IDS
+# doesn't make a bot's PR inside: a bot listed there may still be an owned app.
+def unlisted_bots: [([nodes($reviews; .reviews)[], nodes($comments; .comments)[],
+    (nodes($threads; .reviewThreads)[] | .comments.nodes[])]
+    | .[] | select(.author.__typename == "Bot" and (.author.databaseId | IN(bots[]) | not))),
+    (repo.pullRequest | select(.author.__typename == "Bot" and (.author.databaseId | IN(authors[]) | not)))
   | .author.login // "" | slug | select(test("\\A[a-z0-9][a-z0-9_.-]*\\z"))] | unique;
 
 if $phase == "bots" then unlisted_bots[] else

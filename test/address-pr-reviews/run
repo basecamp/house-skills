@@ -251,6 +251,8 @@ check "each off-list bot is looked up once, a listed bot or a User never, and a 
 check "a PR by an app the repo's org owns is read, looked up as its author; another org's app's PR refuses" \
   "$(status "$(apps "$pr.author = {__typename: \"Bot\", login: \"author-app\", databaseId: 900020} | $pr.authorAssociation = \"NONE\"")") $(status "$(apps "$pr.author = {__typename: \"Bot\", login: \"elsewhere-app\", databaseId: 900002} | $pr.authorAssociation = \"NONE\"")")" \
   '0 3'
+check "a PR by an owned app is read even with its id in FETCH_REVIEWS_BOT_IDS" \
+  "$(status "$(FETCH_REVIEWS_BOT_IDS=900020 apps "$pr.author = {__typename: \"Bot\", login: \"author-app\", databaseId: 900020} | $pr.authorAssociation = \"NONE\"")")" 0
 got=$(FX_APPS_FAIL=1 apps .)
 check "a failed app lookup is tried once, leaves the app's bot withheld, and the rest is still read" \
   "$(status "$got") $(grep -cx house-app "$tmp/calls") $(out "$got" | jq -c "$kept") $(out "$got" | jq -c "[.withheld[].url | select(test(\"/(a1|a2|ta1)\$\"))]")" \
