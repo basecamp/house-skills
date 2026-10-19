@@ -57,9 +57,12 @@ def inside: member or bot;
 # or vendoring does; its description quotes upstream's release notes, which
 # SKILL.md keeps out of what's read. The review bots and FETCH_REVIEWS_BOT_IDS
 # don't count here: a PR a review bot opens is written from whatever prompt it
-# was given, which nothing here can see.
+# was given, which nothing here can see. An app's PR counts only on the
+# company's repos: on another org's, that org's writers are outside, and any of
+# them could push to the app's branch.
 def authors: [41898282, 49699333]; # github-actions, Dependabot
-def pr_author: member or (.author.__typename == "Bot" and ((.author.databaseId | IN(authors[])) or owned_app));
+def pr_author: member or (in_company and .author.__typename == "Bot"
+  and ((.author.databaseId | IN(authors[])) or owned_app));
 # A person clears an outside item by hiding it as Resolved once they've read
 # it. Hidden for any other reason (spam, off-topic, outdated, duplicate, abuse),
 # it's still unread as far as anyone knows, so it stays withheld.
