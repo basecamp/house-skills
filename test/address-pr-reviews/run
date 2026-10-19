@@ -50,7 +50,8 @@ case "$query" in
   # resolve-thread's recount: the thread's comments in the fixture, plus
   # FX_REPLIES more, standing in for replies posted while it ran.
   *"node(id:"*) jq -c --arg id "$id" --argjson more "${FX_REPLIES:-0}" '[.[].data.repository.pullRequest.reviewThreads.nodes[]
-      | select(.id == $id)][0] | {data: {node: {isResolved, comments: {totalCount: ((.comments.nodes | length) + $more)}}}}' \
+      | select(.id == $id)][0] | {data: {node: {isResolved, comments: {totalCount: ((.comments.nodes | length) + $more)},
+        pullRequest: {headRefOid: (env.FX_HEAD_NOW // "abc")}}}}' \
       "$FX/threads.json"; exit 0 ;;
   *"reviewThreads("*) file=$FX/threads.json ;;
   *"reviews("*) file=$FX/reviews.json ;;
@@ -342,6 +343,15 @@ jq '.[0].data.repository.pullRequest.reviewThreads.nodes += ($threads | map(. as
     ["t19", [["t19a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
              ["t19b", "me", "MEMBER", "Fixed — done", []],
              ["t19c", "copilot-pull-request-reviewer", "NONE", "still wrong", []]]],
+    ["t21", [["t21a", "member", "MEMBER", "please rename it", []],
+             ["t21b", "me", "MEMBER", "Not doing this — reasoning", ["member"]],
+             ["t21c", "member", "MEMBER", "still wrong", []]]],
+    ["t22", [["t22a", "member", "MEMBER", "please rename it", []],
+             ["t22b", "me", "MEMBER", "Not doing this — reasoning", []],
+             ["t22c", "member", "MEMBER", "still wrong", []]]],
+    ["t23", [["t23a", "member", "MEMBER", "please rename it", []],
+             ["t23b", "other", "MEMBER", "why rename it?", []],
+             ["t23c", "me", "MEMBER", "Fixed — renamed", []]]],
     ["t20", [["t20a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
              ["t20b", "me", "MEMBER", "Not doing this — reasoning", []],
              ["t20c", "me", "MEMBER", "no, do it", []]]]]' \
@@ -452,6 +462,23 @@ resolves "an approval submitted after your answer resolves" "t18 declined" NONE
 approve 2026-01-01
 holds "a comment from the token's account off the forms is the person's, and holds" "t20 declined" NONE "hasn.t accepted.*me"
 resolves "--agreed for the token's account's own reply resolves" "t20 declined --agreed me" NONE
+holds "a thumbs-up stops counting once that person writes again" "t21 declined" NONE "hasn.t accepted.*member"
+approve 2026-02-02T12
+holds "an approval from before that person's own later reply doesn't count" "t22 declined" NONE "hasn.t accepted.*member"
+approve 2026-03-01
+resolves "an approval after both your answer and their last reply resolves" "t22 declined" NONE
+approve 2026-01-01
+holds "fixed exempts only the person whose finding opened the thread" "t23 fixed" SUCCESS "hasn.t accepted.*other"
+holds "changed needs the person who asked to accept it" "t15 changed" SUCCESS "hasn.t accepted.*member"
+resolves "changed resolves once accepted and green" "t17 changed" SUCCESS
+holds "changed waits for the head's checks like fixed" "t17 changed" PENDING "haven't finished"
+holds "a ** pattern is read as reaching the base, so its required checks stay required" \
+  "t14 fixed" "req:gate=SUCCESS,missing:tests,pattern:refs/heads/**/main" "requires hasn.t reported"
+holds "a **/* pattern that could match with no directory between is read as reaching" \
+  "t14 fixed" "req:gate=SUCCESS,missing:tests,base:release/v1,pattern:refs/heads/release/**/*" "requires hasn.t reported"
+got=$(FX_HEAD_NOW=def resolve "t14 fixed" SUCCESS)
+check "a push after the checks were judged holds a fix" \
+  "$(status "$got") $(ran "$got") $(sed '$d' <<<"$got" | sed '$d' | jq -r '.refused | test("since its checks")')" "3 untouched true"
 holds "a thread holding an outside comment a person cleared is a person's to resolve" "t4 declined" NONE "cleared but not read"
 got=$(FX_REPLIES=1 resolve "t14 declined" NONE)
 check "a reply posted while it runs holds the thread" \

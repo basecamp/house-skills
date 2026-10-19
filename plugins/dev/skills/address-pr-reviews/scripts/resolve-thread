@@ -5,11 +5,13 @@
 # withheld, on another PR) can't be resolved here. A refusal and any failure
 # both exit 3, and nothing is resolved.
 #
-# Usage: resolve-thread OWNER/REPO NUMBER THREAD_ID fixed|declined [--agreed LOGIN]...
-#   fixed     the fix is pushed and the head's required checks have passed, or,
-#             where the base requires none, every check on the head
-#   declined  your answer was anything but the change asked for, made as asked:
-#             a decline, a different change, or an answer to a question
+# Usage: resolve-thread OWNER/REPO NUMBER THREAD_ID fixed|changed|declined [--agreed LOGIN]...
+#   fixed     the change the thread's finding asked for, made as asked, is pushed
+#             and the head's required checks have passed, or, where the base
+#             requires none, every check on the head
+#   changed   a different change from the one asked for, pushed and green as for
+#             fixed; everyone who wrote in the thread must accept it
+#   declined  no change: a decline, or an answer to a question
 #   --agreed  LOGIN replied after your answer, and you read the reply as
 #             agreement asking nothing more (SKILL.md §3); repeat per person
 #
@@ -20,9 +22,10 @@
 # written: a bot after it is a finding still unanswered.
 #
 # Each person who wrote in the thread must have accepted the answer, or, for
-# fixed, asked for the change and said nothing since. A person accepted when,
-# after your answer, they gave it a thumbs-up, approved the PR, or replied and
-# are named by --agreed. --agreed is your reading of their words, which this
+# fixed, be the one whose finding opened the thread and have said nothing
+# since. A person accepted when, after your answer and their own last comment,
+# they approved the PR; when they gave the answer a thumbs-up and haven't
+# written since it; or when they replied after it and are named by --agreed. --agreed is your reading of their words, which this
 # can't check; it does check that they replied after your answer. An outside
 # comment a person cleared comes through without its text, so it's a person's
 # that nobody here has read, and holds the thread whatever else is true.
@@ -42,12 +45,12 @@ finish() {
 }
 trap finish EXIT
 
-usage="usage: resolve-thread OWNER/REPO NUMBER THREAD_ID fixed|declined [--agreed LOGIN]..."
+usage="usage: resolve-thread OWNER/REPO NUMBER THREAD_ID fixed|changed|declined [--agreed LOGIN]..."
 repo=${1:?$usage}
 number=${2:?$usage}
 thread=${3:?$usage}
 how=${4:?$usage}
-case "$how" in fixed | declined) ;; *) echo "$usage" >&2; exit 2 ;; esac
+case "$how" in fixed | changed | declined) ;; *) echo "$usage" >&2; exit 2 ;; esac
 shift 4
 agreed=()
 while [ $# -gt 0 ]; do
@@ -75,11 +78,14 @@ verdict=$(jq -r --arg id "$thread" --arg how "$how" --argjson agreed "$(jq -nc '
         elif any($agreed[]; . as $l | any($after[]; .login == $l) | not) then "agreed-without-reply"
         else
           [$t.comments[] | select(person) | .login] | unique
-          | map(. as $p | select(
-              (($a.thumbs_up // []) | index($p)) == null
-              and (any($approvals[]; .login == $p and (.at // "") > ($a.at // "")) | not)
-              and (($agreed | index($p)) == null)
-              and ($how != "fixed" or any($after[]; .login == $p))))
+          | map(. as $p
+              | ([$a.at // ""] + [$t.comments[] | select(person and .login == $p) | .at // ""] | max) as $since
+              | any($after[]; .login == $p) as $replied
+              | select(
+                ((($a.thumbs_up // []) | index($p)) == null or $replied)
+                and (any($approvals[]; .login == $p and (.at // "") > $since) | not)
+                and (($agreed | index($p)) == null)
+                and ($how != "fixed" or $replied or ($t.comments[0] | (person | not) or .login != $p))))
           | if length > 0 then "person:" + join(",") else "ok" end
         end
       end
@@ -103,8 +109,8 @@ esac
 # reported yet has no context on the head, so it's found by name, not by
 # isRequired, and holds. mergeStateStatus can't stand in for this: a ruleset
 # that lets only the landing queue push reads BLOCKED with every check green.
-if [ "$how" = fixed ]; then
-  head=$(jq -r .head "$tmp/pr.json")
+head=$(jq -r .head "$tmp/pr.json")
+if [ "$how" != declined ]; then
   gh api graphql -F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$number" -f query='
     query($owner: String!, $name: String!, $number: Int!) {
       repository(owner: $owner, name: $name) {
@@ -132,7 +138,7 @@ if [ "$how" = fixed ]; then
     # A pattern the converter cannot express (fnmatch ? or [...]) is read the way
     # that keeps more required: as reaching when it includes, as not when it excludes.
     | def reaches($unconvertible): . as $pattern | $pattern == "~ALL" or ($pattern == "~DEFAULT_BRANCH" and $base == $repo.defaultBranchRef.name)
-        or (if ($pattern | test("[?\\[]")) then $unconvertible else ($base | test($pattern | glob)) end);
+        or (if ($pattern | test("[?\\[]|\\*\\*")) then $unconvertible else ($base | test($pattern | glob)) end);
     [$repo.rulesets.nodes[]? | select(.enforcement == "ACTIVE" and .target == "BRANCH"
         and any(.conditions.refName.include[]?; reaches(true)) and (any(.conditions.refName.exclude[]?; reaches(false)) | not))] as $rulesets
     | ([$rulesets[].rules.nodes[]? | select(.type == "REQUIRED_STATUS_CHECKS") | .parameters.requiredStatusChecks[]?.context]
@@ -170,9 +176,15 @@ fi
 
 seen=$(jq -r --arg id "$thread" '.threads[] | select(.id == $id) | .comments | length' "$tmp/pr.json")
 gh api graphql -f id="$thread" -f query='
-  query($id: ID!) { node(id: $id) { ... on PullRequestReviewThread { isResolved comments { totalCount } } } }' > "$tmp/now.json"
+  query($id: ID!) { node(id: $id) { ... on PullRequestReviewThread { isResolved comments { totalCount }
+    pullRequest { headRefOid } } } }' > "$tmp/now.json"
 now=$(jq -r '.data.node | if .isResolved then "resolved" else .comments.totalCount end' "$tmp/now.json")
 [ "$now" = "$seen" ] || refuse "the thread changed while this ran ($seen comments read, now $now); run again"
+# A push after the checks were judged would resolve a fix on checks of a head
+# that's gone, so the head is read once more here. That narrows the window to
+# the mutation itself.
+[ "$how" = declined ] || [ "$(jq -r '.data.node.pullRequest.headRefOid' "$tmp/now.json")" = "$head" ] ||
+  refuse "the PR's head moved since its checks were judged; run again"
 
 gh api graphql -f id="$thread" -f query='
   mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id isResolved } } }' > "$tmp/done.json"

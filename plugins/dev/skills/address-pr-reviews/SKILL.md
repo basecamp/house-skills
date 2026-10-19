@@ -331,9 +331,9 @@ disagreeing with your answer holds the thread until they accept your answer.
 They have accepted it when, after your latest reply in the thread, they:
 
 - reply in agreement ("agreed", "resolve it", "fine by me") and ask nothing more;
-- give your reply a 👍 (its `thumbs_up` names them); or
+- give your reply a 👍 (its `thumbs_up` names them) and write nothing after; or
 - approve the PR (an `APPROVED` review of theirs in `reviews`, its `at` later
-  than your reply's).
+  than your reply's and than their own last comment's).
 
 Anything else leaves it to them: silence, a question, a counterpoint, a yes with
 a "but". When you can't tell whether a reply agrees, it doesn't. Each person who
@@ -359,7 +359,8 @@ thread that nobody resolves stays in the merger's list forever. Resolve with
 the script, never the raw mutation:
 ```bash
 "$SKILL_DIR/scripts/resolve-thread" OWNER/REPO PR_NUMBER THREAD_ID fixed     # the change asked for, made as asked; head green
-"$SKILL_DIR/scripts/resolve-thread" OWNER/REPO PR_NUMBER THREAD_ID declined  # any other answer, written in the thread
+"$SKILL_DIR/scripts/resolve-thread" OWNER/REPO PR_NUMBER THREAD_ID changed   # a different change; head green, and accepted
+"$SKILL_DIR/scripts/resolve-thread" OWNER/REPO PR_NUMBER THREAD_ID declined  # no change: a decline or an answer, accepted
 # add --agreed LOGIN for each person whose reply after your answer agrees
 ```
 
@@ -370,15 +371,17 @@ It re-reads the PR through `fetch-reviews` and holds the rules above in code:
   read.
 - Your answer is the thread's last comment from `viewer` in one of the three
   forms. A bot after it means a finding still unanswered, so the thread holds.
-- Each person who wrote in the thread has to have accepted that answer: a 👍
-  on it, an approval submitted after it, or a reply after it that you name
-  with `--agreed`. With `fixed`, a person who asked for the change and hasn't
-  written since needs none of that. `--agreed` is your reading, which the
+- Each person who wrote in the thread has to have accepted that answer: an
+  approval submitted after it and after their own last comment, a 👍 on it
+  with nothing written since, or a reply after it that you name with
+  `--agreed`. With `fixed`, the person whose finding opened the thread, if
+  they haven't written since, needs none of that; anyone else who wrote does. `--agreed` is your reading, which the
   script can't check. It does check that the person replied after your answer.
   When you can't tell whether a reply agrees, leave it off.
-- `fixed` also waits for the head's required checks to pass (every check,
-  where the base requires none): the checks the landing waits on, not an
-  optional runner's status or a queue's own run on the PR.
+- `fixed` and `changed` also wait for the head's required checks to pass
+  (every check, where the base requires none): the checks the landing waits
+  on, not an optional runner's status or a queue's own run on the PR. The head
+  is read again just before resolving, so a push in between holds the fix.
 - It counts the thread's comments again just before resolving, and holds if a
   reply landed meanwhile. GitHub can't make that atomic, so a reply in the
   last instant can still be resolved over; it stays visible for anyone to
@@ -439,7 +442,8 @@ restate it yourself.
 A PR is converged when CI is green on its head, every reviewer that reviews
 this PR automatically (Codex where it has reported on this PR, by a review or
 its summary comment; Copilot where the repo enables it) has reported on that
-exact head (see below); a PR Codex has never reported on has no Codex to wait for, the PR is mergeable against its
+exact head (see below), save one re-requested once on this PR that hasn't
+come back, which is named instead; a PR Codex has never reported on has no Codex to wait for, the PR is mergeable against its
 base (`mergeable` is `MERGEABLE`; `UNKNOWN` means GitHub is still computing it,
 so wait and re-query rather than count it; on `CONFLICTING`, rebase and say what
 conflicted in a PR comment), the review-thread list is empty except for threads
