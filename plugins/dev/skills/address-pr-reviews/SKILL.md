@@ -2,7 +2,7 @@
 name: address-pr-reviews
 description: |
   Address PR review comments - fix issues, reply to threads, mark resolved
-version: 1.5.0
+version: 1.6.0
 triggers:
   # Direct invocations
   - address pr reviews
@@ -72,24 +72,29 @@ One script fetches the PR's reviews, comments and threads, every page of them:
 ```
 
 It prints JSON with the PR's `head` commit (its `headRefOid`), its `mergeable`
-state, and:
+state, `viewer` (the token's account), and:
 
 - `reviews`: review bodies, with `state` and the `commit` each reviewed.
 - `comments`: the PR's own comments. Codex sometimes puts its findings here
   rather than in a review, and its summary comment here says which commit it
   last finished on.
 - `threads`: unresolved review threads, with each comment's `databaseId`,
-  `path` and `line`.
+  `path`, `line` and `thumbs_up`: who gave it a 👍, among the token's account
+  and the people who wrote in that thread. Only the first 40 👍 are read; when
+  `thumbs_up_complete` is false, a 👍 missing from the list may still be there,
+  so don't count its absence either way: it holds the thread, as no signal does.
 - `withheld`: what you may not read, as `{kind, url, by, association}` with no
   text. See **Withheld items** in §3.
 
-Every item has a `url` to cite. A member's text comes through as they posted it,
-quotes included: what a member quotes is theirs to answer for, and you judge it
-on merit like the rest of what they wrote. The one thing taken out of any text
-is Unicode tag characters (U+E0000–U+E007F), which GitHub renders as nothing, so
-a member who pasted them never saw them. A review bot this repo uses but the
-script doesn't know comes back withheld; the person can add it by database id in
-`FETCH_REVIEWS_BOT_IDS` for the session. Don't set that variable yourself.
+Every item has a `url` to cite, and each with text an `at`, when it was written
+(for a review, when it was submitted).
+A member's text comes through as they posted it, quotes included: what a member
+quotes is theirs to answer for, and you judge it on merit like the rest of what
+they wrote. The one thing taken out of any text is Unicode tag characters
+(U+E0000–U+E007F), which GitHub renders as nothing, so a member who pasted them
+never saw them. A review bot this repo uses but the script doesn't know comes
+back withheld; the person can add it by database id in `FETCH_REVIEWS_BOT_IDS`
+for the session. Don't set that variable yourself.
 
 Re-running the script is the convergence probe in §4: `head` against each
 review's `commit`, and against Codex's summary comment, tells you which
@@ -296,10 +301,41 @@ layer; "out of scope" is not a reason when the thing is in scope.
 Resolve a thread once you have addressed it: after an in-scope fix has landed
 on the head and CI is green on it, or after a decline whose reasoning is written
 in the thread. Leave a thread open only when it poses a decision that is not the
-author's to make — a product or scope call, a security trade-off, or a human
-reviewer's own question or disagreement (never resolve over a human's last word;
-answer it and leave it to them). Every thread left open gets named in the
-summary comment below, so an open thread always means "someone has to decide".
+author's to make — a product or scope call, a security trade-off, or a person's
+question or disagreement they haven't accepted your answer to (below). Every
+thread left open gets named in the summary comment below, so an open thread
+always means "someone has to decide".
+
+**A person in the thread.** A change a person asked for and you made as asked
+resolves like a bot's finding, once the fix is green. A person's question, a
+finding of theirs you declined or did differently, or a reply of theirs
+disagreeing with your answer holds the thread until they accept your answer.
+They have accepted it when, after your latest reply in the thread, they:
+
+- reply in agreement ("agreed", "resolve it", "fine by me") and ask nothing more;
+- give your reply a 👍 (its `thumbs_up` names them); or
+- approve the PR (an `APPROVED` review of theirs in `reviews`, its `at` later
+  than your reply's).
+
+Anything else leaves it to them: silence, a question, a counterpoint, a yes with
+a "but". When you can't tell whether a reply agrees, it doesn't. Each person who
+disagreed has to accept: one person's agreement doesn't answer another's.
+
+**Whose comment is whose.** Agents post under the person's GitHub account, so a
+comment from `viewer`, the token's account, may be the person's or an agent's.
+Every reply this skill writes opens with one of its three forms ("Fixed —",
+"Flagged for human review —", "Not doing this —"), and its summary comment with
+the marker line. Read a comment from the token's account that opens with one of
+them as an agent's answer, and any other as the person's, agreement and
+disagreement alike. A 👍 or an approval from that account is the person's too.
+That's a convention, not proof:
+
+- An agent off the forms reads as the person. Its disagreement holds a thread
+  that might have resolved, which is the safe side.
+- An agent that wrote agreement as the person, off the forms, would let a thread
+  resolve. That gains it nothing: the same token can resolve the thread
+  outright. So never write agreement, a 👍 or an approval on a person's behalf.
+
 Bot reviewers never resolve their own threads, even outdated ones: an addressed
 thread that nobody resolves stays in the merger's list forever.
 ```bash

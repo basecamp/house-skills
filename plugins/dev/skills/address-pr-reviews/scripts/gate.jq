@@ -63,7 +63,13 @@ def link($kind): {kind: $kind, url, by: (if person then "person" else "bot" end)
 # Unicode tag characters (U+E0000-U+E007F) render as nothing on GitHub, so a
 # member who pastes them from an outsider's text can't see what they pass on.
 # Only that block goes: emoji joiners and variation selectors stay intact.
-def keep: {id, url, login: .author.login, body: (.body | gsub("[\\x{E0000}-\\x{E007F}]+"; ""))};
+def keep: {id, url, login: .author.login, at: .createdAt, body: (.body | gsub("[\\x{E0000}-\\x{E007F}]+"; ""))};
+# Who gave a thread comment a thumbs-up, kept only for the token's account and
+# the people who wrote in that thread, so no other login reaches the output. A
+# person's thumbs-up on an answer is one way they accept it (SKILL.md §3). Only
+# the first 40 are read; thumbs_up_complete says whether that was all of them.
+def thumbs_up($people): [.reactions.nodes[]?.user.login // empty | select(IN($people[]))] | unique;
+def thumbs_up_complete: (.reactions.totalCount // 0) <= ([.reactions.nodes[]?] | length);
 
 # fetch-reviews runs this twice. The first run ($phase "bots") lists the
 # slugs of the bots that need an app lookup: those typed Bot and not on the
@@ -99,16 +105,21 @@ repo as $repo
         | . + {readable: (.whole and (any(.comments.nodes[]; pending) | not))}] as $threads
     | {
         url: $pr.url,
+        # The token's account. Agents post under it, so its comments may be the
+        # person's or an agent's (SKILL.md §3, Whose comment is whose).
+        viewer: viewer,
         head: $pr.headRefOid,
         mergeable: $pr.mergeable,
         # Reviewers asked for but not yet reported, Copilot's pass in progress included.
         requested: [$pr.reviewRequests.nodes[].requestedReviewer | .login // .slug],
         requested_complete: ($pr.reviewRequests.pageInfo.hasNextPage == false),
-        reviews: [$reviews[] | select(inside) | keep + {state, commit: .commit.oid}],
+        # A review's at is when it was submitted: a pending review is created earlier.
+        reviews: [$reviews[] | select(inside) | keep + {at: (.submittedAt // .createdAt), state, commit: .commit.oid}],
         comments: [$comments[] | select(inside) | keep],
-        threads: [$threads[] | select((.isResolved | not) and .readable) | {id, isOutdated,
+        threads: [$threads[] | select((.isResolved | not) and .readable)
+          | ([.comments.nodes[] | select(member) | .author.login] + [viewer]) as $people | {id, isOutdated,
           # A cleared outside comment comes through as a link without its text.
-          comments: [.comments.nodes[] | if inside then keep + {databaseId, path, line}
+          comments: [.comments.nodes[] | if inside then keep + {databaseId, path, line, thumbs_up: thumbs_up($people), thumbs_up_complete: thumbs_up_complete}
             else {id, url, databaseId, path, line, cleared: true} end]}],
         # Each outside item stays listed until a person clears it, resolved threads
         # included, so nothing outside merges unread.
