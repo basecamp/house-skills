@@ -48,6 +48,18 @@ def owned_app: .author.__typename == "Bot"
     | ($owner | type) == "string" and ($owner | ascii_downcase) == (repo.owner.login | ascii_downcase));
 def bot: .author.__typename == "Bot" and ((.author.databaseId | IN(bots[])) or owned_app);
 def inside: member or bot;
+# A PR's diff is its author's text, so the PR is read only when its author is
+# inside in a narrower sense than a comment's: a member, or an app whose own
+# code wrote the diff. That's an app the repo's owner owns (owned_app), the
+# repo's own workflows (github-actions), or Dependabot (49699333, GitHub's own
+# app, matched by type and id), which writes version bumps from the repo's own
+# config. A Dependabot diff carries what upstream released, as a member's bump
+# or vendoring does; its description quotes upstream's release notes, which
+# SKILL.md keeps out of what's read. The review bots and FETCH_REVIEWS_BOT_IDS
+# don't count here: a PR a review bot opens is written from whatever prompt it
+# was given, which nothing here can see.
+def authors: [41898282, 49699333]; # github-actions, Dependabot
+def pr_author: member or (.author.__typename == "Bot" and ((.author.databaseId | IN(authors[])) or owned_app));
 # A person clears an outside item by hiding it as Resolved once they've read
 # it. Hidden for any other reason (spam, off-topic, outdated, duplicate, abuse),
 # it's still unread as far as anyone knows, so it stays withheld.
@@ -72,12 +84,12 @@ def thumbs_up($people): [.reactions.nodes[]?.user.login // empty | select(IN($pe
 def thumbs_up_complete: (.reactions.totalCount // 0) <= ([.reactions.nodes[]?] | length);
 
 # fetch-reviews runs this twice. The first run ($phase "bots") lists the
-# slugs of the bots that need an app lookup: those typed Bot and not on the
-# list, each once. Only a slug-shaped login goes out, since it becomes a URL
-# path. The second run judges, with $apps filled in.
-def unlisted_bots: [(nodes($reviews; .reviews)[], nodes($comments; .comments)[],
+# slugs of the bots that need an app lookup: those typed Bot and on neither
+# list, the PR's author included, each once. Only a slug-shaped login goes out,
+# since it becomes a URL path. The second run judges, with $apps filled in.
+def unlisted_bots: [(repo.pullRequest, nodes($reviews; .reviews)[], nodes($comments; .comments)[],
     (nodes($threads; .reviewThreads)[] | .comments.nodes[]))
-  | select(.author.__typename == "Bot" and (.author.databaseId | IN(bots[]) | not))
+  | select(.author.__typename == "Bot" and (.author.databaseId | IN(bots[], authors[]) | not))
   | .author.login // "" | slug | select(test("\\A[a-z0-9][a-z0-9_.-]*\\z"))] | unique;
 
 if $phase == "bots" then unlisted_bots[] else
@@ -85,7 +97,7 @@ repo as $repo
 | $repo.pullRequest as $pr
 | if in_company and ($repo.owner.viewerIsAMember | not) then
     {refused: "this token can't see the org's members, so every member would read as an outsider"}
-  elif ($pr | member | not) then
+  elif ($pr | pr_author | not) then
     {refused: "the PR's author is outside the company, so its diff is outside text too", url: $pr.url}
   elif ($pr.headRepositoryOwner.login // "") | IN($repo.owner.login, $pr.author.login) | not then
     {refused: "the PR's head is in a fork its author doesn't own, so its diff is outside text too", url: $pr.url}

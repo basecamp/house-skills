@@ -126,7 +126,14 @@ refuses() {
 }
 refuses "a token that can't see members refuses" '.data.repository.owner.viewerIsAMember = false'
 refuses "a contributor's PR refuses" "$pr.authorAssociation = \"CONTRIBUTOR\""
-refuses "a bot's PR refuses" "$pr.author = {__typename: \"Bot\", login: \"dependabot\", databaseId: 49699333}"
+refuses "an off-list bot's PR refuses" "$pr.author = {__typename: \"Bot\", login: \"some-app\", databaseId: 900010}"
+refuses "a bot named dependabot with another id refuses" "$pr.author = {__typename: \"Bot\", login: \"dependabot\", databaseId: 900011}"
+got=$(FETCH_REVIEWS_BOT_IDS="900010" run "$pr.author = {__typename: \"Bot\", login: \"some-app\", databaseId: 900010}")
+check "FETCH_REVIEWS_BOT_IDS doesn't make a bot's PR readable" "$(status "$got")" 3
+refuses "a review bot's PR refuses" "$pr.author = {__typename: \"Bot\", login: \"chatgpt-codex-connector\", databaseId: 199175422}"
+refuses "a User named dependabot[bot] who isn't a member refuses" "$pr.author = {__typename: \"User\", login: \"dependabot[bot]\"} | $pr.authorAssociation = \"NONE\""
+check "a Dependabot PR is read" "$(status "$(run "$pr.author = {__typename: \"Bot\", login: \"dependabot\", databaseId: 49699333} | $pr.authorAssociation = \"NONE\"")")" 0
+check "a github-actions PR is read" "$(status "$(run "$pr.author = {__typename: \"Bot\", login: \"github-actions\", databaseId: 41898282} | $pr.authorAssociation = \"NONE\"")")" 0
 refuses "a head in someone else's fork refuses" "$pr.headRepositoryOwner = {login: \"someone\"}"
 refuses "a head whose fork is gone refuses" "$pr.headRepositoryOwner = null"
 refuses "a PR labeled outside-text refuses" "$pr.labels.nodes += [{name: \"outside-text\"}]"
@@ -221,7 +228,8 @@ cat > "$tmp/fx-apps/apps.json" <<'EOF'
   "github-actions": {"slug": "github-actions", "owner": {"login": "github", "type": "Organization"}},
   "ownerless-app": {"slug": "ownerless-app"},
   "renamed-app": {"slug": "another-app", "owner": {"login": "basecamp", "type": "Organization"}},
-  "my-app": {"slug": "my-app", "owner": {"login": "me", "type": "User"}}
+  "my-app": {"slug": "my-app", "owner": {"login": "me", "type": "User"}},
+  "author-app": {"slug": "author-app", "owner": {"login": "basecamp", "type": "Organization"}}
 }
 EOF
 apps() { FXDIR="$tmp/fx-apps" run "$@"; }
@@ -240,6 +248,9 @@ check "github-actions[bot] is inside by type and id; a User named github-actions
 check "each off-list bot is looked up once, a listed bot or a User never, and a login that isn't a slug never" \
   "$(sort "$tmp/calls" | jq -Rsc 'split("\n")[:-1]')" \
   '["ci-app","elsewhere-app","house-app","my-app","ownerless-app","renamed-app","some-app","somebot"]'
+check "a PR by an app the repo's org owns is read, looked up as its author; another org's app's PR refuses" \
+  "$(status "$(apps "$pr.author = {__typename: \"Bot\", login: \"author-app\", databaseId: 900020} | $pr.authorAssociation = \"NONE\"")") $(status "$(apps "$pr.author = {__typename: \"Bot\", login: \"elsewhere-app\", databaseId: 900002} | $pr.authorAssociation = \"NONE\"")")" \
+  '0 3'
 got=$(FX_APPS_FAIL=1 apps .)
 check "a failed app lookup is tried once, leaves the app's bot withheld, and the rest is still read" \
   "$(status "$got") $(grep -cx house-app "$tmp/calls") $(out "$got" | jq -c "$kept") $(out "$got" | jq -c "[.withheld[].url | select(test(\"/(a1|a2|ta1)\$\"))]")" \
