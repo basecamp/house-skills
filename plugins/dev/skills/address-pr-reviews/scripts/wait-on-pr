@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# The one way address-pr-reviews waits on a PR: for a reviewer to report, a
+# check to finish, or mergeable to be computed. It polls GitHub's REST API, a
+# minute apart, until something on the head changes, then exits so the caller
+# runs fetch-reviews once. Never loop fetch-reviews itself, or any GraphQL read:
+# GraphQL's 5,000 points an hour are shared by every session on the account,
+# and one forgotten loop of fetch-reviews, with no deadline and no exit on
+# merge, held that pool at zero for everyone for half a day.
+#
+# Usage: wait-on-pr OWNER/REPO NUMBER [MINUTES]
+# MINUTES is the deadline, 30 by default and 120 at most.
+#
+# It reads states, shas, ids, timestamps and counts, never a body or a login,
+# so nothing it reads or prints is anyone's text. Exits:
+#   0  something changed on the head it started on: a review, a review comment
+#      or reply, a PR comment edited or added, a reaction on the PR, the
+#      reviewers requested, mergeable, or a check run. Run fetch-reviews.
+#   4  the PR was merged or closed. Stop.
+#   5  the head moved. Run fetch-reviews on the new head before waiting again.
+#   6  the deadline passed and nothing changed.
+#   1  a gh call failed, a rate limit included; gh's error is on stderr. Don't
+#      retry it in a loop.
+set -euo pipefail
+usage="usage: wait-on-pr OWNER/REPO NUMBER [MINUTES]"
+repo=${1:?$usage}
+number=${2:?$usage}
+minutes=${3:-30}
+[[ $minutes =~ ^[0-9]+$ ]] || { echo "$usage" >&2; exit 2; }
+[ "$minutes" -le 120 ] || minutes=120
+end=$((SECONDS + minutes * 60))
+
+pages() { gh api --paginate "repos/$repo/$1?per_page=100" | jq -cs "$2"; }
+# Each read is its own assignment, so a failed gh call ends the script.
+snapshot() {
+  local pr head reviews threads comments reactions checks
+  pr=$(gh api "repos/$repo/pulls/$number") || return
+  head=$(jq -r .head.sha <<<"$pr")
+  reviews=$(pages "pulls/$number/reviews" 'add | map([.id, .state, .commit_id])') || return
+  threads=$(pages "pulls/$number/comments" 'add | map([.id, .updated_at])') || return
+  comments=$(pages "issues/$number/comments" 'add | map([.id, .updated_at])') || return
+  reactions=$(pages "issues/$number/reactions" 'add | map(.id)') || return
+  checks=$(pages "commits/$head/check-runs" 'map(.check_runs[]) | map([.id, .status, .conclusion])') || return
+  jq -c --argjson reviews "$reviews" --argjson threads "$threads" --argjson comments "$comments" \
+    --argjson reactions "$reactions" --argjson checks "$checks" \
+    '{state: (if .merged then "merged" else .state end), head: .head.sha,
+      requested: ([.requested_reviewers[].id] + [.requested_teams[].id] | sort), mergeable,
+      reviews: $reviews, threads: $threads, comments: $comments, reactions: $reactions, checks: $checks}' <<<"$pr"
+}
+# Prints the state and head, and what changed since the first read.
+report() {
+  jq -c --argjson then "$first" '. as $now | {state, head,
+    changed: [keys_unsorted[] | select(IN("state", "head") | not) | select($now[.] != $then[.])]}' <<<"$1"
+}
+
+first=$(snapshot)
+now=$first
+while :; do
+  case $(jq -r --arg head "$(jq -r .head <<<"$first")" --argjson then "$first" \
+      'if .state != "open" then 4 elif .head != $head then 5 elif del(.state, .head) != ($then | del(.state, .head)) then 0
+       else "" end' <<<"$now") in
+    4) report "$now"; exit 4 ;;
+    5) report "$now"; exit 5 ;;
+    0) report "$now"; exit 0 ;;
+  esac
+  [ "$SECONDS" -lt "$end" ] || { report "$now"; exit 6; }
+  sleep 60
+  now=$(snapshot)
+done
