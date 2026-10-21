@@ -607,6 +607,10 @@ check "a check run that only starts wakes nothing" \
   "$(wait_on check-runs='{"check_runs": [{"id": 5, "status": "in_progress", "conclusion": null}, {"id": 6, "status": "queued", "conclusion": null}]}' \
     poll3/pulls_1='{"state": "closed", "merged": false, "head": {"sha": "abc"}, "mergeable": true, "requested_reviewers": [{"id": 1}], "requested_teams": []}' -- 5)" \
   '{"state":"closed","head":"abc","changed":[]} slept=60,60,60 4'
+echo '[{"id": 7, "updated_at": "2026-01-01", "reactions": {"total_count": 0}}]' > "$tmp/wx/poll0/pulls_1_comments.json"
+check "wait-on-pr ends on a reaction to a review comment, such as a person's thumbs-up on an answer" \
+  "$(wait_on pulls_1_comments='[{"id": 7, "updated_at": "2026-01-01", "reactions": {"total_count": 1}}]' -- 5)" \
+  '{"state":"open","head":"abc","changed":["threads"]} slept=60,60 0'
 check "wait-on-pr ends on a commit status finishing, for CI that reports no check runs" \
   "$(wait_on status='{"state": "success", "statuses": [{"context": "ci", "state": "success"}]}' -- 5)" \
   '{"state":"open","head":"abc","changed":["statuses"]} slept=60,60 0'

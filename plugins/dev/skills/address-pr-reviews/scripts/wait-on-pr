@@ -11,9 +11,13 @@
 # MINUTES is the deadline, 30 by default and 120 at most.
 #
 # It reads states, shas, ids, timestamps and counts, never a body or a login,
-# so nothing it reads or prints is anyone's text. Exits:
+# so nothing it reads or prints is anyone's text. So it can't see a review's
+# body edited in place, which keeps its id, state and commit; nor anything
+# that lands between the fetch-reviews a wait follows and the wait's first
+# read. Either shows on the fetch-reviews run at the deadline. Exits:
 #   0  something changed on the head it started on: a review, a review comment
-#      or reply, a PR comment edited or added, a reaction on the PR, the
+#      or reply, a PR comment edited or added, a reaction on the PR or on any
+#      of its comments (a person's thumbs-up accepting an answer), the
 #      reviewers requested, mergeable, or a check run or commit status
 #      finishing (one that only starts wakes nothing). Run fetch-reviews.
 #   4  the PR was merged or closed. Stop.
@@ -40,8 +44,8 @@ snapshot() {
   pr=$(gh api "repos/$repo/pulls/$number") || return 1
   head=$(jq -r .head.sha <<<"$pr") || return 1
   reviews=$(pages "pulls/$number/reviews" 'add | map([.id, .state, .commit_id])') || return 1
-  threads=$(pages "pulls/$number/comments" 'add | map([.id, .updated_at])') || return 1
-  comments=$(pages "issues/$number/comments" 'add | map([.id, .updated_at])') || return 1
+  threads=$(pages "pulls/$number/comments" 'add | map([.id, .updated_at, .reactions.total_count])') || return 1
+  comments=$(pages "issues/$number/comments" 'add | map([.id, .updated_at, .reactions.total_count])') || return 1
   reactions=$(pages "issues/$number/reactions" 'add | map(.id)') || return 1
   checks=$(pages "commits/$head/check-runs" 'map(.check_runs[] | select(.status == "completed") | [.id, .conclusion])') || return 1
   statuses=$(pages "commits/$head/status" 'map(.statuses[] | select(.state != "pending") | [.context, .state])') || return 1
