@@ -478,10 +478,12 @@ GraphQL read (`gh pr view`, `gh pr checks`, `gh api graphql`), in `until`,
 `while` or `watch`. `fetch-reviews` spends 5 or 6 points of the account's
 GraphQL pool, 5,000 an hour shared by every session on it; one such loop with
 no deadline and no exit on merge, run every 45 seconds after its PR merged at
-another head, held that pool at zero for everyone for half a day. If you write
-your own wait anyway, it polls REST no faster than every 60 s, ends on a
-deadline and on the PR merged or closed or a newer head, and never sends gh's
-stderr to `/dev/null`, so a rate limit shows.
+another head, held that pool at zero for everyone for half a day. On 6, run
+`fetch-reviews` once and name what didn't come in the summary comment rather
+than waiting again; on 4, stop. Any other wait on GitHub keeps the same rules:
+REST, no faster than every 60 s, a deadline, an exit on the PR merged or closed
+or a newer head, and gh's stderr never sent to `/dev/null`, so a rate limit
+shows.
 
 A reviewer listed in `requested` hasn't reported yet: wait for it (a Copilot
 pass in progress shows there). If `requested_complete` is false, the list ran
