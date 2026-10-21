@@ -14,7 +14,8 @@
 # so nothing it reads or prints is anyone's text. Exits:
 #   0  something changed on the head it started on: a review, a review comment
 #      or reply, a PR comment edited or added, a reaction on the PR, the
-#      reviewers requested, mergeable, or a check run. Run fetch-reviews.
+#      reviewers requested, mergeable, or a check run finishing (a run that
+#      only starts wakes nothing). Run fetch-reviews.
 #   4  the PR was merged or closed. Stop.
 #   5  the head moved. Run fetch-reviews on the new head before waiting again.
 #   6  the deadline passed and nothing changed.
@@ -39,7 +40,7 @@ snapshot() {
   threads=$(pages "pulls/$number/comments" 'add | map([.id, .updated_at])') || return
   comments=$(pages "issues/$number/comments" 'add | map([.id, .updated_at])') || return
   reactions=$(pages "issues/$number/reactions" 'add | map(.id)') || return
-  checks=$(pages "commits/$head/check-runs" 'map(.check_runs[]) | map([.id, .status, .conclusion])') || return
+  checks=$(pages "commits/$head/check-runs" 'map(.check_runs[] | select(.status == "completed") | [.id, .conclusion])') || return
   jq -c --argjson reviews "$reviews" --argjson threads "$threads" --argjson comments "$comments" \
     --argjson reactions "$reactions" --argjson checks "$checks" \
     '{state: (if .merged then "merged" else .state end), head: .head.sha,

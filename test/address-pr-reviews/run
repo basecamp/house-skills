@@ -575,11 +575,13 @@ echo '[]' > "$tmp/wx/poll0/pulls_1_comments.json"
 echo '[]' > "$tmp/wx/poll0/issues_1_comments.json"
 echo '[]' > "$tmp/wx/poll0/issues_1_reactions.json"
 echo '{"total_count": 1, "check_runs": [{"id": 5, "status": "in_progress", "conclusion": null}]}' > "$tmp/wx/poll0/check-runs.json"
-# wait_on FILE=CONTENT... -- MINUTES: from the second poll on, each FILE holds
-# CONTENT. Prints the output, the sleeps, and the exit status.
+# wait_on [pollN/]FILE=CONTENT... -- MINUTES: at the second poll (or the Nth),
+# FILE holds CONTENT. Prints the output, the sleeps, and the exit status.
 wait_on() {
-  rm -rf "$tmp/wx/poll2" "$tmp/wx/polls" "$tmp/wx/slept"; mkdir "$tmp/wx/poll2"
-  while [ "$1" != -- ]; do echo "${1#*=}" > "$tmp/wx/poll2/${1%%=*}.json"; shift; done; shift
+  rm -rf "$tmp/wx/poll2" "$tmp/wx/poll3" "$tmp/wx/polls" "$tmp/wx/slept"; mkdir "$tmp/wx/poll2" "$tmp/wx/poll3"
+  local file
+  while [ "$1" != -- ]; do file=${1%%=*}; [[ $file == */* ]] || file=poll2/$file
+    echo "${1#*=}" > "$tmp/wx/$file.json"; shift; done; shift
   local status=0
   PATH="$tmp/wbin:$PATH" WX="$tmp/wx" "$scripts/wait-on-pr" o/r 1 "$@" > "$tmp/wout" 2> "$tmp/werr" || status=$?
   echo "$(cat "$tmp/wout") slept=$(paste -sd, "$tmp/wx/slept" 2>/dev/null) $status"
@@ -598,6 +600,10 @@ check "wait-on-pr ends on a new head" \
   '{"state":"open","head":"def","changed":[]} slept=60,60 5'
 check "wait-on-pr ends on its deadline with nothing changed" \
   "$(wait_on -- 0)" '{"state":"open","head":"abc","changed":[]} slept= 6'
+check "a check run that only starts wakes nothing" \
+  "$(wait_on check-runs='{"check_runs": [{"id": 5, "status": "in_progress", "conclusion": null}, {"id": 6, "status": "queued", "conclusion": null}]}' \
+    poll3/pulls_1='{"state": "closed", "merged": false, "head": {"sha": "abc"}, "mergeable": true, "requested_reviewers": [{"id": 1}], "requested_teams": []}' -- 5)" \
+  '{"state":"closed","head":"abc","changed":[]} slept=60,60,60 4'
 got=$(WX_FAIL=1 wait_on -- 5)
 check "wait-on-pr stops on a failed call, gh's error on stderr" "$got $(cat "$tmp/werr")" \
   ' slept= 1 gh: API rate limit exceeded (HTTP 403)'
