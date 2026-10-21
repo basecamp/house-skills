@@ -33,7 +33,7 @@ if [ "${1:-}" = api ] && [[ ${2:-} == apps/* ]]; then
   exit
 fi
 [ "${1:-} ${2:-}" = "api graphql" ] || { echo "stub gh: not a GraphQL call: $*" >&2; exit 1; }
-paginate='' slurp='' query=''
+paginate='' slurp='' query='' input='' prev=''
 for arg in "$@"; do
   case "$arg" in
     --paginate) paginate=1 ;;
@@ -41,8 +41,28 @@ for arg in "$@"; do
     query=*) query=${arg#query=} ;;
     id=*) id=${arg#id=} ;;
   esac
+  [ "$prev" != --input ] || input=$arg
+  prev=$arg
 done
+# A request body passed with --input carries the query and its variables.
+[ -z "$input" ] || query=$(jq -r .query "$input")
+# Each query is logged to FX_QUERIES, with its ids when it has them.
+[ -z "${FX_QUERIES:-}" ] || jq -nc --arg q "$query" --argjson ids "$( [ -n "$input" ] && jq -c '.variables.ids // null' "$input" || echo null)" \
+  '{query: $q} + if $ids then {ids: $ids} else {} end' >> "$FX_QUERIES"
 case "$query" in
+  # fetch-reviews' thumbs-ups: each id's reactions as the fixture's thread
+  # comment holds them, none when it holds none, and like gh, an error for an
+  # id no comment has. FX_NODES_GONE names one answered null with no error.
+  *"nodes(ids:"*) for key in id reactions totalCount nodes user login; do
+      grep -qw -- "$key" <<<"$query" || { echo "stub gh: the query doesn't ask for $key" >&2; exit 1; }
+    done
+    jq -c --slurpfile ids <(jq .variables.ids "$input") '[.[].data.repository.pullRequest.reviewThreads.nodes[].comments.nodes[]?] as $all
+      | {data: {nodes: [$ids[0][] as $id | [$all[] | select(.id == $id)][0]
+          | if . and .id != env.FX_NODES_GONE then {id, reactions: (.reactions // {totalCount: 0, nodes: []})} else null end]}}' "$FX/threads.json" > "$FX_STATE.nodes"
+    cat "$FX_STATE.nodes"
+    [ -z "${FX_NODES_GONE:-}" ] || exit 0
+    jq -e 'all(.data.nodes[]; . != null)' "$FX_STATE.nodes" >/dev/null || { echo "gh: Could not resolve to a node" >&2; exit 1; }
+    exit 0 ;;
   # resolve-thread's mutation: recorded, so a test can tell whether it ran.
   *"resolveReviewThread("*) echo "$query" >> "$FX_STATE.resolved"
     echo '{"data": {"resolveReviewThread": {"thread": {"id": "t", "isResolved": true}}}}'; exit 0 ;;
@@ -53,7 +73,12 @@ case "$query" in
       | select(.id == $id)][0] | {data: {node: {isResolved, comments: {totalCount: ((.comments.nodes | length) + $more)},
         pullRequest: {headRefOid: (env.FX_HEAD_NOW // "abc")}}}}' \
       "$FX/threads.json"; exit 0 ;;
-  *"reviewThreads("*) file=$FX/threads.json ;;
+  # Like GitHub, the page holds reactions only when the query asks for them.
+  *"reviewThreads("*) file=$FX/threads.json
+    if [[ $query != *"reactions("* ]]; then
+      jq 'del(.[].data.repository.pullRequest.reviewThreads.nodes[].comments.nodes[]?.reactions)' "$file" > "$FX_STATE.threads"
+      file=$FX_STATE.threads
+    fi ;;
   *"reviews("*) file=$FX/reviews.json ;;
   *"comments(first"*) file=$FX/comments.json ;;
   *) file=$FX_HEAD
@@ -80,10 +105,10 @@ check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: got $2, w
 run() {
   jq "$1" "$here/fixtures/head.json" > "$tmp/head.json"
   rm -f "$tmp/head-read"
-  : > "$tmp/calls"
+  : > "$tmp/calls"; : > "$tmp/queries"
   local status=0
   PATH="$tmp/bin:$PATH" FX="${FXDIR:-$here/fixtures}" FX_HEAD="$tmp/head.json" FX_STATE="$tmp/head-read" FX_CALLS="$tmp/calls" \
-    "$fetch" o/r 1 > "$tmp/out.json" 2>/dev/null || status=$?
+    FX_QUERIES="$tmp/queries" "$fetch" o/r 1 > "$tmp/out.json" 2>/dev/null || status=$?
   cat "$tmp/out.json"; echo "$status"
 }
 out() { sed '$d' <<<"$1"; }
@@ -316,6 +341,31 @@ check "no stranger's login reaches the output" "$(grep -c MARKER-OUTSIDE <<<"$go
 check "each kept item says when it was written, and the output names the token's account" \
   "$(out "$got" | jq -c '[.viewer, ([.reviews[], .comments[], (.threads[].comments[] | select(.cleared | not))] | all(.at != null))]')" '["me",true]'
 
+# GitHub prices a GraphQL query by the page sizes it asks for, not by what comes
+# back: reactions(first: 40) on each comment of the reviewThreads page's 100
+# threads x 100 comments made that page 101 points of the 5,000 an hour every
+# session on the account shares. Thumbs-ups are read by id instead, 100 to a
+# query at 1 point, and only for the comments of unresolved threads.
+asked() { jq -sc "$1" "$tmp/queries"; }
+check "the reviewThreads page asks for no reactions" \
+  "$(asked '[.[] | select(.query | contains("reviewThreads(")) | .query | contains("reactions")]')" '[false]'
+check "thumbs-ups are asked for the comments of unresolved threads, none of a resolved one's" \
+  "$(asked '[.[].ids // empty | .[] | select(IN("tp1", "tp2", "tp3", "t1a", "t5a", "t5b", "t9a"))] | sort')" '["t1a","tp1","tp2","tp3"]'
+got=$(FX_NODES_GONE=tp2 FXDIR="$tmp/fx-agree" run .)
+check "a comment whose thumbs-ups come back null without an error refuses, to run again" \
+  "$(status "$got") $(out "$got" | jq -c .)" '3 {"refused":"the PR changed while reading; run again"}'
+mkdir "$tmp/fx-many"; cp "$here"/fixtures/*.json "$tmp/fx-many/"
+jq '.[0].data.repository.pullRequest.reviewThreads.nodes += [range(2) as $t | {id: "tm\($t)", isResolved: false, isOutdated: false,
+    comments: {pageInfo: {hasNextPage: false}, nodes: [range(60) as $c | {id: "tm\($t)-\($c)", url: "https://x/tm\($t)-\($c)",
+      createdAt: "2026-01-07", isMinimized: false, body: "note", authorAssociation: "MEMBER",
+      author: {__typename: "User", login: "member"}, databaseId: (200 + $t * 100 + $c), path: "p", line: 1,
+      reactions: (if [$t, $c] == [1, 59] then {totalCount: 1, nodes: [{user: {login: "me"}}]} else {totalCount: 0, nodes: []} end)}]}}]' \
+  "$here/fixtures/threads.json" > "$tmp/fx-many/threads.json"
+got=$(FXDIR="$tmp/fx-many" run .)
+check "past 100 comments, thumbs-ups are asked in batches of 100, and the last batch's come through" \
+  "$(status "$got") $(asked '[.[].ids // empty | length] | [length, max <= 100]') $(out "$got" | jq -c '[.threads[].comments[] | select(.id == "tm1-59") | .thumbs_up]')" \
+  '0 [2,true] [["me"]]'
+
 # resolve-thread. Its threads, beside the shared fixtures: each node is
 # [id, login, association, body, thumbs-up logins], a Bot when the login is
 # copilot's, "me" the token's account.
@@ -496,5 +546,97 @@ holds "a withheld thread can't be resolved" "t7 declined" NONE "no unresolved th
 holds "a thread not on the PR can't be resolved" "t99 declined" NONE "no unresolved thread"
 got=$(FX_FAIL=1 resolve "t14 declined" NONE)
 check "a failed fetch resolves nothing" "$(status "$got") $(ran "$got")" "3 untouched"
+
+# wait-on-pr: REST only, a minute between polls, and it ends on a change, a
+# merge or close, a new head, the deadline, or a failed call. Its gh answers
+# REST from $WX/poll<N>/, N the polls so far (a stand-in sleep counts them),
+# falling back to poll0; a GraphQL call fails.
+mkdir "$tmp/wbin"
+cat > "$tmp/wbin/gh" <<'STUB'
+#!/usr/bin/env bash
+[ "${1:-}" = api ] || { echo "stub gh: not an api call: $*" >&2; exit 1; }
+path=''
+for arg in "$@"; do case "$arg" in repos/*) path=$arg ;; graphql) echo "stub gh: GraphQL in wait-on-pr" >&2; exit 1 ;; esac; done
+name=$(sed -e 's|^repos/o/r/||' -e 's|?.*||' -e 's|^commits/.*/check-runs$|check-runs|' -e 's|^commits/.*/status$|status|' -e 's|/|_|g' <<<"$path")
+# WX_FAIL=CODE fails every call with gh's exit CODE, or only NAME's with WX_FAIL_ON=NAME.
+[ -z "${WX_FAIL:-}" ] || [ -n "${WX_FAIL_ON:-}" -a "${WX_FAIL_ON:-}" != "$name" ] \
+  || { echo "gh: API rate limit exceeded (HTTP 403)" >&2; exit "$WX_FAIL"; }
+n=$(cat "$WX/polls" 2>/dev/null || echo 0)
+for f in "$WX/poll$n/$name.json" "$WX/poll0/$name.json"; do
+  [ ! -e "$f" ] || { cat "$f"; exit 0; }
+done
+echo "stub gh: no fixture for $path" >&2; exit 1
+STUB
+cat > "$tmp/wbin/sleep" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "$WX/slept"
+echo $(( $(cat "$WX/polls" 2>/dev/null || echo 0) + 1 )) > "$WX/polls"
+STUB
+chmod +x "$tmp/wbin/gh" "$tmp/wbin/sleep"
+# base holds poll0's answers; each wait_on starts poll0 from it.
+mkdir -p "$tmp/wx/base"
+echo '{"state": "open", "merged": false, "head": {"sha": "abc"}, "mergeable": true, "requested_reviewers": [{"id": 1}], "requested_teams": []}' \
+  > "$tmp/wx/base/pulls_1.json"
+echo '[{"id": 1, "state": "COMMENTED", "commit_id": "abc"}]' > "$tmp/wx/base/pulls_1_reviews.json"
+echo '[{"id": 7, "updated_at": "2026-01-01", "reactions": {"url": "u", "total_count": 1, "+1": 0, "eyes": 1}}]' > "$tmp/wx/base/pulls_1_comments.json"
+echo '[]' > "$tmp/wx/base/issues_1_comments.json"
+echo '[]' > "$tmp/wx/base/issues_1_reactions.json"
+echo '{"total_count": 1, "check_runs": [{"id": 5, "status": "in_progress", "conclusion": null}]}' > "$tmp/wx/base/check-runs.json"
+echo '{"state": "pending", "statuses": [{"id": 1, "context": "ci", "state": "pending"}]}' > "$tmp/wx/base/status.json"
+# wait_on [pollN/]FILE=CONTENT... -- MINUTES: at the second poll (or the Nth,
+# poll0 the first read), FILE holds CONTENT. Prints the output, the sleeps,
+# and the exit status.
+wait_on() {
+  rm -rf "$tmp/wx/poll0" "$tmp/wx/poll2" "$tmp/wx/poll3" "$tmp/wx/polls" "$tmp/wx/slept"
+  cp -R "$tmp/wx/base" "$tmp/wx/poll0"; mkdir "$tmp/wx/poll2" "$tmp/wx/poll3"
+  local file
+  while [ "$1" != -- ]; do file=${1%%=*}; [[ $file == */* ]] || file=poll2/$file
+    echo "${1#*=}" > "$tmp/wx/$file.json"; shift; done; shift
+  local status=0
+  PATH="$tmp/wbin:$PATH" WX="$tmp/wx" "$scripts/wait-on-pr" o/r 1 "$@" > "$tmp/wout" 2> "$tmp/werr" || status=$?
+  echo "$(cat "$tmp/wout") slept=$(paste -sd, "$tmp/wx/slept" 2>/dev/null) $status"
+}
+check "wait-on-pr ends on a new review, polling a minute apart, and says what changed" \
+  "$(wait_on pulls_1_reviews='[{"id": 1, "state": "COMMENTED", "commit_id": "abc"}, {"id": 2, "state": "COMMENTED", "commit_id": "abc"}]' -- 5)" \
+  '{"state":"open","head":"abc","changed":["reviews"]} slept=60,60 0'
+check "wait-on-pr ends on a check run finishing, or a reaction on the PR" \
+  "$(wait_on check-runs='{"check_runs": [{"id": 5, "status": "completed", "conclusion": "success"}]}' issues_1_reactions='[{"id": 9}]' -- 5)" \
+  '{"state":"open","head":"abc","changed":["reactions","checks"]} slept=60,60 0'
+check "wait-on-pr ends on a merge" \
+  "$(wait_on pulls_1='{"state": "closed", "merged": true, "head": {"sha": "abc"}, "mergeable": null, "requested_reviewers": [], "requested_teams": []}' -- 5)" \
+  '{"state":"merged","head":"abc","changed":["requested","mergeable"]} slept=60,60 4'
+check "wait-on-pr ends on a new head" \
+  "$(wait_on pulls_1='{"state": "open", "merged": false, "head": {"sha": "def"}, "mergeable": true, "requested_reviewers": [{"id": 1}], "requested_teams": []}' -- 5)" \
+  '{"state":"open","head":"def","changed":[]} slept=60,60 5'
+check "wait-on-pr ends on its deadline with nothing changed" \
+  "$(wait_on -- 0)" '{"state":"open","head":"abc","changed":[]} slept= 6'
+check "a check run that only starts wakes nothing" \
+  "$(wait_on check-runs='{"check_runs": [{"id": 5, "status": "in_progress", "conclusion": null}, {"id": 6, "status": "queued", "conclusion": null}]}' \
+    poll3/pulls_1='{"state": "closed", "merged": false, "head": {"sha": "abc"}, "mergeable": true, "requested_reviewers": [{"id": 1}], "requested_teams": []}' -- 5)" \
+  '{"state":"closed","head":"abc","changed":[]} slept=60,60,60 4'
+check "wait-on-pr ends on a thumbs-up on a review comment, even one that replaces another reaction" \
+  "$(wait_on pulls_1_comments='[{"id": 7, "updated_at": "2026-01-01", "reactions": {"url": "u", "total_count": 1, "+1": 1, "eyes": 0}}]' -- 5)" \
+  '{"state":"open","head":"abc","changed":["threads"]} slept=60,60 0'
+check "wait-on-pr ends on a commit status finishing, for CI that reports no check runs" \
+  "$(wait_on status='{"state": "success", "statuses": [{"id": 2, "context": "ci", "state": "success"}]}' -- 5)" \
+  '{"state":"open","head":"abc","changed":["statuses"]} slept=60,60 0'
+closed='{"state": "closed", "merged": false, "head": {"sha": "abc"}, "mergeable": true, "requested_reviewers": [{"id": 1}], "requested_teams": []}'
+check "a finished check run that's rerun wakes nothing until the rerun finishes" \
+  "$(wait_on poll0/check-runs='{"check_runs": [{"id": 5, "status": "completed", "conclusion": "failure"}]}' \
+    check-runs='{"check_runs": [{"id": 6, "status": "queued", "conclusion": null}]}' poll3/pulls_1="$closed" -- 5)" \
+  '{"state":"closed","head":"abc","changed":[]} slept=60,60,60 4'
+check "a status gone from success back to pending wakes nothing; finishing success again does" \
+  "$(wait_on poll0/status='{"statuses": [{"id": 1, "context": "ci", "state": "success"}]}' \
+    status='{"statuses": [{"id": 2, "context": "ci", "state": "pending"}]}' \
+    poll3/status='{"statuses": [{"id": 3, "context": "ci", "state": "success"}]}' -- 5)" \
+  '{"state":"open","head":"abc","changed":["statuses"]} slept=60,60,60 0'
+check "wait-on-pr reads minutes as decimal, so 08 isn't a bad octal number" \
+  "$(wait_on issues_1_reactions='[{"id": 9}]' -- 08)" '{"state":"open","head":"abc","changed":["reactions"]} slept=60,60 0'
+got=$(WX_FAIL=1 wait_on -- 5)
+check "wait-on-pr stops on a failed call, gh's error on stderr" "$got $(cat "$tmp/werr")" \
+  ' slept= 1 gh: API rate limit exceeded (HTTP 403)'
+got=$(WX_FAIL=4 WX_FAIL_ON=check-runs wait_on -- 5)
+check "a failed later read exits 1 whatever gh returned, so gh's 4 doesn't read as merged" "$got $(cat "$tmp/werr")" \
+  ' slept= 1 gh: API rate limit exceeded (HTTP 403)'
 
 exit $fail

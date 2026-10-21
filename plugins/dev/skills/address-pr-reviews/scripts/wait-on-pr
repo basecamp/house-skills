@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# The one way address-pr-reviews waits on a PR: for a reviewer to report, a
+# check to finish, or mergeable to be computed. It polls GitHub's REST API, a
+# minute apart, until something on the head changes, then exits so the caller
+# runs fetch-reviews once. Never loop fetch-reviews itself, or any GraphQL read:
+# GraphQL's 5,000 points an hour are shared by every session on the account,
+# and one forgotten loop of fetch-reviews, with no deadline and no exit on
+# merge, held that pool at zero for everyone for half a day.
+#
+# Usage: wait-on-pr OWNER/REPO NUMBER [MINUTES]
+# MINUTES is the deadline, 30 by default and 120 at most.
+#
+# It reads states, shas, ids, timestamps and counts, never a body or a login,
+# so nothing it reads or prints is anyone's text. So it can't see a review's
+# body edited in place, which keeps its id, state and commit; nor anything
+# that lands between the fetch-reviews a wait follows and the wait's first
+# read. Either shows on the fetch-reviews run at the deadline: that run is
+# the guarantee, and a wake only brings it sooner. Exits:
+#   0  something changed on the head it started on: a review, a review comment
+#      or reply, a PR comment edited or added, a reaction on the PR or on any
+#      of its comments (a person's thumbs-up accepting an answer), the
+#      reviewers requested, mergeable, or a check run or commit status
+#      finishing (one that only starts wakes nothing). Run fetch-reviews.
+#   4  the PR was merged or closed. Stop.
+#   5  the head moved. Run fetch-reviews on the new head before waiting again.
+#   6  the deadline passed and nothing changed.
+#   1  a gh call failed, a rate limit included; gh's error is on stderr. Don't
+#      retry it in a loop.
+set -euo pipefail
+usage="usage: wait-on-pr OWNER/REPO NUMBER [MINUTES]"
+repo=${1:?$usage}
+number=${2:?$usage}
+minutes=${3:-30}
+[[ $minutes =~ ^[0-9]+$ ]] || { echo "$usage" >&2; exit 2; }
+minutes=$((10#$minutes))
+[ "$minutes" -le 120 ] || minutes=120
+end=$((SECONDS + minutes * 60))
+
+pages() { gh api --paginate "repos/$repo/$1?per_page=100" | jq -cs "$2"; }
+# Each read is its own assignment, so a failed gh or jq call ends the script,
+# with 1 whatever the failing command returned: gh's own 4 (auth) mustn't read
+# as merged, nor jq's 5 as a new head.
+snapshot() {
+  local pr head reviews threads comments reactions checks statuses
+  pr=$(gh api "repos/$repo/pulls/$number") || return 1
+  head=$(jq -r .head.sha <<<"$pr") || return 1
+  reviews=$(pages "pulls/$number/reviews" 'add | map([.id, .state, .commit_id])') || return 1
+  threads=$(pages "pulls/$number/comments" 'add | map([.id, .updated_at, (.reactions | del(.url))])') || return 1
+  comments=$(pages "issues/$number/comments" 'add | map([.id, .updated_at, (.reactions | del(.url))])') || return 1
+  reactions=$(pages "issues/$number/reactions" 'add | map(.id)') || return 1
+  checks=$(pages "commits/$head/check-runs" 'map(.check_runs[] | select(.status == "completed") | [.id, .conclusion])') || return 1
+  statuses=$(pages "commits/$head/status" 'map(.statuses[] | select(.state != "pending") | [.id, .state])') || return 1
+  jq -c --argjson reviews "$reviews" --argjson threads "$threads" --argjson comments "$comments" \
+    --argjson reactions "$reactions" --argjson checks "$checks" --argjson statuses "$statuses" \
+    '{state: (if .merged then "merged" else .state end), head: .head.sha,
+      requested: ([.requested_reviewers[].id] + [.requested_teams[].id] | sort), mergeable,
+      reviews: $reviews, threads: $threads, comments: $comments, reactions: $reactions, checks: $checks,
+      statuses: $statuses}' <<<"$pr" || return 1
+}
+# What changed since the first read. A check run or status counts when one
+# finishes that hadn't: a rerun that only takes one off the finished list, or
+# a status gone back to pending, wakes nothing. A status posted again gets a
+# new id, so one finishing as it did before still counts.
+changed='[keys_unsorted[] | select(IN("state", "head") | not)] | map(select(. as $k
+  | if IN($k; "checks", "statuses") then ($now[$k] - $then[$k]) != [] else $now[$k] != $then[$k] end))'
+report() { jq -c --argjson then "$first" ". as \$now | {state, head, changed: $changed}" <<<"$1"; }
+
+first=$(snapshot) || exit 1
+now=$first
+while :; do
+  verdict=$(jq -r --argjson then "$first" ". as \$now | if .state != \"open\" then 4 elif .head != \$then.head then 5
+    elif $changed != [] then 0 else \"\" end" <<<"$now") || exit 1
+  case $verdict in
+    4) report "$now"; exit 4 ;;
+    5) report "$now"; exit 5 ;;
+    0) report "$now"; exit 0 ;;
+  esac
+  [ "$SECONDS" -lt "$end" ] || { report "$now"; exit 6; }
+  sleep 60
+  now=$(snapshot) || exit 1
+done

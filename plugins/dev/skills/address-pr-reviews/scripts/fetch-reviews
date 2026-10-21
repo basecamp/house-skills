@@ -66,11 +66,36 @@ page() {
 }
 page reviews "$item submittedAt state commit { oid }"
 page comments "$item"
-# 100 threads x 100 comments x 40 reactions keeps this query under GitHub's
-# 500,000-node limit, which counts every connection's page size, not what's there.
+# GitHub prices a GraphQL query by the page sizes it asks for, not by what
+# comes back: a request per connection, a point per hundred. This page (100
+# threads x 100 comments) costs 1 point of the account's 5,000 an hour, shared by
+# every session on it. Asking for reactions(first: 40) on each comment here made
+# it 101. A thread longer than 100 comments comes back with hasNextPage, and
+# gate.jq withholds it whole.
 page reviewThreads "id isResolved isOutdated
-  comments(first: 100) { pageInfo { hasNextPage } nodes { $item databaseId path line
-    reactions(content: THUMBS_UP, first: 40) { totalCount nodes { user { login } } } } }"
+  comments(first: 100) { pageInfo { hasNextPage } nodes { $item databaseId path line } }"
+
+# Thumbs-ups, read only for the comments of unresolved threads, the only ones
+# whose thumbs_up reaches the output, 100 to a query at 1 point each, and put
+# back on their comments for gate.jq. A comment deleted since the page above
+# can't be resolved: gh fails, or, should GitHub answer null without an error,
+# the comment is missing here and the read is refused for another run.
+jq -c '[.[].data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)
+  | .comments.nodes[]?.id] | unique | . as $all | range(0; length; 100) | $all[.:. + 100]' "$tmp/reviewThreads.json" > "$tmp/ids.jsonl"
+: > "$tmp/reactions.jsonl"
+while IFS= read -r ids; do
+  jq -n --argjson ids "$ids" '{variables: {ids: $ids}, query: "query($ids: [ID!]!) { nodes(ids: $ids) {
+    ... on PullRequestReviewComment { id reactions(content: THUMBS_UP, first: 40) { totalCount nodes { user { login } } } } } }"}' \
+    > "$tmp/reactions-query.json"
+  gh api graphql --input "$tmp/reactions-query.json" </dev/null >> "$tmp/reactions.jsonl"
+done < "$tmp/ids.jsonl"
+jq -s '[.[].data.nodes[] | select(. != null) | {(.id): .reactions}] | add // {}' "$tmp/reactions.jsonl" > "$tmp/reactions.json"
+jq -se '(.[0] | keys) as $got | [.[1:][][] | select(IN($got[]) | not)] == []' "$tmp/reactions.json" "$tmp/ids.jsonl" >/dev/null || {
+  echo '{"refused": "the PR changed while reading; run again"}'; exit 3; }
+jq --slurpfile up "$tmp/reactions.json" \
+  '(.[].data.repository.pullRequest.reviewThreads.nodes[].comments.nodes[]?) |= (. + ($up[0][.id // ""] | if . then {reactions: .} else {} end))' \
+  "$tmp/reviewThreads.json" > "$tmp/threads-up.json"
+mv "$tmp/threads-up.json" "$tmp/reviewThreads.json"
 
 # Read the head again after the paged reads: if the head moved, or a review,
 # comment or thread was added meanwhile, the feedback may not match what's
