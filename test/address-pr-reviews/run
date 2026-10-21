@@ -553,8 +553,10 @@ cat > "$tmp/wbin/gh" <<'STUB'
 [ "${1:-}" = api ] || { echo "stub gh: not an api call: $*" >&2; exit 1; }
 path=''
 for arg in "$@"; do case "$arg" in repos/*) path=$arg ;; graphql) echo "stub gh: GraphQL in wait-on-pr" >&2; exit 1 ;; esac; done
-[ -z "${WX_FAIL:-}" ] || { echo "gh: API rate limit exceeded (HTTP 403)" >&2; exit 1; }
-name=$(sed -e 's|^repos/o/r/||' -e 's|?.*||' -e 's|^commits/.*/check-runs$|check-runs|' -e 's|/|_|g' <<<"$path")
+name=$(sed -e 's|^repos/o/r/||' -e 's|?.*||' -e 's|^commits/.*/check-runs$|check-runs|' -e 's|^commits/.*/status$|status|' -e 's|/|_|g' <<<"$path")
+# WX_FAIL=CODE fails every call with gh's exit CODE, or only NAME's with WX_FAIL_ON=NAME.
+[ -z "${WX_FAIL:-}" ] || [ -n "${WX_FAIL_ON:-}" -a "${WX_FAIL_ON:-}" != "$name" ] \
+  || { echo "gh: API rate limit exceeded (HTTP 403)" >&2; exit "$WX_FAIL"; }
 n=$(cat "$WX/polls" 2>/dev/null || echo 0)
 for f in "$WX/poll$n/$name.json" "$WX/poll0/$name.json"; do
   [ ! -e "$f" ] || { cat "$f"; exit 0; }
@@ -575,6 +577,7 @@ echo '[]' > "$tmp/wx/poll0/pulls_1_comments.json"
 echo '[]' > "$tmp/wx/poll0/issues_1_comments.json"
 echo '[]' > "$tmp/wx/poll0/issues_1_reactions.json"
 echo '{"total_count": 1, "check_runs": [{"id": 5, "status": "in_progress", "conclusion": null}]}' > "$tmp/wx/poll0/check-runs.json"
+echo '{"state": "pending", "statuses": [{"context": "ci", "state": "pending"}]}' > "$tmp/wx/poll0/status.json"
 # wait_on [pollN/]FILE=CONTENT... -- MINUTES: at the second poll (or the Nth),
 # FILE holds CONTENT. Prints the output, the sleeps, and the exit status.
 wait_on() {
@@ -604,8 +607,16 @@ check "a check run that only starts wakes nothing" \
   "$(wait_on check-runs='{"check_runs": [{"id": 5, "status": "in_progress", "conclusion": null}, {"id": 6, "status": "queued", "conclusion": null}]}' \
     poll3/pulls_1='{"state": "closed", "merged": false, "head": {"sha": "abc"}, "mergeable": true, "requested_reviewers": [{"id": 1}], "requested_teams": []}' -- 5)" \
   '{"state":"closed","head":"abc","changed":[]} slept=60,60,60 4'
+check "wait-on-pr ends on a commit status finishing, for CI that reports no check runs" \
+  "$(wait_on status='{"state": "success", "statuses": [{"context": "ci", "state": "success"}]}' -- 5)" \
+  '{"state":"open","head":"abc","changed":["statuses"]} slept=60,60 0'
+check "wait-on-pr reads minutes as decimal, so 08 isn't a bad octal number" \
+  "$(wait_on issues_1_reactions='[{"id": 9}]' -- 08)" '{"state":"open","head":"abc","changed":["reactions"]} slept=60,60 0'
 got=$(WX_FAIL=1 wait_on -- 5)
 check "wait-on-pr stops on a failed call, gh's error on stderr" "$got $(cat "$tmp/werr")" \
+  ' slept= 1 gh: API rate limit exceeded (HTTP 403)'
+got=$(WX_FAIL=4 WX_FAIL_ON=check-runs wait_on -- 5)
+check "a failed later read exits 1 whatever gh returned, so gh's 4 doesn't read as merged" "$got $(cat "$tmp/werr")" \
   ' slept= 1 gh: API rate limit exceeded (HTTP 403)'
 
 exit $fail
