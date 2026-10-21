@@ -78,7 +78,8 @@ page reviewThreads "id isResolved isOutdated
 # Thumbs-ups, read only for the comments of unresolved threads, the only ones
 # whose thumbs_up reaches the output, 100 to a query at 1 point each, and put
 # back on their comments for gate.jq. A comment deleted since the page above
-# can't be resolved, so gh fails and nothing is read.
+# can't be resolved: gh fails, or, should GitHub answer null without an error,
+# the comment is missing here and the read is refused for another run.
 jq -c '[.[].data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)
   | .comments.nodes[]?.id] | unique | . as $all | range(0; length; 100) | $all[.:. + 100]' "$tmp/reviewThreads.json" > "$tmp/ids.jsonl"
 : > "$tmp/reactions.jsonl"
@@ -89,6 +90,8 @@ while IFS= read -r ids; do
   gh api graphql --input "$tmp/reactions-query.json" </dev/null >> "$tmp/reactions.jsonl"
 done < "$tmp/ids.jsonl"
 jq -s '[.[].data.nodes[] | select(. != null) | {(.id): .reactions}] | add // {}' "$tmp/reactions.jsonl" > "$tmp/reactions.json"
+jq -se '(.[0] | keys) as $got | [.[1:][][] | select(IN($got[]) | not)] == []' "$tmp/reactions.json" "$tmp/ids.jsonl" >/dev/null || {
+  echo '{"refused": "the PR changed while reading; run again"}'; exit 3; }
 jq --slurpfile up "$tmp/reactions.json" \
   '(.[].data.repository.pullRequest.reviewThreads.nodes[].comments.nodes[]?) |= (. + ($up[0][.id // ""] | if . then {reactions: .} else {} end))' \
   "$tmp/reviewThreads.json" > "$tmp/threads-up.json"

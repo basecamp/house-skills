@@ -14,7 +14,8 @@
 # so nothing it reads or prints is anyone's text. So it can't see a review's
 # body edited in place, which keeps its id, state and commit; nor anything
 # that lands between the fetch-reviews a wait follows and the wait's first
-# read. Either shows on the fetch-reviews run at the deadline. Exits:
+# read. Either shows on the fetch-reviews run at the deadline: that run is
+# the guarantee, and a wake only brings it sooner. Exits:
 #   0  something changed on the head it started on: a review, a review comment
 #      or reply, a PR comment edited or added, a reaction on the PR or on any
 #      of its comments (a person's thumbs-up accepting an answer), the
@@ -44,11 +45,11 @@ snapshot() {
   pr=$(gh api "repos/$repo/pulls/$number") || return 1
   head=$(jq -r .head.sha <<<"$pr") || return 1
   reviews=$(pages "pulls/$number/reviews" 'add | map([.id, .state, .commit_id])') || return 1
-  threads=$(pages "pulls/$number/comments" 'add | map([.id, .updated_at, .reactions.total_count])') || return 1
-  comments=$(pages "issues/$number/comments" 'add | map([.id, .updated_at, .reactions.total_count])') || return 1
+  threads=$(pages "pulls/$number/comments" 'add | map([.id, .updated_at, (.reactions | del(.url))])') || return 1
+  comments=$(pages "issues/$number/comments" 'add | map([.id, .updated_at, (.reactions | del(.url))])') || return 1
   reactions=$(pages "issues/$number/reactions" 'add | map(.id)') || return 1
   checks=$(pages "commits/$head/check-runs" 'map(.check_runs[] | select(.status == "completed") | [.id, .conclusion])') || return 1
-  statuses=$(pages "commits/$head/status" 'map(.statuses[] | select(.state != "pending") | [.context, .state])') || return 1
+  statuses=$(pages "commits/$head/status" 'map(.statuses[] | select(.state != "pending") | [.id, .state])') || return 1
   jq -c --argjson reviews "$reviews" --argjson threads "$threads" --argjson comments "$comments" \
     --argjson reactions "$reactions" --argjson checks "$checks" --argjson statuses "$statuses" \
     '{state: (if .merged then "merged" else .state end), head: .head.sha,
@@ -56,17 +57,19 @@ snapshot() {
       reviews: $reviews, threads: $threads, comments: $comments, reactions: $reactions, checks: $checks,
       statuses: $statuses}' <<<"$pr" || return 1
 }
-# Prints the state and head, and what changed since the first read.
-report() {
-  jq -c --argjson then "$first" '. as $now | {state, head,
-    changed: [keys_unsorted[] | select(IN("state", "head") | not) | select($now[.] != $then[.])]}' <<<"$1"
-}
+# What changed since the first read. A check run or status counts when one
+# finishes that hadn't: a rerun that only takes one off the finished list, or
+# a status gone back to pending, wakes nothing. A status posted again gets a
+# new id, so one finishing as it did before still counts.
+changed='[keys_unsorted[] | select(IN("state", "head") | not)] | map(select(. as $k
+  | if IN($k; "checks", "statuses") then ($now[$k] - $then[$k]) != [] else $now[$k] != $then[$k] end))'
+report() { jq -c --argjson then "$first" ". as \$now | {state, head, changed: $changed}" <<<"$1"; }
 
 first=$(snapshot) || exit 1
 now=$first
 while :; do
-  verdict=$(jq -r --argjson then "$first" 'if .state != "open" then 4 elif .head != $then.head then 5
-    elif del(.state, .head) != ($then | del(.state, .head)) then 0 else "" end' <<<"$now") || exit 1
+  verdict=$(jq -r --argjson then "$first" ". as \$now | if .state != \"open\" then 4 elif .head != \$then.head then 5
+    elif $changed != [] then 0 else \"\" end" <<<"$now") || exit 1
   case $verdict in
     4) report "$now"; exit 4 ;;
     5) report "$now"; exit 5 ;;

@@ -52,14 +52,15 @@ done
 case "$query" in
   # fetch-reviews' thumbs-ups: each id's reactions as the fixture's thread
   # comment holds them, none when it holds none, and like gh, an error for an
-  # id no comment has.
+  # id no comment has. FX_NODES_GONE names one answered null with no error.
   *"nodes(ids:"*) for key in id reactions totalCount nodes user login; do
       grep -qw -- "$key" <<<"$query" || { echo "stub gh: the query doesn't ask for $key" >&2; exit 1; }
     done
     jq -c --slurpfile ids <(jq .variables.ids "$input") '[.[].data.repository.pullRequest.reviewThreads.nodes[].comments.nodes[]?] as $all
       | {data: {nodes: [$ids[0][] as $id | [$all[] | select(.id == $id)][0]
-          | if . then {id, reactions: (.reactions // {totalCount: 0, nodes: []})} else null end]}}' "$FX/threads.json" > "$FX_STATE.nodes"
+          | if . and .id != env.FX_NODES_GONE then {id, reactions: (.reactions // {totalCount: 0, nodes: []})} else null end]}}' "$FX/threads.json" > "$FX_STATE.nodes"
     cat "$FX_STATE.nodes"
+    [ -z "${FX_NODES_GONE:-}" ] || exit 0
     jq -e 'all(.data.nodes[]; . != null)' "$FX_STATE.nodes" >/dev/null || { echo "gh: Could not resolve to a node" >&2; exit 1; }
     exit 0 ;;
   # resolve-thread's mutation: recorded, so a test can tell whether it ran.
@@ -350,6 +351,9 @@ check "the reviewThreads page asks for no reactions" \
   "$(asked '[.[] | select(.query | contains("reviewThreads(")) | .query | contains("reactions")]')" '[false]'
 check "thumbs-ups are asked for the comments of unresolved threads, none of a resolved one's" \
   "$(asked '[.[].ids // empty | .[] | select(IN("tp1", "tp2", "tp3", "t1a", "t5a", "t5b", "t9a"))] | sort')" '["t1a","tp1","tp2","tp3"]'
+got=$(FX_NODES_GONE=tp2 FXDIR="$tmp/fx-agree" run .)
+check "a comment whose thumbs-ups come back null without an error refuses, to run again" \
+  "$(status "$got") $(out "$got" | jq -c .)" '3 {"refused":"the PR changed while reading; run again"}'
 mkdir "$tmp/fx-many"; cp "$here"/fixtures/*.json "$tmp/fx-many/"
 jq '.[0].data.repository.pullRequest.reviewThreads.nodes += [range(2) as $t | {id: "tm\($t)", isResolved: false, isOutdated: false,
     comments: {pageInfo: {hasNextPage: false}, nodes: [range(60) as $c | {id: "tm\($t)-\($c)", url: "https://x/tm\($t)-\($c)",
@@ -569,19 +573,22 @@ echo "$*" >> "$WX/slept"
 echo $(( $(cat "$WX/polls" 2>/dev/null || echo 0) + 1 )) > "$WX/polls"
 STUB
 chmod +x "$tmp/wbin/gh" "$tmp/wbin/sleep"
-mkdir -p "$tmp/wx/poll0"
+# base holds poll0's answers; each wait_on starts poll0 from it.
+mkdir -p "$tmp/wx/base"
 echo '{"state": "open", "merged": false, "head": {"sha": "abc"}, "mergeable": true, "requested_reviewers": [{"id": 1}], "requested_teams": []}' \
-  > "$tmp/wx/poll0/pulls_1.json"
-echo '[{"id": 1, "state": "COMMENTED", "commit_id": "abc"}]' > "$tmp/wx/poll0/pulls_1_reviews.json"
-echo '[]' > "$tmp/wx/poll0/pulls_1_comments.json"
-echo '[]' > "$tmp/wx/poll0/issues_1_comments.json"
-echo '[]' > "$tmp/wx/poll0/issues_1_reactions.json"
-echo '{"total_count": 1, "check_runs": [{"id": 5, "status": "in_progress", "conclusion": null}]}' > "$tmp/wx/poll0/check-runs.json"
-echo '{"state": "pending", "statuses": [{"context": "ci", "state": "pending"}]}' > "$tmp/wx/poll0/status.json"
-# wait_on [pollN/]FILE=CONTENT... -- MINUTES: at the second poll (or the Nth),
-# FILE holds CONTENT. Prints the output, the sleeps, and the exit status.
+  > "$tmp/wx/base/pulls_1.json"
+echo '[{"id": 1, "state": "COMMENTED", "commit_id": "abc"}]' > "$tmp/wx/base/pulls_1_reviews.json"
+echo '[{"id": 7, "updated_at": "2026-01-01", "reactions": {"url": "u", "total_count": 1, "+1": 0, "eyes": 1}}]' > "$tmp/wx/base/pulls_1_comments.json"
+echo '[]' > "$tmp/wx/base/issues_1_comments.json"
+echo '[]' > "$tmp/wx/base/issues_1_reactions.json"
+echo '{"total_count": 1, "check_runs": [{"id": 5, "status": "in_progress", "conclusion": null}]}' > "$tmp/wx/base/check-runs.json"
+echo '{"state": "pending", "statuses": [{"id": 1, "context": "ci", "state": "pending"}]}' > "$tmp/wx/base/status.json"
+# wait_on [pollN/]FILE=CONTENT... -- MINUTES: at the second poll (or the Nth,
+# poll0 the first read), FILE holds CONTENT. Prints the output, the sleeps,
+# and the exit status.
 wait_on() {
-  rm -rf "$tmp/wx/poll2" "$tmp/wx/poll3" "$tmp/wx/polls" "$tmp/wx/slept"; mkdir "$tmp/wx/poll2" "$tmp/wx/poll3"
+  rm -rf "$tmp/wx/poll0" "$tmp/wx/poll2" "$tmp/wx/poll3" "$tmp/wx/polls" "$tmp/wx/slept"
+  cp -R "$tmp/wx/base" "$tmp/wx/poll0"; mkdir "$tmp/wx/poll2" "$tmp/wx/poll3"
   local file
   while [ "$1" != -- ]; do file=${1%%=*}; [[ $file == */* ]] || file=poll2/$file
     echo "${1#*=}" > "$tmp/wx/$file.json"; shift; done; shift
@@ -607,13 +614,22 @@ check "a check run that only starts wakes nothing" \
   "$(wait_on check-runs='{"check_runs": [{"id": 5, "status": "in_progress", "conclusion": null}, {"id": 6, "status": "queued", "conclusion": null}]}' \
     poll3/pulls_1='{"state": "closed", "merged": false, "head": {"sha": "abc"}, "mergeable": true, "requested_reviewers": [{"id": 1}], "requested_teams": []}' -- 5)" \
   '{"state":"closed","head":"abc","changed":[]} slept=60,60,60 4'
-echo '[{"id": 7, "updated_at": "2026-01-01", "reactions": {"total_count": 0}}]' > "$tmp/wx/poll0/pulls_1_comments.json"
-check "wait-on-pr ends on a reaction to a review comment, such as a person's thumbs-up on an answer" \
-  "$(wait_on pulls_1_comments='[{"id": 7, "updated_at": "2026-01-01", "reactions": {"total_count": 1}}]' -- 5)" \
+check "wait-on-pr ends on a thumbs-up on a review comment, even one that replaces another reaction" \
+  "$(wait_on pulls_1_comments='[{"id": 7, "updated_at": "2026-01-01", "reactions": {"url": "u", "total_count": 1, "+1": 1, "eyes": 0}}]' -- 5)" \
   '{"state":"open","head":"abc","changed":["threads"]} slept=60,60 0'
 check "wait-on-pr ends on a commit status finishing, for CI that reports no check runs" \
-  "$(wait_on status='{"state": "success", "statuses": [{"context": "ci", "state": "success"}]}' -- 5)" \
+  "$(wait_on status='{"state": "success", "statuses": [{"id": 2, "context": "ci", "state": "success"}]}' -- 5)" \
   '{"state":"open","head":"abc","changed":["statuses"]} slept=60,60 0'
+closed='{"state": "closed", "merged": false, "head": {"sha": "abc"}, "mergeable": true, "requested_reviewers": [{"id": 1}], "requested_teams": []}'
+check "a finished check run that's rerun wakes nothing until the rerun finishes" \
+  "$(wait_on poll0/check-runs='{"check_runs": [{"id": 5, "status": "completed", "conclusion": "failure"}]}' \
+    check-runs='{"check_runs": [{"id": 6, "status": "queued", "conclusion": null}]}' poll3/pulls_1="$closed" -- 5)" \
+  '{"state":"closed","head":"abc","changed":[]} slept=60,60,60 4'
+check "a status gone from success back to pending wakes nothing; finishing success again does" \
+  "$(wait_on poll0/status='{"statuses": [{"id": 1, "context": "ci", "state": "success"}]}' \
+    status='{"statuses": [{"id": 2, "context": "ci", "state": "pending"}]}' \
+    poll3/status='{"statuses": [{"id": 3, "context": "ci", "state": "success"}]}' -- 5)" \
+  '{"state":"open","head":"abc","changed":["statuses"]} slept=60,60,60 0'
 check "wait-on-pr reads minutes as decimal, so 08 isn't a bad octal number" \
   "$(wait_on issues_1_reactions='[{"id": 9}]' -- 08)" '{"state":"open","head":"abc","changed":["reactions"]} slept=60,60 0'
 got=$(WX_FAIL=1 wait_on -- 5)
