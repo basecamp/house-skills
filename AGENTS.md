@@ -39,9 +39,8 @@ from the plugin by default. They have no symlink in `skills/` and don't reach
 
 Run `bin/ci` before committing and opening PRs. It validates the symlink/plugin
 structure — every skill symlink resolves, no plugin.json declares a `skills`
-field, nothing in `skills/` is a real file, and every plugin agent has a name, a
-description and any `autoCompactWindow` in Claude Code's range — and runs the
-script tests under `test/`.
+field, and nothing in `skills/` is a real file — and runs the script tests under
+`test/`.
 
 ### Do not create files directly in skills/
 

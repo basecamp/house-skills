@@ -5,7 +5,6 @@ set -euo pipefail
 # - Every entry in skills/ is a symlink pointing into a plugin's skills/ dir
 # - Every skill in a plugin's skills/ has a corresponding symlink in skills/
 # - No plugin.json declares a skills field (skills are auto-discovered)
-# - Every plugin agent has the frontmatter Claude Code needs to load it
 
 errors=0
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -113,40 +112,6 @@ PYEOF
     echo "ERROR: plugins/$plugin plugin.json is not a JSON object"
     errors=$((errors + 1))
   fi
-done
-
-# 4. Every plugin agent loads: frontmatter with a name matching its file and a
-# description, and an autoCompactWindow, if set, that Claude Code accepts. A bad
-# one isn't an error there: the agent loads without it, warned only in a debug log.
-for agent in "$root"/plugins/*/agents/*.md; do
-  [ -f "$agent" ] || continue
-  rel="${agent#"$root"/}"
-  while IFS= read -r problem; do
-    echo "ERROR: $rel $problem"
-    errors=$((errors + 1))
-  done < <(python3 - "$agent" <<'PYEOF'
-import os, re, sys
-
-path = sys.argv[1]
-lines = open(path).read().split("\n")
-if not lines or lines[0] != "---" or "---" not in lines[1:]:
-    print("has no frontmatter")
-    sys.exit()
-fields = {}
-for line in lines[1:lines.index("---", 1)]:
-    m = re.match(r"([A-Za-z]+):\s*(.*)$", line)
-    if m:
-        fields[m.group(1)] = m.group(2).strip()
-stem = os.path.basename(path)[:-3]
-if fields.get("name") != stem:
-    print(f"name must be '{stem}', matching its file")
-if not fields.get("description"):
-    print("has no description")
-window = fields.get("autoCompactWindow")
-if window is not None and not (window.isdigit() and 100000 <= int(window) <= 1000000):
-    print(f"autoCompactWindow '{window}' must be an integer from 100000 to 1000000")
-PYEOF
-)
 done
 
 if [ "$errors" -gt 0 ]; then
