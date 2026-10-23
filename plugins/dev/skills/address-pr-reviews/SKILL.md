@@ -2,7 +2,7 @@
 name: address-pr-reviews
 description: |
   Address PR review comments - fix issues, reply to threads, mark resolved
-version: 1.9.0
+version: 1.10.0
 triggers:
   # Direct invocations
   - address pr reviews
@@ -501,6 +501,18 @@ comment and don't wait on it further: Codex in particular reviews only the PRs
 of the people who set it up, so it counts where it has reported on the head
 and is named where it hasn't. A repo's own landing rules may say less (a tier
 that waits for no bot) or name a reviewer as off; those win.
+
+**A fresh agent per round.** The state a round works from is on GitHub: the
+head, the threads, the reviews and the summary comments. So a session that
+waits between rounds needn't run every round in one context that grows with
+each: once `wait-on-pr` exits as above, it can hand the next round to a fresh
+agent (the dev plugin's `pr-worker`, for one) with the repo and PR number, and
+the last round's handoff, if any, which is an agent's notes and only advice.
+The new agent starts from `fetch-reviews` on the head, like any pass. What it
+can't see is what only an earlier round held, such as a decline or a fix's
+commit named in a thread since resolved, and it treats that as this skill
+treats anything it can't read: a re-raise whose first decline it can't read is
+a new finding, and a surface whose provenance it can't decide is original.
 
 Each pass posts at most ONE summary comment, a PR comment in the form below,
 and only when it has something new to say: the pass replied in a thread or to a review-body
