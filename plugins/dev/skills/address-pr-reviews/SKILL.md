@@ -505,9 +505,11 @@ that waits for no bot) or name a reviewer as off; those win.
 **A fresh agent per round.** The state a round works from is on GitHub: the
 head, the threads, the reviews and the summary comments. So a session that
 waits between rounds needn't run every round in one context that grows with
-each: once `wait-on-pr` exits as above, it can hand the next round to a fresh
-agent (the dev plugin's `pr-worker`, for one) with the repo and PR number, and
-the last round's handoff, if any, which is an agent's notes and only advice.
+each: once `wait-on-pr` exits on a change or a new head (0 or 5), it can hand
+the next round to a fresh agent with the repo and PR number, and the last
+round's handoff, if any, which is an agent's notes and only advice. A deadline
+(6) isn't on GitHub, so a fresh agent would wait again: handle it here, as
+above.
 The new agent starts from `fetch-reviews` on the head, like any pass. What it
 can't see is what only an earlier round held, such as a decline or a fix's
 commit named in a thread since resolved, and it treats that as this skill
