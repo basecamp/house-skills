@@ -37,7 +37,7 @@ The dev plugin also ships a subagent type for Claude Code.
 
 | Agent | Plugin | Description |
 |-------|--------|-------------|
-| [pr-worker](plugins/dev/agents/pr-worker.md) | dev | Run one phase of a pull request (build, CI to green, one review round, land) from a brief, and hand off to a fresh agent for the next |
+| [pr-worker](plugins/dev/agents/pr-worker.md) | dev | Run one phase of a pull request (build, CI to green, one review round) from a brief, and hand off to a fresh agent for the next |
 
 ## Structure
 
