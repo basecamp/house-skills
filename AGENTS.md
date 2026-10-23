@@ -18,6 +18,10 @@ so any file referenced by a plugin must physically exist within it. The symlinks
 `skills/` are followed by `npx skills add` (which dereferences) and provide a flat
 browsing view for development.
 
+Subagent types live at `plugins/{plugin}/agents/NAME.md`, which Claude Code loads
+from the plugin by default. They have no symlink in `skills/` and don't reach
+`npx skills add`.
+
 ### Adding a new skill
 
 1. Decide which plugin owns the skill (dev, ai, or security)
@@ -35,8 +39,9 @@ browsing view for development.
 
 Run `bin/ci` before committing and opening PRs. It validates the symlink/plugin
 structure — every skill symlink resolves, no plugin.json declares a `skills`
-field, and nothing in `skills/` is a real file — and runs the script tests under
-`test/`.
+field, nothing in `skills/` is a real file, and every plugin agent has a name, a
+description and any `autoCompactWindow` in Claude Code's range — and runs the
+script tests under `test/`.
 
 ### Do not create files directly in skills/
 

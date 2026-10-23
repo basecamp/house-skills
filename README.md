@@ -31,6 +31,14 @@ npx skills add basecamp/house-skills
 | [skill-crafting](skills/skill-crafting) | ai | Create and refine agent skills through co-development and eval loops |
 | [truffle-hunt](skills/truffle-hunt) | dev | Sweep a dependency corpus for every instance of one latent bug class — scoping, proof protocol, and filing upstream |
 
+## Agents
+
+The dev plugin also ships a subagent type for Claude Code.
+
+| Agent | Plugin | Description |
+|-------|--------|-------------|
+| [pr-worker](plugins/dev/agents/pr-worker.md) | dev | Run one phase of a pull request (build, CI to green, one review round, land) from a brief, and hand off to a fresh agent for the next |
+
 ## Structure
 
 Real skill files live in `plugins/{plugin}/skills/`. The top-level `skills/` directory
