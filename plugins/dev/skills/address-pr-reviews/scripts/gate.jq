@@ -82,30 +82,30 @@ def nodes($pages; f): [$pages[0][].data.repository.pullRequest | f | .nodes[]];
 # person can read them, not so the PR waits.
 def link($kind): {kind: $kind, url, by: (if person then "person" else "bot" end), association: .authorAssociation,
   holds: ($kind | IN("thread", "review"))};
-# Unicode tag characters (U+E0000-U+E007F) render as nothing on GitHub, so a
-# member who pastes them from an outsider's text can't see what they pass on.
-# Only that block goes: emoji joiners and variation selectors stay intact.
-#
 # Whose comment is whose (SKILL.md §3). Agents post under the token's account,
 # so its comments may be the person's or an agent's. One is an agent's when its
 # first line is shipyard's marker, `<!-- agent:v1 {...} -->` with a JSON object
 # that holds no `--`; or, from before the marker, when it opens with 🤖, with
-# one of the reply forms, or with the summary's old marker line. A marker
-# anywhere else (lower down, in a quote) or from any other login is quoted
+# one of the reply forms, or with the summary's old marker line. Each has to
+# open the body, with nothing before it: a marker anywhere else (lower down,
+# in a quote, indented into a code block) or from any other login is quoted
 # text, and the comment is its author's. form is the reply form, from the
 # marker's form and the opening words after it: where both say one and they
 # differ it's "mismatch", which answers nothing.
-def marker: [.body // "" | capture("\\A\\s*<!-- agent:v1 (?<j>\\{[^\\n]*\\}) -->[ \\t]*(?:\\r?\\n|\\z)(?<rest>[\\s\\S]*)")][0]
+def marker: [.body // "" | capture("\\A<!-- agent:v1 (?<j>\\{[^\\n]*\\}) -->[ \\t]*(?:\\r?\\n|\\z)(?<rest>[\\s\\S]*)")][0]
   | if . == null or (.j | test("--")) then null else (.j | try fromjson catch null) as $m
     | if ($m | type) == "object" then {m: $m, rest} else null end end;
-def opening: "\\A\\s*(?:🤖\\s*)?(?<f>Fixed|Flagged for human review|Not doing this) —";
+def opening: "\\A(?:🤖\\s*)?(?<f>Fixed|Flagged for human review|Not doing this) —";
 def words: [capture(opening).f][0] // null | {"Fixed": "fixed", "Flagged for human review": "flagged", "Not doing this": "declined"}[. // ""];
 def agent: .author.login == viewer and (marker != null
-  or (.body // "" | test("\\A\\s*(?:🤖|<!-- address-pr-reviews summary -->)") or words != null));
+  or (.body // "" | test("\\A(?:🤖|<!-- address-pr-reviews summary -->)") or words != null));
 def form: if agent | not then null else marker as $k
-  | if $k == null then (.body // "" | if test("\\A\\s*<!-- address-pr-reviews summary -->") then "summary" else words end)
-    else ($k.m.form | if type == "string" then . else null end) as $said | ($k.rest | words) as $w
+  | if $k == null then (.body // "" | if test("\\A<!-- address-pr-reviews summary -->") then "summary" else words end)
+    else ($k.m.form | if type == "string" then . else null end) as $said | ($k.rest | sub("\\A\\s+"; "") | words) as $w
       | if $said == null then $w elif $w == null or $w == $said then $said else "mismatch" end end end;
+# Unicode tag characters (U+E0000-U+E007F) render as nothing on GitHub, so a
+# member who pastes them from an outsider's text can't see what they pass on.
+# Only that block goes: emoji joiners and variation selectors stay intact.
 def keep: {id, url, login: .author.login, by: (if person then "person" else "bot" end), agent: agent, form: form, at: .createdAt, body: (.body | gsub("[\\x{E0000}-\\x{E007F}]+"; ""))};
 # Who gave a thread comment a thumbs-up, kept only for the token's account and
 # the people who wrote in that thread, so no other login reaches the output. A
