@@ -15,13 +15,16 @@
 #   --agreed  LOGIN replied after your answer, and you read the reply as
 #             agreement asking nothing more (SKILL.md §3); repeat per person
 #
-# Your answer is the thread's last comment from the token's account that opens
-# with one of the skill's reply forms ("Fixed —", "Flagged for human review —",
-# "Not doing this —"). Its form has to match the mode: "Fixed —" for fixed and
-# changed, "Not doing this —" for declined. A flagged thread is a person's to
-# decide, so it never resolves here. Agents post under the person's account, so any other
-# comment from it is the person's. After your answer, only people may have
-# written: a bot after it is a finding still unanswered.
+# Your answer is the thread's last comment from the token's account that
+# fetch-reviews reads as an agent's (its first line the agent marker, or, from
+# before the marker, opening with 🤖 or a reply form) in one of the skill's
+# reply forms ("Fixed —", "Flagged for human review —", "Not doing this —").
+# Its form has to match the mode: "Fixed —" for fixed and changed, "Not doing
+# this —" for declined. A flagged thread is a person's to decide, so it never
+# resolves here. Agents post under the person's account, so any other comment
+# from it is the person's. After your answer, only people may have written: a
+# bot after it is a finding still unanswered, and so is an agent's comment off
+# the forms.
 #
 # Each person who wrote in the thread must have accepted the answer, or, for
 # fixed, be the one whose finding opened the thread and have said nothing
@@ -67,8 +70,9 @@ verdict=$(jq -r --arg id "$thread" --arg how "$how" --argjson agreed "$(jq -nc '
   .viewer as $me
   | ([.reviews[] | select(.state == "APPROVED")]) as $approvals
   | [.threads[] | select(.id == $id)][0] as $t
-  | def answer: .login == $me and (.body // "" | test("^\\s*(Fixed|Flagged for human review|Not doing this) —"));
-    def person: (.cleared // false) or (.by == "person" and (answer | not));
+  # fetch-reviews says which comments are the agent ones, and in which form.
+  | def answer: .login == $me and .agent == true and (.form | IN("fixed", "flagged", "declined", "mismatch"));
+    def person: (.cleared // false) or (.by == "person" and .agent != true);
   if $t == null then "missing"
   # A cleared outside comment comes through with no author or text: unread here.
   elif any($t.comments[]; .cleared // false) then "cleared"
@@ -76,10 +80,11 @@ verdict=$(jq -r --arg id "$thread" --arg how "$how" --argjson agreed "$(jq -nc '
     ([$t.comments | to_entries[] | select(.value | answer) | .key] | last) as $i
     | if $i == null then "unanswered" else
       $t.comments[$i] as $a | $t.comments[$i + 1:] as $after
-      | ($a.body | capture("^\\s*(?<f>Fixed|Flagged for human review|Not doing this) —").f) as $form
+      | $a.form as $form
       | if any($after[]; person | not) then "unanswered"
-        elif $form == "Flagged for human review" then "flagged"
-        elif ($form == "Fixed") != ($how != "declined") then "form:" + $form
+        elif $form == "flagged" then "flagged"
+        elif $form == "mismatch" then "mismatch"
+        elif ($form == "fixed") != ($how != "declined") then "form:" + $form
         elif any($agreed[]; . as $l | any($after[]; .login == $l) | not) then "agreed-without-reply"
         else
           [$t.comments[] | select(person) | .login] | unique
@@ -100,7 +105,8 @@ case "$verdict" in
   cleared) refuse "a person's outside comment in this thread was cleared but not read here: leave the thread to them" ;;
   unanswered) refuse "the thread has no answer of yours after its last finding: reply with the fix or the decline first" ;;
   flagged) refuse "your answer flags the thread for a person: it stays open for them" ;;
-  form:*) refuse "your answer opens \"${verdict#form:} —\", which doesn't match $how: fixed and changed answer \"Fixed —\", declined \"Not doing this —\"" ;;
+  mismatch) refuse "your answer's marker names one form and its opening words another: post the answer again with the two agreeing" ;;
+  form:*) refuse "your answer is ${verdict#form:}, which doesn't match $how: fixed and changed answer \"Fixed —\", declined \"Not doing this —\"" ;;
   agreed-without-reply) refuse "--agreed names someone who hasn't replied since your answer" ;;
   person:*) refuse "a person in this thread hasn't accepted your answer (${verdict#person:}): answer them and leave it to them" ;;
 esac

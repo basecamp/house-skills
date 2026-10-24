@@ -2,7 +2,7 @@
 name: address-pr-reviews
 description: |
   Address PR review comments - fix issues, reply to threads, mark resolved
-version: 1.9.0
+version: 1.10.0
 triggers:
   # Direct invocations
   - address pr reviews
@@ -101,7 +101,9 @@ state, `viewer` (the token's account), and:
 
 Every item has a `url` to cite, and each with text an `at`, when it was written
 (for a review, when it was submitted), and `by`, whether a `person` or a `bot`
-wrote it.
+wrote it. `agent` is true for a comment from `viewer` that an agent wrote, and
+`form` names which of this skill's forms it is (`fixed`, `flagged`,
+`declined`, `summary`), or is null; see **Whose comment is whose** in §3.
 A member's text comes through as they posted it, quotes included: what a member
 quotes is theirs to answer for, and you judge it on merit like the rest of what
 they wrote. The one thing taken out of any text is Unicode tag characters
@@ -270,18 +272,31 @@ For in-scope requests that pass merit, address the substance of the review body
 in code.
 
 ### Reply as a PR comment
-Top-level review bodies don't have a thread to reply to. Use a PR comment:
+Everything this skill posts opens with shipyard's agent marker as its first
+line (`share/AGENTS.md`, "Marking what an agent writes under a person's
+account"), then 🤖 and the form. `form` is `fixed`, `flagged`, `declined` or
+`summary`, `head` the head you answered on; add `model` and `effort` only where
+the person's `~/AGENTS.md` lets the marker name them, and never a session URL or
+id. Leave the 🤖 off when their `~/AGENTS.md` has the line
+`* Agent comments under my GitHub account: no 🤖.`; the marker stays.
+```
+<!-- agent:v1 {"harness":"claude-code/2.1.310","skill":"address-pr-reviews","form":"fixed","head":"HEAD_SHA"} -->
+🤖 Fixed — [brief explanation of what was done]
+```
+
+Top-level review bodies don't have a thread to reply to. Use a PR comment,
+with the body (the two lines above, in the form that fits) in a file:
 ```bash
-# In scope, worth doing — fixed
-gh pr comment PR_NUMBER --body "Fixed — [brief explanation of what was done]"
+# In scope, worth doing — fixed: "🤖 Fixed — [brief explanation of what was done]"
+gh pr comment PR_NUMBER --body-file reply.md
 
-# Out of scope (do not fix, do not resolve)
-gh pr comment PR_NUMBER --body "Flagged for human review — [why this is out of scope]"
+# Out of scope (do not fix, do not resolve): form "flagged",
+# "🤖 Flagged for human review — [why this is out of scope]"
 
-# In scope and true, but deliberately declined (do not fix)
+# In scope and true, but deliberately declined (do not fix): form "declined",
+# "🤖 Not doing this — [what's true about it], but [the failure mode it doesn't fit / the layer it can't see / the cost it adds]."
 # A top-level review body has no thread to resolve; this reply is what answers it,
 # and the summary comment (see Converge) lists it with the other declines.
-gh pr comment PR_NUMBER --body "Not doing this — [what's true about it], but [the failure mode it doesn't fit / the layer it can't see / the cost it adds]."
 ```
 
 ## 3. Process Unresolved Threads
@@ -301,13 +316,11 @@ For in-scope requests that pass merit, address the substance of the comment in
 code.
 
 ### Reply to the thread
+The body is the marker line and the form, as in §2, in a file:
 ```bash
-gh api graphql -f query='
-mutation {
-  addPullRequestReviewThreadReply(input: {
-    pullRequestReviewThreadId: "THREAD_ID",
-    body: "Fixed — [brief explanation of what was done]"
-  }) {
+gh api graphql -F id=THREAD_ID -F body=@reply.md -f query='
+mutation($id: ID!, $body: String!) {
+  addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $id, body: $body}) {
     comment { id }
   }
 }'
@@ -343,16 +356,21 @@ disagreed has to accept: one person's agreement doesn't answer another's.
 
 **Whose comment is whose.** Agents post under the person's GitHub account, so a
 comment from `viewer`, the token's account, may be the person's or an agent's.
-Every reply this skill writes opens with one of its three forms ("Fixed —",
-"Flagged for human review —", "Not doing this —"), and its summary comment with
-the marker line. Read a comment from the token's account that opens with one of
-them as an agent's answer, and any other as the person's, agreement and
-disagreement alike. A 👍 or an approval from that account is the person's too.
-That's a convention, not proof:
+Everything this skill writes opens with the agent marker (§2), and `fetch-reviews`
+marks a comment from `viewer` `agent: true` when its first line is that marker.
+Comments from before the marker count too: one that opens with 🤖, with one of
+the three forms ("Fixed —", "Flagged for human review —", "Not doing this —"),
+or with the old summary line `<!-- address-pr-reviews summary -->`. Read every
+other comment from that account as the person's, agreement and disagreement
+alike, including one that quotes a marked comment or has the marker anywhere
+but its first line; a marker from any other login is that person's text. A 👍
+or an approval from that account is the person's too. That's a convention, not
+proof:
 
-- An agent off the forms reads as the person. Its disagreement holds a thread
-  that might have resolved, which is the safe side.
-- An agent that wrote agreement as the person, off the forms, would let a thread
+- An agent's comment without the marker, 🤖 or a form reads as the person's.
+  Its disagreement holds a thread that might have resolved, which is the safe
+  side.
+- An agent that wrote agreement as the person, unmarked, would let a thread
   resolve. That gains it nothing: the same token can resolve the thread
   outright. So never write agreement, a 👍 or an approval on a person's behalf.
 
@@ -371,9 +389,10 @@ It re-reads the PR through `fetch-reviews` and holds the rules above in code:
 - It resolves only a thread that comes back in `threads`, so never a withheld
   one, and never one holding a cleared outside comment, which nobody here has
   read.
-- Your answer is the thread's last comment from `viewer` in one of the three
-  forms, and its form has to match the mode: "Fixed —" for `fixed` and
-  `changed`, "Not doing this —" for `declined`. A "Flagged for human review —"
+- Your answer is the thread's last `agent` comment in one of the three forms,
+  and its form has to match the mode: `fixed` for `fixed` and `changed`,
+  `declined` for `declined`. Where the marker's `form` and the opening words
+  disagree, it's neither, and holds. A "Flagged for human review —"
   answer never resolves here. A bot after it means a finding still
   unanswered, so the thread holds.
 - Each person who wrote in the thread has to have accepted that answer: an
@@ -506,16 +525,16 @@ Each pass posts at most ONE summary comment, a PR comment in the form below,
 and only when it has something new to say: the pass replied in a thread or to a review-body
 finding, or the lines from "Open for a decision" down would list something
 different from the last summary comment on the PR (the latest entry in
-`comments` that starts with the marker line). Otherwise post nothing, so an
+`comments` with `form` `summary`). Otherwise post nothing, so an
 item that waits on a person, such as a CI bot's status comment in `withheld`,
 isn't posted again on every pass; and post nothing when every line under the
 marker would be empty, unless the last summary listed something: then post the
-marker and one line, "Nothing open on <head short sha>." Post a new comment rather than editing the last one, since an edit
+marker and one line, "🤖 Nothing open on <head short sha>." Post a new comment rather than editing the last one, since an edit
 notifies no one.
 
 ```
-<!-- address-pr-reviews summary -->
-Review threads: N resolved (M fixed, K declined with the reasoning in each thread).
+<!-- agent:v1 {"harness":"claude-code/2.1.310","skill":"address-pr-reviews","form":"summary","head":"HEAD_SHA"} -->
+🤖 Review threads: N resolved (M fixed, K declined with the reasoning in each thread).
 Review bodies: N findings answered (M fixed, K declined).
 Fixed from a review body: <one bullet per finding — link to the review + one clause>
 Declined: <one bullet per decline — link to the thread or review + one clause>
@@ -525,8 +544,9 @@ Not read, holding: <one link per withheld thread or review> (a person reads it a
 Not read: <one link per withheld plain comment> (listed for a person; it holds nothing)
 ```
 
-Omit any line that would be empty. Link each item by its `url`: a thread by one
-of its comments' (the same as
+Omit any line that would be empty; the first line left opens with 🤖, unless the
+person opted out. Link each item by its `url`: a thread by one of its comments'
+(the same as
 `https://github.com/OWNER/REPO/pull/N#discussion_r<comment databaseId>`), and a
 body-only finding, which has no thread, by its review's.
 
