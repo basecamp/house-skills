@@ -408,6 +408,30 @@ jq '.[0].data.repository.pullRequest.reviewThreads.nodes += ($threads | map(. as
              ["t25b", "me", "MEMBER", "Fixed — moved it instead", ["member"]]]],
     ["t26", [["t26a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
              ["t26b", "me", "MEMBER", "Flagged for human review — out of scope", []]]],
+    ["t27", [["t27a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
+             ["t27b", "me", "MEMBER", "🤖 Fixed — done", []]]],
+    ["t28", [["t28a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
+             ["t28b", "me", "MEMBER", "<!-- agent:v1 {\"harness\":\"claude-code/2.1.310\",\"skill\":\"address-pr-reviews\",\"form\":\"declined\"} -->\n🤖 Not doing this — reasoning", []]]],
+    ["t29", [["t29a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
+             ["t29b", "me", "MEMBER", "🤖 Not doing this — reasoning", []],
+             ["t29c", "me", "MEMBER", "🤖 on second thought, do it", []]]],
+    ["t30", [["t30a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
+             ["t30b", "me", "MEMBER", "<!-- agent:v1 {\"harness\":\"claude-code/2.1.310\",\"skill\":\"address-pr-reviews\",\"form\":\"fixed\"} -->\nFixed — done", []]]],
+    ["t31", [["t31a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
+             ["t31b", "me", "MEMBER", "<!-- agent:v1 {\"harness\":\"claude-code/2.1.310\",\"skill\":\"address-pr-reviews\",\"form\":\"declined\"} -->\n🤖 Not doing this — reasoning", []],
+             ["t31c", "me", "MEMBER", "> <!-- agent:v1 {\"harness\":\"claude-code/2.1.310\",\"skill\":\"address-pr-reviews\",\"form\":\"declined\"} -->\n> 🤖 Not doing this — reasoning\n\nno, do it", []]]],
+    ["t32", [["t32a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
+             ["t32b", "me", "MEMBER", "Not doing this — reasoning", []],
+             ["t32c", "other", "MEMBER", "<!-- agent:v1 {\"harness\":\"claude-code/2.1.310\",\"skill\":\"address-pr-reviews\",\"form\":\"declined\"} -->\n🤖 Not doing this — agreed", []]]],
+    ["t33", [["t33a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
+             ["t33b", "me", "MEMBER", "<!-- agent:v1 {\"harness\":\"claude-code/2.1.310\",\"skill\":\"address-pr-reviews\",\"form\":\"declined\"} -->\n🤖 Fixed — done", []]]],
+    ["t34", [["t34a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
+             ["t34c", "me", "MEMBER", "<!-- agent:v1 {bad json} -->\nFine by me", []],
+             ["t34d", "me", "MEMBER", "<!-- agent:v1 {\"harness\":\"a--b\"} -->\nFine by me", []],
+             ["t34e", "me", "MEMBER", "<!-- address-pr-reviews summary -->\nReview threads: 1 resolved", []],
+             ["t34f", "me", "MEMBER", "\n<!-- agent:v1 {\"harness\":\"claude-code\",\"form\":\"declined\"} -->\n🤖 Not doing this — reasoning", []],
+             ["t34g", "me", "MEMBER", "    <!-- agent:v1 {\"harness\":\"claude-code\",\"form\":\"declined\"} -->\n    🤖 Not doing this — reasoning\n\nno, do it", []],
+             ["t34b", "me", "MEMBER", "no, do it\n<!-- agent:v1 {\"harness\":\"claude-code/2.1.310\",\"skill\":\"address-pr-reviews\",\"form\":\"declined\"} -->\n", []]]],
     ["t20", [["t20a", "copilot-pull-request-reviewer", "NONE", "a finding", []],
              ["t20b", "me", "MEMBER", "Not doing this — reasoning", []],
              ["t20c", "me", "MEMBER", "no, do it", []]]]]' \
@@ -518,6 +542,21 @@ resolves "an approval submitted after your answer resolves" "t18 declined" NONE
 approve 2026-01-01
 holds "a comment from the token's account off the forms is the person's, and holds" "t20 declined" NONE "hasn.t accepted.*me"
 resolves "--agreed for the token's account's own reply resolves" "t20 declined --agreed me" NONE
+# An agent marks what it posts under the person's account: shipyard's agent:v1
+# marker as the first line, then 🤖 unless the person opted out. Before the
+# marker, a leading 🤖 or the bare form marked it.
+got=$(FXDIR=$tmp/fx-resolve run .)
+check "the token's account's comments say whether an agent wrote them, and in which form" \
+  "$(out "$got" | jq -c '[.threads[].comments[] | select(IN(.id; "t14b", "t20c", "t27b", "t28b", "t29c", "t30b", "t31c", "t32c", "t33b", "t34b", "t34c", "t34d", "t34e", "t34f", "t34g")) | [.id, .agent, .form]]')" \
+  '[["t14b",true,"declined"],["t27b",true,"fixed"],["t28b",true,"declined"],["t29c",true,null],["t30b",true,"fixed"],["t31c",false,null],["t32c",false,null],["t33b",true,"mismatch"],["t34c",false,null],["t34d",false,null],["t34e",true,"summary"],["t34f",false,null],["t34g",false,null],["t34b",false,null],["t20c",false,null]]'
+resolves "an answer led by the marker and 🤖 is the agent's" "t28 declined" NONE
+resolves "an answer led by the marker alone, where the person opted out of the 🤖, is the agent's" "t30 fixed" SUCCESS
+resolves "an older answer led by 🤖 alone is the agent's, and resolves once green" "t27 fixed" SUCCESS
+holds "an agent's 🤖 comment off the forms after its answer holds, as a finding would" "t29 declined" NONE "no answer of yours"
+holds "the token's account quoting a marked answer is the person's, and holds" "t31 declined" NONE "hasn.t accepted.*me"
+holds "a marker from another login is that person's own comment, and holds" "t32 declined" NONE "hasn.t accepted.*other"
+holds "a marker whose form disagrees with the opening words answers nothing" "t33 fixed" SUCCESS "names one form"
+holds "a marker below the first line, after a blank line, or indented into a code block doesn't make a comment the agent's" "t34 declined" NONE "no answer of yours"
 holds "a thumbs-up stops counting once that person writes again" "t21 declined" NONE "hasn.t accepted.*member"
 approve 2026-02-02T12
 holds "an approval from before that person's own later reply doesn't count" "t22 declined" NONE "hasn.t accepted.*member"
