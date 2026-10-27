@@ -2,7 +2,23 @@
 
 A Claude Code mod that labels each Claude session's row in [herdr](https://herdr.dev)'s agent sidebar with a short summary of what it's working on, like "Debugging flaky OAuth e2e test".
 
-![herdr's agent sidebar with four Claude sessions, each showing a short summary of its work under the project name](docs/agents-panel.png)
+herdr's agent sidebar with four Claude sessions, the summary under each project name:
+
+```
+agents                                grouped
+
+● billing-api
+  Running tests and fixing failures
+
+○ storefront
+  Adding coupon code field to checkout
+
+○ weather-app
+  Fixing forecast cache expiration bug
+
+○ docs-site
+  Fixing broken links in getting-started guide
+```
 
 While a session runs inside a herdr pane, the mod asks Haiku for a 3–7 word label from the last few messages and reports it to herdr as the pane's `$summary` token. It refreshes at most every five minutes mid-turn and every minute when a turn ends, and only when the conversation has grown, so an idle session costs nothing. When the session ends it clears the label. Outside herdr it does nothing.
 
