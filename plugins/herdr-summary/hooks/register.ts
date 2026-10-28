@@ -49,6 +49,7 @@ async function refresh($: EngineInterface, interval: number) {
   // Claimed before the first await, so parallel tool calls start one refresh.
   if (isRunning) return
   isRunning = true
+  const started = generation
   try {
     const now = await $.clock.now()
     if (now - lastAt < interval || !(await paneId($))) return
@@ -56,13 +57,12 @@ async function refresh($: EngineInterface, interval: number) {
     const messages = (await $.session.messages())
       .map(({ role, text }) => ({ role, text: clean(text) }))
       .filter(({ text }) => text !== '')
-    if (messages.length === 0 || messages.length === lastCount) return
+    if (started !== generation || messages.length === 0 || messages.length === lastCount) return
 
     // The throttle counts attempts; the count only advances once a label is
     // reported, so a failed attempt is retried after the interval.
     lastAt = now
     const count = messages.length
-    const started = generation
 
     const transcript = messages
       .slice(-12)
