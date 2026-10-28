@@ -19,6 +19,9 @@ const SYSTEM =
 let lastAt = 0
 let lastCount = 0
 let isRunning = false
+// Bumped when the session ends, so a refresh still awaiting Haiku doesn't
+// report a label after the clear.
+let generation = 0
 
 export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
@@ -34,6 +37,7 @@ export const register: Register = on => {
   })
 
   on('session.end', async ($, e, next) => {
+    generation++
     lastAt = 0
     lastCount = 0
     await report($, null).catch(() => undefined)
@@ -42,18 +46,23 @@ export const register: Register = on => {
 }
 
 async function refresh($: EngineInterface, interval: number) {
-  const now = await $.clock.now()
-  if (isRunning || now - lastAt < interval || !(await paneId($))) return
-
+  // Claimed before the first await, so parallel tool calls start one refresh.
+  if (isRunning) return
   isRunning = true
   try {
+    const now = await $.clock.now()
+    if (now - lastAt < interval || !(await paneId($))) return
+
     const messages = (await $.session.messages())
       .map(({ role, text }) => ({ role, text: clean(text) }))
       .filter(({ text }) => text !== '')
     if (messages.length === 0 || messages.length === lastCount) return
 
+    // The throttle counts attempts; the count only advances once a label is
+    // reported, so a failed attempt is retried after the interval.
     lastAt = now
-    lastCount = messages.length
+    const count = messages.length
+    const started = generation
 
     const transcript = messages
       .slice(-12)
@@ -68,12 +77,14 @@ async function refresh($: EngineInterface, interval: number) {
       maxTokens: 40,
       timeoutMs: 60_000,
     })
-    if (!reply.isAnswered) return
+    if (!reply.isAnswered || started !== generation) return
 
     const summary = (reply.text.split('\n')[0] ?? '').replace(/["\r]/g, '').trim().slice(0, 60)
-    if (summary !== '') await report($, summary)
+    if (summary === '') return
+    await report($, summary)
+    if (started === generation) lastCount = count
   } catch {
-    // A missed refresh is retried on the next tool call or turn end.
+    // A missed refresh is retried on a tool call or turn end after the interval.
   } finally {
     isRunning = false
   }
