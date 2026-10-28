@@ -19,9 +19,16 @@ const SYSTEM =
 let lastAt = 0
 let lastCount = 0
 let isRunning = false
-// Bumped when the session ends, so a refresh still awaiting Haiku doesn't
-// report a label after the clear.
-let generation = 0
+
+// Every refresh and session end takes a ticket, in order, before its first
+// await. A report is sent with --seq base + ticket, and herdr drops a report
+// whose seq isn't above the last one it took, so a refresh that started
+// before the session ended can't put its label back after the clear, however
+// late it lands. base is the clock at the first report, so a new process's
+// seqs start above an old one's in the same pane.
+let tickets = 0
+let endedAt = 0
+let base: Promise<number> | undefined
 
 export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
@@ -37,10 +44,10 @@ export const register: Register = on => {
   })
 
   on('session.end', async ($, e, next) => {
-    generation++
+    endedAt = ++tickets
     lastAt = 0
     lastCount = 0
-    await report($, null).catch(() => undefined)
+    await report($, null, endedAt).catch(() => undefined)
     return next(e)
   })
 }
@@ -49,7 +56,7 @@ async function refresh($: EngineInterface, interval: number) {
   // Claimed before the first await, so parallel tool calls start one refresh.
   if (isRunning) return
   isRunning = true
-  const started = generation
+  const ticket = ++tickets
   try {
     const now = await $.clock.now()
     if (now - lastAt < interval || !(await paneId($))) return
@@ -57,7 +64,9 @@ async function refresh($: EngineInterface, interval: number) {
     const messages = (await $.session.messages())
       .map(({ role, text }) => ({ role, text: clean(text) }))
       .filter(({ text }) => text !== '')
-    if (started !== generation || messages.length === 0 || messages.length === lastCount) return
+    // A refresh the session outlived stops here, before it spends a Haiku
+    // call or throttles the next conversation.
+    if (ticket < endedAt || messages.length === 0 || messages.length === lastCount) return
 
     // The throttle counts attempts; the count only advances once a label is
     // reported, so a failed attempt is retried after the interval.
@@ -77,12 +86,12 @@ async function refresh($: EngineInterface, interval: number) {
       maxTokens: 40,
       timeoutMs: 60_000,
     })
-    if (!reply.isAnswered || started !== generation) return
+    if (!reply.isAnswered) return
 
     const summary = (reply.text.split('\n')[0] ?? '').replace(/["\r]/g, '').trim().slice(0, 60)
     if (summary === '') return
-    await report($, summary)
-    if (started === generation) lastCount = count
+    await report($, summary, ticket)
+    if (ticket > endedAt) lastCount = count
   } catch {
     // A missed refresh is retried on a tool call or turn end after the interval.
   } finally {
@@ -90,14 +99,15 @@ async function refresh($: EngineInterface, interval: number) {
   }
 }
 
-async function report($: EngineInterface, summary: string | null) {
+async function report($: EngineInterface, summary: string | null, ticket: number) {
+  const seq = (await (base ??= $.clock.now())) + ticket
   const pane = await paneId($)
   if (!pane) return
 
   const token = summary === null ? ['--clear-token', 'summary'] : ['--token', `summary=${summary}`]
   const herdr = (await $.env.get('HERDR_BIN_PATH')) ?? 'herdr'
   await $.process.run(
-    [herdr, 'pane', 'report-metadata', pane, '--source', SOURCE, ...token, '--seq', String(await $.clock.now())],
+    [herdr, 'pane', 'report-metadata', pane, '--source', SOURCE, ...token, '--seq', String(seq)],
     { timeoutMs: 5_000 },
   )
 }
