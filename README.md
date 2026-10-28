@@ -39,6 +39,14 @@ The dev plugin also ships a subagent type for Claude Code.
 |-------|--------|-------------|
 | [pr-worker](plugins/dev/agents/pr-worker.md) | dev | Run one phase of a pull request (build, CI to green, one review round) from a brief, and hand off to a fresh agent for the next |
 
+## Hooks
+
+Plugins made only of hooks, for Claude Code. They aren't skills, so `npx skills add` doesn't install them.
+
+| Plugin | Description |
+|--------|-------------|
+| [herdr-summary](plugins/herdr-summary) | Label each Claude Code session's [herdr](https://herdr.dev) agent row with a short Haiku summary of what it's working on |
+
 ## Structure
 
 Real skill files live in `plugins/{plugin}/skills/`. The top-level `skills/` directory
