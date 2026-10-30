@@ -800,7 +800,7 @@ Thread ID: [thread_id from the first `codex exec --json` event]
 
 Study these before consulting an outside expert:
 
-- **skill-crafting** (`skills/skill-crafting/`) - Co-developed using this skill. Multi-round MCP sessions (threads `019bda94-d0c9-7c23-aae0-d4d933a2547d`, `019bdc86-502b-7ca1-97e9-814eaa7355dd`, `019bdc91-1ea3-71c3-ab8f-bda225806061`). Demonstrates severity progression H→M→L→clear, mid-flight fixes, dual-review pattern (self-review + external review + reconcile), convergence.
+- **skill-crafting** (`skills/skill-crafting/`) - Co-developed using this skill. Multi-round Codex sessions (threads `019bda94-d0c9-7c23-aae0-d4d933a2547d`, `019bdc86-502b-7ca1-97e9-814eaa7355dd`, `019bdc91-1ea3-71c3-ab8f-bda225806061`). Demonstrates severity progression H→M→L→clear, mid-flight fixes, dual-review pattern (self-review + external review + reconcile), convergence.
 
 ---
 

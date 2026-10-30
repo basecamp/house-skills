@@ -326,7 +326,7 @@ triggers:                  # Activation phrases
 Study these before starting a new skill:
 
 - **llms-txt** (`skills/llms-txt/`) - Demonstrates eval checks, failure modes, templates.
-- **consult-outside-expert** (`skills/consult-outside-expert/`) - Co-developed using this skill. 10+ round MCP session with dual-review pattern.
+- **consult-outside-expert** (`skills/consult-outside-expert/`) - Co-developed using this skill. 10+ round Codex session with dual-review pattern.
 
 ---
 
@@ -343,7 +343,7 @@ This skill should improve itself. If it can't, it doesn't work.
 
 **Current status:** Mature (Target 1 complete)
 - Target 1: consult-outside-expert skill ✓
-- Review rounds: 10 (self-review + Codex MCP with dual-review pattern)
+- Review rounds: 10 (self-review + external Codex review, dual-review pattern)
 - Convergence: 2 consecutive rounds with no H/M issues (rounds 9-10)
 - Thread ID: `019bdc91-1ea3-71c3-ab8f-bda225806061`
 
