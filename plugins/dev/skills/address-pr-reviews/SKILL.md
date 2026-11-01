@@ -404,7 +404,13 @@ It re-reads the PR through `fetch-reviews` and holds the rules above in code:
   When you can't tell whether a reply agrees, leave it off.
 - `fixed` and `changed` also wait for the head's required checks to pass
   (every check, where the base requires none): the checks the landing waits
-  on, not an optional runner's status or a queue's own run on the PR. The head
+  on, not an optional runner's status or a queue's own run on the PR. Where
+  the base requires none and none has reported on the head, the script looks
+  for any check that has reported on the base's head or an earlier head of
+  the PR. If one has, the repo runs CI and the head's hasn't started, so it
+  holds. If none has, the repo runs no CI on this PR (none at all, or a
+  path-filtered workflow that skips its files), and with no check, none can
+  fail, so it resolves. The head
   is read again just before resolving, so a push in between holds the fix.
   This is a check that the fix is green, not a copy of GitHub's merge gate.
   The gate still decides whether the PR can merge, and a thread resolved a

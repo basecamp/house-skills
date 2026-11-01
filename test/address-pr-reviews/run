@@ -449,11 +449,14 @@ approve() {
 # check rollup, a bare state (no contexts), or contexts as
 # "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests", req marking a check the
 # base's ruleset requires, PENDING one still running, and missing one the
-# ruleset requires that has no context on the head. Prints the output, a line
-# saying whether the mutation ran, and the exit status.
+# ruleset requires that has no context on the head. A bare state may name,
+# after @, where checks have reported other than the head: the base's head
+# (base), an earlier head in the PR's commits (earlier), or one a force-push
+# replaced (forced); with none named, no check has reported anywhere. Prints
+# the output, a line saying whether the mutation ran, and the exit status.
 resolve() {
   jq . "$here/fixtures/head.json" > "$tmp/head.json"
-  if [[ $2 == *=* ]]; then
+  if [[ $2 == *=* || $2 == *missing:* ]]; then
     jq -n --arg oid "${3:-abc}" --arg spec "$2" '
       [$spec | split(",")[] | select(test("=")) | capture("(?<kind>req|opt):(?<name>[^=]+)=(?<c>.+)")
         | {__typename: "CheckRun", name, isRequired: (.kind == "req"),
@@ -470,13 +473,20 @@ resolve() {
             conditions: {refName: {include: $include, exclude: $exclude}},
             rules: {nodes: ([{type: "REQUIRED_STATUS_CHECKS", parameters: {requiredStatusChecks: [$named[] | {context: .}]}}]
               + (if $workflows then [{type: "WORKFLOWS", parameters: {}}] else [] end))}}]},
-          pullRequest: {baseRef: {name: $basename, branchProtectionRule: null}, commits: {nodes: [{commit: {oid: $oid, statusCheckRollup: {
+          pullRequest: {baseRef: {name: $basename, branchProtectionRule: null}, commits: {nodes: [{commit: {oid: $oid, statusCheckRollup:
+          (if ($nodes | length) == 0 then null else {
           state: (if any($nodes[]; .conclusion == "FAILURE") then "FAILURE"
                   elif any($nodes[]; .conclusion == null) then "PENDING" else "SUCCESS" end),
-          contexts: {pageInfo: {hasNextPage: false}, nodes: $nodes}}}}]}}}}}' > "$tmp/checks.json"
+          contexts: {pageInfo: {hasNextPage: false}, nodes: $nodes}} end)}}]}}}}}' > "$tmp/checks.json"
   else
-    jq -n --arg oid "${3:-abc}" --arg state "$2" '{data: {repository: {pullRequest: {commits: {nodes: [{commit:
-      {oid: $oid, statusCheckRollup: (if $state == "NONE" then null else {state: $state} end)}}]}}}}}' > "$tmp/checks.json"
+    jq -n --arg oid "${3:-abc}" --arg state "${2%%@*}" --arg seen "$([[ $2 != *@* ]] || echo "${2#*@}")" '
+      def rollup($where): if $seen == $where then {state: "SUCCESS"} else null end;
+      {data: {repository: {pullRequest: {
+        baseRef: {target: {statusCheckRollup: rollup("base")}},
+        earlier: {nodes: [{commit: {statusCheckRollup: rollup("earlier")}}, {commit: {statusCheckRollup: null}}]},
+        timelineItems: {nodes: [{beforeCommit: {statusCheckRollup: rollup("forced")}}]},
+        commits: {nodes: [{commit:
+          {oid: $oid, statusCheckRollup: (if $state == "NONE" then null else {state: $state} end)}}]}}}}}' > "$tmp/checks.json"
   fi
   rm -f "$tmp/head-read" "$tmp/head-read.resolved"
   : > "$tmp/calls"
@@ -498,7 +508,16 @@ approve 2026-01-01
 resolves "a declined thread whose last reply is the token's resolves" "t14 declined" NONE
 resolves "a fixed thread resolves once the head's checks pass" "t24 fixed" SUCCESS
 holds "a fixed thread holds while the head's checks run" "t24 fixed" PENDING "haven't finished"
-holds "a fixed thread holds before any check reports" "t24 fixed" NONE "no checks"
+# Nothing reported on the head: a race where CI runs, and nothing to pass where it doesn't.
+resolves "a fixed thread resolves where no check has reported on the head, the base's head, or any earlier head: the repo runs no CI" \
+  "t24 fixed" NONE
+resolves "changed resolves likewise where the repo runs no CI, once accepted" "t25 changed" NONE
+holds "a fixed thread holds before any check reports where checks reported on the base's head" "t24 fixed" NONE@base "no checks have reported"
+holds "a fixed thread holds before any check reports where checks reported on an earlier head, for CI only on pull requests" \
+  "t24 fixed" NONE@earlier "no checks have reported"
+holds "an earlier head a force-push replaced counts as an earlier head" "t24 fixed" NONE@forced "no checks have reported"
+holds "a check the base requires that hasn't reported holds, though nothing has reported anywhere" \
+  "t24 fixed" "missing:tests" "requires hasn.t reported"
 holds "a fixed thread holds when the head's checks failed" "t24 fixed" FAILURE "ended FAILURE"
 holds "a fixed thread holds when the head moved after the read" "t24 fixed" SUCCESS "head moved" def
 resolves "a fixed thread resolves when the required check passed, though an optional runner's failed" \

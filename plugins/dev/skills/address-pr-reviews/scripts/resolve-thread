@@ -8,7 +8,9 @@
 # Usage: resolve-thread OWNER/REPO NUMBER THREAD_ID fixed|changed|declined [--agreed LOGIN]...
 #   fixed     the change the thread's finding asked for, made as asked, is pushed
 #             and the head's required checks have passed, or, where the base
-#             requires none, every check on the head
+#             requires none, every check on the head; where no check has ever
+#             reported on the base's head or any head of the PR, there are none
+#             to pass
 #   changed   a different change from the one asked for, pushed and green as for
 #             fixed; everyone who wrote in the thread must accept it
 #   declined  no change: a decline, or an answer to a question
@@ -133,11 +135,27 @@ if [ "$how" != declined ]; then
           rules(first: 100) { nodes { type parameters {
             ... on RequiredStatusChecksParameters { requiredStatusChecks { context } } } } } } }
         pullRequest(number: $number) {
-          baseRef { name branchProtectionRule { requiredStatusCheckContexts } }
+          baseRef { name branchProtectionRule { requiredStatusCheckContexts }
+            target { ... on Commit { statusCheckRollup { state } } } }
+          earlier: commits(last: 100) { nodes { commit { statusCheckRollup { state } } } }
+          timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], last: 100) { nodes {
+            ... on HeadRefForcePushedEvent { beforeCommit { statusCheckRollup { state } } } } }
           commits(last: 1) { nodes { commit { oid statusCheckRollup { state
             contexts(first: 100) { pageInfo { hasNextPage } nodes { __typename
               ... on CheckRun { name status conclusion isRequired(pullRequestNumber: $number) }
               ... on StatusContext { context state isRequired(pullRequestNumber: $number) } } } } } } } } } }' > "$tmp/checks.json"
+  # Where the base requires nothing and nothing has reported on the head, the
+  # head is either just pushed, its checks not yet started, or in a repo whose
+  # CI never runs on it. The two are told apart by whether any check has ever
+  # reported where this PR's CI would: on the base's head (CI on push) or on an
+  # earlier head of this PR, kept in its commits or behind a force-push (CI on
+  # pull_request, which never reports on the base). Nothing on any of them is
+  # NO_CI, and resolves: with no check, none can fail. Path filters are read
+  # as they ran: a repo whose one workflow skips these files and skipped the
+  # base's last commit (basecamp/cf-tf) reads NO_CI, and one whose base's last
+  # commit ran it holds as NONE. A workflow added by the push being judged, or
+  # a filter that skipped every earlier head but runs on this one, resolves in
+  # the seconds before its first run registers; the run still gates the merge.
   # The ruleset read is bounded on purpose, and fails closed past its bound: a
   # ref pattern it can't convert (fnmatch's ? or [...]) is read as reaching the
   # base, so its checks are required; a Workflows rule, which names runs rather
@@ -157,6 +175,8 @@ if [ "$how" != declined ]; then
     | ([$rulesets[].rules.nodes[]? | select(.type == "REQUIRED_STATUS_CHECKS") | .parameters.requiredStatusChecks[]?.context]
       + ($repo.pullRequest.baseRef.branchProtectionRule.requiredStatusCheckContexts // []) | unique) as $named
     | any($rulesets[].rules.nodes[]?; .type | IN("WORKFLOWS", "REQUIRED_WORKFLOW_STATUS_CHECKS")) as $workflows
+    | ([$repo.pullRequest.baseRef.target.statusCheckRollup, $repo.pullRequest.earlier.nodes[]?.commit.statusCheckRollup,
+        $repo.pullRequest.timelineItems.nodes[]?.beforeCommit.statusCheckRollup] | any(. != null)) as $ci_seen
     | $repo.pullRequest.commits.nodes[0].commit
     | if .oid != $head then "MOVED" else
       (.statusCheckRollup // {}) as $rollup
@@ -165,7 +185,7 @@ if [ "$how" != declined ]; then
       | if ($rollup.contexts.pageInfo.hasNextPage // false) or ($repo.rulesets.pageInfo.hasNextPage // false) then "PAGED"
         elif $workflows then "REQUIRED_WORKFLOWS"
         elif any($named[]; IN($reported[]) | not) then "REQUIRED_MISSING"
-        elif ($required | length) == 0 then $rollup.state // "NONE"
+        elif ($required | length) == 0 then $rollup.state // (if $ci_seen then "NONE" else "NO_CI" end)
         elif any($required[]; (.__typename == "CheckRun" and .status != "COMPLETED")
             or (.__typename == "StatusContext" and (.state | IN("PENDING", "EXPECTED")))) then "REQUIRED_PENDING"
         elif all($required[]; (.__typename == "CheckRun" and (.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED")))
@@ -175,13 +195,13 @@ if [ "$how" != declined ]; then
       end' "$tmp/checks.json")
   case "$state" in
     MOVED) refuse "the PR's head moved since it was read; run again" ;;
-    SUCCESS) ;;
+    SUCCESS | NO_CI) ;;
     PAGED) refuse "the head's check contexts or the repo's rulesets run past one page, so the required checks can't be judged here" ;;
     REQUIRED_WORKFLOWS) refuse "a ruleset reaching the base requires workflows to pass, which this script can't judge by name; resolve the thread by hand once they pass" ;;
     REQUIRED_MISSING) refuse "a check the base requires hasn't reported on the head; resolve once it passes" ;;
     REQUIRED_PENDING) refuse "a required check hasn't finished on the head; resolve once it passes" ;;
     REQUIRED_FAILED) refuse "a required check failed on the head: the fix isn't green" ;;
-    NONE) refuse "no checks have reported on the head yet; resolve once they pass" ;;
+    NONE) refuse "no checks have reported on the head yet, though they have on the base's head or an earlier head of this PR; resolve once they pass" ;;
     PENDING | EXPECTED) refuse "the head's checks haven't finished; resolve once they pass" ;;
     *) refuse "the head's checks ended $state: the fix isn't green" ;;
   esac
