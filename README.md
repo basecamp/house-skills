@@ -45,7 +45,7 @@ Plugins made only of hooks, for Claude Code. They aren't skills, so `npx skills 
 
 | Plugin | Description |
 |--------|-------------|
-| [herdr-summary](plugins/herdr-summary) | Label each Claude Code session's [herdr](https://herdr.dev) agent row with a short Haiku summary of what it's working on |
+| [herdr-summary](plugins/herdr-summary) | Keep each Claude Code session's title on what it's working on, so [herdr](https://herdr.dev)'s agents list names it |
 
 ## Structure
 

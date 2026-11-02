@@ -1,26 +1,26 @@
 # herdr-summary
 
-A Claude Code mod that labels each Claude session's row in [herdr](https://herdr.dev)'s agent sidebar with a short summary of what it's working on, like "Debugging flaky OAuth e2e test".
+A Claude Code plugin that keeps each Claude session's title on what it's working on, so its row in [herdr](https://herdr.dev)'s agents list says so, like "Debugging flaky OAuth e2e test".
 
-herdr's agent sidebar with four Claude sessions, the summary under each project name:
+herdr's agents list with four Claude sessions, the title after each space's name:
 
 ```
-agents                                grouped
+Agents
 
-● billing-api
-  Running tests and fixing failures
+Done 1
+  billing-api · Running tests and fixing failures
 
-○ storefront
-  Adding coupon code field to checkout
+Working 1
+  storefront · Adding coupon code field to checkout
 
-○ weather-app
-  Fixing forecast cache expiration bug
-
-○ docs-site
-  Fixing broken links in getting-started guide
+Idle 2
+  weather-app · Fixing forecast cache expiration bug
+  docs-site · Fixing broken links in getting-started guide
 ```
 
-While a session runs inside a herdr pane, the mod asks Haiku for a 3–7 word label from the last few messages and reports it to herdr as the pane's `$summary` token. It refreshes at most every five minutes mid-turn and every minute when a turn ends, and only when the conversation has grown, so an idle session costs nothing. When the session ends it clears the label. Outside herdr it does nothing.
+Without it, a row shows the title Claude Code gave the session from its first prompt, and keeps it however far the work moves. With it, every prompt you send, steering included, gets a fresh look: Haiku reads the session's first request, its recent messages, the current title and the new prompt, and names what the agent is doing and what for. A new request or a change of topic gets a new title; a correction or narrower scope reshapes it; "ok", "yes" or "thanks" leaves it alone.
+
+It works with herdr-core and the herdr app, in a terminal herdr started (`HC_TERMINAL_ID` set). Outside one it does nothing. herdr's older one-binary releases aren't supported.
 
 ## Install
 
@@ -38,33 +38,21 @@ claude plugin marketplace add basecamp/plugins
 claude plugin install herdr-summary@37signals
 ```
 
-In the desktop app, click + next to the prompt box, then Plugins, Add marketplace with `basecamp/plugins`, then add herdr-summary.
-
 New sessions load it on their own. A session that was already open picks it up after `/reload-plugins`. To update later, run `claude plugin update herdr-summary@37signals`, then `/reload-plugins`.
+
+There is nothing to set up in herdr: its agents list shows a terminal's title for any tab you haven't named. A tab you named shows its name instead.
+
+For an agent on another machine, install the plugin on that machine.
 
 It needs a Claude Code build that runs mods (function-hook plugins).
 
-## Show it in herdr
-
-herdr only draws tokens your sidebar layout names. Add a `$summary` row for Claude agents to `~/.config/herdr/config.toml`:
-
-```toml
-[ui.sidebar.agents.rows_by_agent]
-claude = [
-  ["state_icon", "workspace"],
-  [{ token = "$summary", fg = "#bb9af7" }],
-]
-```
-
-`rows_by_agent.claude` replaces your default agent layout for Claude panes, so copy your own `[ui.sidebar.agents] rows` in and add the summary row to it. Drop `fg` to use the default color.
-
-Then reload from inside herdr: open the menu and choose **reload config**, or press your `reload_config` key. `herdr server reload-config` alone isn't enough, because sidebar layouts come from the client's config, and only the in-app reload re-reads it.
-
 ## How it works
 
-- Labels come from `$.model.complete` with Haiku, billed to the session's own credentials. Nothing is sent anywhere else.
-- It reports with `herdr pane report-metadata <pane> --source claude-summary --token summary=…`, using `HERDR_BIN_PATH`, which herdr sets in every pane.
-- Only the main conversation is summarized. A subagent's turns and tool calls don't trigger a refresh.
+- Before each prompt enters, the mod (`hooks/register.ts`) asks Haiku for a label through `$.model.complete`, billed to the session's own credentials. Nothing is sent anywhere else. It waits at most two seconds, so a prompt enters about half a second later than it would; a label that takes longer applies on the next prompt. Slash commands aren't labeled.
+- It writes the label to `$XDG_RUNTIME_DIR/claude-herdr-summary/<session id>.json` (`$TMPDIR`, else `/tmp`, where that isn't set), and the `UserPromptSubmit` command hook, `hooks/title.sh`, returns it to Claude Code as `sessionTitle`. Claude Code writes the session title to the terminal title, which herdr-core reports.
+- The command hook applies it because the mod can't: on Team and Enterprise accounts, Claude Code's built-in sec-default plugin keeps classic hooks such as `UserPromptSubmit` out of reach of installed plugins' modules.
+- The label is the session's title, so `/resume` lists it too, and it replaces a title you set with `/rename` at the next prompt.
+- Only the prompts you send are labeled. A subagent's work doesn't change the title, and a long turn keeps its title until the next prompt.
 
 ## License
 
