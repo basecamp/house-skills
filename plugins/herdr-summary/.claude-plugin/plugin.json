@@ -1,0 +1,10 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "herdr-summary",
+  "version": "0.2.0",
+  "description": "Keep each Claude Code session's title on what it's working on, so herdr's agents list names it",
+  "author": { "name": "37signals", "email": "support@37signals.com" },
+  "homepage": "https://github.com/basecamp/house-skills",
+  "repository": "https://github.com/basecamp/house-skills",
+  "license": "MIT"
+}
