@@ -1,7 +1,7 @@
 {
   "name": "security",
-  "version": "1.1.1",
-  "description": "Security hardening skills — GitHub Actions pipeline hardening and CI security",
+  "version": "1.2.0",
+  "description": "Security skills — GitHub Actions pipeline hardening, CI security, and identity-security design judgement",
   "author": { "name": "37signals", "email": "support@37signals.com" },
   "homepage": "https://github.com/basecamp/house-skills",
   "repository": "https://github.com/basecamp/house-skills",
