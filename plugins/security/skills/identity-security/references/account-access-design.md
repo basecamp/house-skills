@@ -60,8 +60,10 @@ that only detects is not one that prevents.
 
 1. **Prevent by design.**
    - Bind credentials to the device, so a copy is worth less elsewhere (with the caveats above).
-   - Verify the destination before data goes there: a code sent to a new forwarding address or
-     export target, so the attacker can't name their own without holding it.
+   - Verify a new forwarding address or export target before data goes there. This proves the
+     destination is held by whoever named it, which stops a typo or a third party's address; it
+     doesn't stop an attacker with a session, who verifies their own. The owner's authority still
+     needs one of the moves below.
    - Leave no side effect an attacker profits from, like signing out the owner
      ([sessions-and-step-up.md](sessions-and-step-up.md)).
 2. **Detect, and let the owner recover.** An out-of-band notice with a self-serve undo that reverses

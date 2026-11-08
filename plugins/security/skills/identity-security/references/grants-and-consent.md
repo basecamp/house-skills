@@ -18,7 +18,8 @@ exfiltration ([account-access-design.md](account-access-design.md)).
 ## Client identity
 
 - **A redirect is identity.** Register exact redirect URIs and compare them exactly, by scheme, host,
-  port and path, never by prefix or contains.
+  port and path, never by prefix or contains. The one exception is a native app's loopback redirect,
+  whose port the operating system assigns at run time: there, match all but the port.
 - **Native apps use claimed links or loopback redirects with PKCE**, not a custom scheme another app
   can register.
 - **Nothing presents itself as first-party unless it is.** Names, logos and wording on the consent
