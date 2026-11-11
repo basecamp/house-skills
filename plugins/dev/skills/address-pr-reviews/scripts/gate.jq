@@ -19,7 +19,7 @@ def in_company: repo.owner.login | ascii_downcase | IN(company[]);
 # collaborator with write access could already write. A workflow that copies someone's text into its comment (a PR
 # title, an issue_comment argument) passes that text on, as any inside bot that
 # quotes does; see owned_app.
-def bots: [175728472, 199175422, 191113872, 62310815, 41898282] + $extra; # Copilot, Codex, cubic, GitHub Advanced Security, github-actions
+def bots: [175728472, 199175422, 191113872, 165735046, 62310815, 41898282] + $extra; # Copilot, Codex, cubic, Greptile, GitHub Advanced Security, github-actions
 def person: .author == null or .author.__typename != "Bot";
 def member: .author.__typename == "User"
   and ((in_company and (.authorAssociation | IN("OWNER", "MEMBER"))) or .author.login == viewer);
