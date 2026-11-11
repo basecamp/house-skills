@@ -122,7 +122,7 @@ comment's `databaseId`) is what the summary comment links to.
 A bot's text comes through when it's typed `Bot` (a User named `x[bot]` never
 is) and either:
 
-- **its database id is on the script's list:** Copilot, Codex, cubic, GitHub
+- **its database id is on the script's list:** Copilot, Codex, cubic, Greptile, GitHub
   Advanced Security, github-actions (41898282, GitHub's own Actions app), and
   any in `FETCH_REVIEWS_BOT_IDS`; or
 - **its GitHub App is owned by the repo's owner**, compared case-insensitively:

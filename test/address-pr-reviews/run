@@ -203,6 +203,14 @@ got=$(FETCH_REVIEWS_BOT_IDS="99" run .)
 check "FETCH_REVIEWS_BOT_IDS adds a review bot" \
   "$(out "$got" | jq -c '[(.reviews[], .threads[]) | select(.id == "r5" or .id == "t7") | .id], [.withheld[].url | select(test("r5|t7"))]')" \
   "$(printf '%s\n%s' '["r5","t7"]' '[]')"
+# Greptile is on the list by its id, so its review comes through with no setting.
+mkdir "$tmp/fx-greptile"; cp "$here"/fixtures/*.json "$tmp/fx-greptile/"
+jq '(.. | objects | select(.id? == "r5") | .author) |= {__typename: "Bot", login: "greptile-apps", databaseId: 165735046}' \
+  "$here/fixtures/reviews.json" > "$tmp/fx-greptile/reviews.json"
+got=$(FXDIR="$tmp/fx-greptile" run .)
+check "Greptile's review comes through by its id" \
+  "$(out "$got" | jq -c '[.reviews[] | select(.id == "r5") | .id], [.withheld[].url | select(test("r5"))]')" \
+  "$(printf '%s\n%s' '["r5"]' '[]')"
 # A push between the first head read and the last: the feedback may not match
 # the head being judged, so it refuses.
 jq "$pr.headRefOid = \"def\"" "$here/fixtures/head.json" > "$tmp/head-later.json"
