@@ -331,16 +331,17 @@ what's true about it, and why it still isn't worth doing. Name the actor or the
 layer; "out of scope" is not a reason when the thing is in scope.
 
 ### Resolve the thread
-Resolve a thread once you have addressed it: after an in-scope fix has landed
-on the head and CI is green on it, or after a decline whose reasoning is written
-in the thread. Leave a thread open only when it poses a decision that is not the
-author's to make — a product or scope call, a security trade-off, or a person's
-question or disagreement they haven't accepted your answer to (below). Every
-thread left open gets named in the summary comment below, so an open thread
-always means "someone has to decide".
+Resolve a thread once you have addressed it: after an in-scope fix is pushed
+to the head and your reply says so, or after a decline whose reasoning is
+written in the thread. Whether CI passes is the merge gate's job, not the
+thread's, so don't wait for checks to resolve a fix. Leave a thread open only
+when it poses a decision that is not the author's to make — a product or scope
+call, a security trade-off, or a person's question or disagreement they haven't
+accepted your answer to (below). Every thread left open gets named in the
+summary comment below, so an open thread always means "someone has to decide".
 
 **A person in the thread.** A change a person asked for and you made as asked
-resolves like a bot's finding, once the fix is green. A person's question, a
+resolves like a bot's finding, once the fix is pushed. A person's question, a
 finding of theirs you declined or did differently, or a reply of theirs
 disagreeing with your answer holds the thread until they accept your answer.
 They have accepted it when, after your latest reply in the thread, they:
@@ -378,8 +379,8 @@ Bot reviewers never resolve their own threads, even outdated ones: an addressed
 thread that nobody resolves stays in the merger's list forever. Resolve with
 the script, never the raw mutation:
 ```bash
-"$SKILL_DIR/scripts/resolve-thread" OWNER/REPO PR_NUMBER THREAD_ID fixed     # the change asked for, made as asked; head green
-"$SKILL_DIR/scripts/resolve-thread" OWNER/REPO PR_NUMBER THREAD_ID changed   # a different change; head green, and accepted
+"$SKILL_DIR/scripts/resolve-thread" OWNER/REPO PR_NUMBER THREAD_ID fixed     # the change asked for, made as asked, pushed
+"$SKILL_DIR/scripts/resolve-thread" OWNER/REPO PR_NUMBER THREAD_ID changed   # a different change, pushed, and accepted
 "$SKILL_DIR/scripts/resolve-thread" OWNER/REPO PR_NUMBER THREAD_ID declined  # no change: a decline or an answer, accepted
 # add --agreed LOGIN for each person whose reply after your answer agrees
 ```
@@ -402,19 +403,11 @@ It re-reads the PR through `fetch-reviews` and holds the rules above in code:
   they haven't written since, needs none of that; anyone else who wrote does. `--agreed` is your reading, which the
   script can't check. It does check that the person replied after your answer.
   When you can't tell whether a reply agrees, leave it off.
-- `fixed` and `changed` also wait for the head's required checks to pass
-  (every check, where the base requires none): the checks the landing waits
-  on, not an optional runner's status or a queue's own run on the PR. Where
-  the base requires none and none has reported on the head, the script looks
-  for any check that has reported on the base's head or an earlier head of
-  the PR. If one has, the repo runs CI and the head's hasn't started, so it
-  holds. If none has, the repo runs no CI on this PR (none at all, or a
-  path-filtered workflow that skips its files), and with no check, none can
-  fail, so it resolves. The head
-  is read again just before resolving, so a push in between holds the fix.
-  This is a check that the fix is green, not a copy of GitHub's merge gate.
-  The gate still decides whether the PR can merge, and a thread resolved a
-  little early stays visible for anyone to reopen.
+- It reads no checks. A red head can't land anyway, since the merge gate
+  requires its checks, and a green one doesn't prove the finding was fixed.
+  Waiting on checks would also deadlock where the required check runs only
+  in the merge queue (hey2's `merge-queue/build`) and the queue waits for
+  threads at zero.
 - It counts the thread's comments again just before resolving, and holds if a
   reply landed meanwhile. GitHub can't make that atomic, so a reply in the
   last instant can still be resolved over; it stays visible for anyone to
@@ -422,9 +415,8 @@ It re-reads the PR through `fetch-reviews` and holds the rules above in code:
 
 Exit 3 with `refused` says what held it. Fix that and run it again, or, for a
 person who hasn't accepted, leave the thread open and name it in the summary.
-Run it in the same pass as the reply for a decline. For a fix, run it on the
-pass that sees the head green: a fix pushed while checks run is resolved on
-the next pass, not forgotten.
+Run it in the same pass as the reply, for a fix (once it's pushed) as for a
+decline.
 
 ### Withheld items
 You haven't read them, so you can't answer them. Don't reply in, resolve,
@@ -581,8 +573,8 @@ body-only finding, which has no thread, by its review's.
   listed and holds nothing
 - For top-level review bodies (no thread), reply with `gh pr comment` and list the
   finding in the summary comment, linked by the review's `url`
-- For inline threads, reply to the thread directly; resolve once addressed (fix landed
-  and green, or decline with reasoning) with `scripts/resolve-thread`; leave open only a
+- For inline threads, reply to the thread directly; resolve once addressed (fix pushed,
+  or decline with reasoning) with `scripts/resolve-thread`; leave open only a
   genuine human decision, and name every open thread in the summary comment
 - A PR comment that asks for nothing is not a thread: no reply, nothing to resolve
 - **Three outcomes, not two:** fixed / out of scope / true but declined. A finding

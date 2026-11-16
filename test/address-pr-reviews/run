@@ -70,8 +70,7 @@ case "$query" in
   # resolve-thread's recount: the thread's comments in the fixture, plus
   # FX_REPLIES more, standing in for replies posted while it ran.
   *"node(id:"*) jq -c --arg id "$id" --argjson more "${FX_REPLIES:-0}" '[.[].data.repository.pullRequest.reviewThreads.nodes[]
-      | select(.id == $id)][0] | {data: {node: {isResolved, comments: {totalCount: ((.comments.nodes | length) + $more)},
-        pullRequest: {headRefOid: (env.FX_HEAD_NOW // "abc")}}}}' \
+      | select(.id == $id)][0] | {data: {node: {isResolved, comments: {totalCount: ((.comments.nodes | length) + $more)}}}}' \
       "$FX/threads.json"; exit 0 ;;
   # Like GitHub, the page holds reactions only when the query asks for them.
   *"reviewThreads("*) file=$FX/threads.json
@@ -453,122 +452,67 @@ approve() {
     "$tmp/fx-resolve/reviews-base.json" > "$tmp/fx-resolve/reviews.json"
 }
 
-# resolve "THREAD HOW [--agreed LOGIN]" CHECKS [HEAD_OID]: CHECKS is the head's
-# check rollup, a bare state (no contexts), or contexts as
-# "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests", req marking a check the
-# base's ruleset requires, PENDING one still running, and missing one the
-# ruleset requires that has no context on the head. A bare state may name,
-# after @, where checks have reported other than the head: the base's head
-# (base), an earlier head in the PR's commits (earlier), or one a force-push
-# replaced (forced); with none named, no check has reported anywhere. Prints
-# the output, a line saying whether the mutation ran, and the exit status.
+# resolve "THREAD HOW [--agreed LOGIN]" [CHECKS]: prints the output, a line
+# saying whether the mutation ran, and the exit status. resolve-thread reads no
+# checks, but any check query it made would be answered with hey2's case: a
+# ruleset requiring merge-queue/build, which runs only on the queue's
+# merge-group commit and so never reports on a PR head, and the head's own
+# checks in the state CHECKS names (PENDING by default). Every query is logged
+# to resolve-queries, so the tests can say none read checks.
+: > "$tmp/resolve-queries"
 resolve() {
   jq . "$here/fixtures/head.json" > "$tmp/head.json"
-  if [[ $2 == *=* || $2 == *missing:* ]]; then
-    jq -n --arg oid "${3:-abc}" --arg spec "$2" '
-      [$spec | split(",")[] | select(test("=")) | capture("(?<kind>req|opt):(?<name>[^=]+)=(?<c>.+)")
-        | {__typename: "CheckRun", name, isRequired: (.kind == "req"),
-           status: (if .c == "PENDING" then "IN_PROGRESS" else "COMPLETED" end),
-           conclusion: (if .c == "PENDING" then null else .c end)}] as $nodes
-      | [$spec | split(",")[] | capture("^(?:req:(?<r>[^=]+)=|missing:(?<m>.+))") | .r // .m] as $named
-      | ([$spec | split(",")[] | capture("^pattern:(?<p>.+)") | .p] | if length > 0 then . else ["~DEFAULT_BRANCH"] end) as $include
-      | [$spec | split(",")[] | capture("^exclude:(?<p>.+)") | .p] as $exclude
-      | ([$spec | split(",")[] | capture("^base:(?<b>.+)") | .b][0] // "main") as $basename
-      | ($spec | split(",") | any(. == "workflows")) as $workflows
-      | {data: {repository: {
-          defaultBranchRef: {name: "main"},
-          rulesets: {pageInfo: {hasNextPage: false}, nodes: [{enforcement: "ACTIVE", target: "BRANCH",
-            conditions: {refName: {include: $include, exclude: $exclude}},
-            rules: {nodes: ([{type: "REQUIRED_STATUS_CHECKS", parameters: {requiredStatusChecks: [$named[] | {context: .}]}}]
-              + (if $workflows then [{type: "WORKFLOWS", parameters: {}}] else [] end))}}]},
-          pullRequest: {baseRef: {name: $basename, branchProtectionRule: null}, commits: {nodes: [{commit: {oid: $oid, statusCheckRollup:
-          (if ($nodes | length) == 0 then null else {
-          state: (if any($nodes[]; .conclusion == "FAILURE") then "FAILURE"
-                  elif any($nodes[]; .conclusion == null) then "PENDING" else "SUCCESS" end),
-          contexts: {pageInfo: {hasNextPage: false}, nodes: $nodes}} end)}}]}}}}}' > "$tmp/checks.json"
-  else
-    jq -n --arg oid "${3:-abc}" --arg state "${2%%@*}" --arg seen "$([[ $2 != *@* ]] || echo "${2#*@}")" '
-      def rollup($where): if $seen == $where then {state: "SUCCESS"} else null end;
-      {data: {repository: {pullRequest: {
-        baseRef: {target: {statusCheckRollup: rollup("base")}},
-        earlier: {nodes: [{commit: {statusCheckRollup: rollup("earlier")}}, {commit: {statusCheckRollup: null}}]},
-        timelineItems: {nodes: [{beforeCommit: {statusCheckRollup: rollup("forced")}}]},
-        commits: {nodes: [{commit:
-          {oid: $oid, statusCheckRollup: (if $state == "NONE" then null else {state: $state} end)}}]}}}}}' > "$tmp/checks.json"
-  fi
+  jq -n --arg state "${2:-PENDING}" '{data: {repository: {
+      defaultBranchRef: {name: "main"},
+      rulesets: {pageInfo: {hasNextPage: false}, nodes: [{enforcement: "ACTIVE", target: "BRANCH",
+        conditions: {refName: {include: ["~DEFAULT_BRANCH"], exclude: []}},
+        rules: {nodes: [{type: "REQUIRED_STATUS_CHECKS", parameters: {requiredStatusChecks: [{context: "merge-queue/build"}]}}]}}]},
+      pullRequest: {baseRef: {name: "main", branchProtectionRule: null}, commits: {nodes: [{commit: {oid: "abc",
+        statusCheckRollup: {state: $state, contexts: {pageInfo: {hasNextPage: false}, nodes: [{__typename: "CheckRun",
+          name: "ci", isRequired: false, status: (if $state == "PENDING" then "IN_PROGRESS" else "COMPLETED" end),
+          conclusion: (if $state == "PENDING" then null else $state end)}]}}}}]}}}}}' > "$tmp/checks.json"
   rm -f "$tmp/head-read" "$tmp/head-read.resolved"
   : > "$tmp/calls"
   local status=0
   PATH="$tmp/bin:$PATH" FX="$tmp/fx-resolve" FX_HEAD="$tmp/head.json" FX_STATE="$tmp/head-read" FX_CHECKS="$tmp/checks.json" \
-    FX_CALLS="$tmp/calls" "$scripts/resolve-thread" o/r 1 $1 > "$tmp/out.json" 2>/dev/null || status=$?
+    FX_CALLS="$tmp/calls" FX_QUERIES="$tmp/resolve-queries" "$scripts/resolve-thread" o/r 1 $1 > "$tmp/out.json" 2>/dev/null || status=$?
   cat "$tmp/out.json"
   if [ -e "$tmp/head-read.resolved" ]; then echo resolved; else echo untouched; fi
   echo "$status"
 }
 ran() { tail -n 2 <<<"$1" | head -n 1; }
-resolves() { got=$(resolve "$2" "$3"); check "$1" "$(status "$got") $(ran "$got")" "0 resolved"; }
-# holds NAME "THREAD HOW" CHECKS WHY [HEAD_OID]: refused, for the reason WHY names.
+# resolves NAME "THREAD HOW" [CHECKS]
+resolves() { got=$(resolve "$2" "${3:-}"); check "$1" "$(status "$got") $(ran "$got")" "0 resolved"; }
+# holds NAME "THREAD HOW" WHY: refused, for the reason WHY names.
 holds() {
-  got=$(resolve "$2" "$3" "${5:-abc}")
-  check "$1" "$(status "$got") $(ran "$got") $(sed '$d' <<<"$got" | sed '$d' | jq -r --arg why "$4" '.refused | test($why)')" "3 untouched true"
+  got=$(resolve "$2")
+  check "$1" "$(status "$got") $(ran "$got") $(sed '$d' <<<"$got" | sed '$d' | jq -r --arg why "$3" '.refused | test($why)')" "3 untouched true"
 }
 approve 2026-01-01
-resolves "a declined thread whose last reply is the token's resolves" "t14 declined" NONE
-resolves "a fixed thread resolves once the head's checks pass" "t24 fixed" SUCCESS
-holds "a fixed thread holds while the head's checks run" "t24 fixed" PENDING "haven't finished"
-# Nothing reported on the head: a race where CI runs, and nothing to pass where it doesn't.
-resolves "a fixed thread resolves where no check has reported on the head, the base's head, or any earlier head: the repo runs no CI" \
-  "t24 fixed" NONE
-resolves "changed resolves likewise where the repo runs no CI, once accepted" "t25 changed" NONE
-holds "a fixed thread holds before any check reports where checks reported on the base's head" "t24 fixed" NONE@base "no checks have reported"
-holds "a fixed thread holds before any check reports where checks reported on an earlier head, for CI only on pull requests" \
-  "t24 fixed" NONE@earlier "no checks have reported"
-holds "an earlier head a force-push replaced counts as an earlier head" "t24 fixed" NONE@forced "no checks have reported"
-holds "a check the base requires that hasn't reported holds, though nothing has reported anywhere" \
-  "t24 fixed" "missing:tests" "requires hasn.t reported"
-holds "a fixed thread holds when the head's checks failed" "t24 fixed" FAILURE "ended FAILURE"
-holds "a fixed thread holds when the head moved after the read" "t24 fixed" SUCCESS "head moved" def
-resolves "a fixed thread resolves when the required check passed, though an optional runner's failed" \
-  "t24 fixed" "req:gate=SUCCESS,opt:setup-check/linux=FAILURE"
-resolves "a required check skipped counts as passed, as GitHub counts it" "t24 fixed" "req:gate=SKIPPED,opt:linux=SUCCESS"
-holds "a fixed thread holds when the required check failed, though every other passed" \
-  "t24 fixed" "req:gate=FAILURE,opt:linux=SUCCESS" "required check failed"
-holds "a fixed thread holds while the required check runs, though every other passed" \
-  "t24 fixed" "req:gate=PENDING,opt:linux=SUCCESS" "required check hasn.t finished"
-holds "a check the base's ruleset requires that hasn't reported holds, though the required one that did passed and an optional one failed" \
-  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests" "requires hasn.t reported"
-holds "a ruleset whose glob reaches the base names its required checks" \
-  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/ma*" "requires hasn.t reported"
-resolves "a ruleset whose pattern doesn't reach the base names nothing" \
-  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/release/*"
-holds "a ruleset pattern this script can't convert (fnmatch's [...]) is read as reaching, so it fails closed" \
-  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:refs/heads/rel[0-9]" "requires hasn.t reported"
-holds "a ruleset naming a base with a literal dot reaches it, the dot escaped and not a wildcard" \
-  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,base:release/v1.0,pattern:refs/heads/release/v1.0" "requires hasn.t reported"
-resolves "a dotted pattern matches only its own name, so release/v1x0 is not release/v1.0" \
-  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,base:release/v1x0,pattern:refs/heads/release/v1.0"
-holds "an unconvertible pattern in a ruleset's exclusions is read as not excluding, so the ruleset's checks stay required" \
-  "t24 fixed" "req:gate=SUCCESS,opt:linux=FAILURE,missing:tests,pattern:~ALL,exclude:refs/heads/rel[0-9]" "requires hasn.t reported"
-holds "a Workflows rule reaching the base holds a fix as unjudged, since it names runs rather than contexts" \
-  "t24 fixed" "req:gate=SUCCESS,workflows" "requires workflows"
-holds "where the base requires no check, every check counts" "t24 fixed" "opt:gate=SUCCESS,opt:linux=FAILURE" "ended FAILURE"
-resolves "where the base requires no check, all green resolves" "t24 fixed" "opt:gate=SUCCESS,opt:publish=SKIPPED"
+resolves "a declined thread whose last reply is the token's resolves" "t14 declined"
+resolves "a fixed thread resolves" "t24 fixed"
+# Whether CI passes is the merge gate's job, not the thread's.
+resolves "a fixed thread resolves while a check the base requires has never reported on the head (hey2's merge-queue/build)" \
+  "t24 fixed" PENDING
+resolves "a fixed thread resolves though the head's checks failed: the merge gate holds a red head, not the thread" \
+  "t24 fixed" FAILURE
+resolves "changed resolves likewise while the required check is missing, once accepted" "t25 changed" PENDING
 # Whose answer, and who has accepted it.
-holds "a thread whose last comment is the reviewer's holds: reply first" "t2 declined" NONE "no answer of yours"
-holds "a bot's finding after your answer holds: answer it first" "t19 fixed" SUCCESS "no answer of yours"
-resolves "a change a person asked for, made as asked, resolves once green" "t15 fixed" SUCCESS
-holds "a person's request you declined holds until they accept" "t18 declined" NONE "hasn.t accepted.*member"
-holds "a person's reply after your answer holds unless you read it as agreement" "t16 declined" NONE "hasn.t accepted.*member"
-resolves "a person's reply named by --agreed resolves" "t16 declined --agreed member" NONE
-holds "--agreed for someone who hasn't replied since your answer refuses" "t16 declined --agreed member --agreed other" NONE "hasn.t replied"
-holds "--agreed doesn't stand in for a reply that came before your answer" "t18 declined --agreed member" NONE "hasn.t replied"
-resolves "a person's thumbs-up on your answer resolves" "t17 declined" NONE
-holds "an approval from before your answer doesn't count" "t18 declined" NONE "hasn.t accepted.*member"
+holds "a thread whose last comment is the reviewer's holds: reply first" "t2 declined" "no answer of yours"
+holds "a bot's finding after your answer holds: answer it first" "t19 fixed" "no answer of yours"
+resolves "a change a person asked for, made as asked, resolves" "t15 fixed"
+holds "a person's request you declined holds until they accept" "t18 declined" "hasn.t accepted.*member"
+holds "a person's reply after your answer holds unless you read it as agreement" "t16 declined" "hasn.t accepted.*member"
+resolves "a person's reply named by --agreed resolves" "t16 declined --agreed member"
+holds "--agreed for someone who hasn't replied since your answer refuses" "t16 declined --agreed member --agreed other" "hasn.t replied"
+holds "--agreed doesn't stand in for a reply that came before your answer" "t18 declined --agreed member" "hasn.t replied"
+resolves "a person's thumbs-up on your answer resolves" "t17 declined"
+holds "an approval from before your answer doesn't count" "t18 declined" "hasn.t accepted.*member"
 approve 2026-03-01
-resolves "an approval submitted after your answer resolves" "t18 declined" NONE
+resolves "an approval submitted after your answer resolves" "t18 declined"
 approve 2026-01-01
-holds "a comment from the token's account off the forms is the person's, and holds" "t20 declined" NONE "hasn.t accepted.*me"
-resolves "--agreed for the token's account's own reply resolves" "t20 declined --agreed me" NONE
+holds "a comment from the token's account off the forms is the person's, and holds" "t20 declined" "hasn.t accepted.*me"
+resolves "--agreed for the token's account's own reply resolves" "t20 declined --agreed me"
 # An agent marks what it posts under the person's account: shipyard's agent:v1
 # marker as the first line, then 🤖 unless the person opted out. Before the
 # marker, a leading 🤖 or the bare form marked it.
@@ -576,42 +520,37 @@ got=$(FXDIR=$tmp/fx-resolve run .)
 check "the token's account's comments say whether an agent wrote them, and in which form" \
   "$(out "$got" | jq -c '[.threads[].comments[] | select(IN(.id; "t14b", "t20c", "t27b", "t28b", "t29c", "t30b", "t31c", "t32c", "t33b", "t34b", "t34c", "t34d", "t34e", "t34f", "t34g")) | [.id, .agent, .form]]')" \
   '[["t14b",true,"declined"],["t27b",true,"fixed"],["t28b",true,"declined"],["t29c",true,null],["t30b",true,"fixed"],["t31c",false,null],["t32c",false,null],["t33b",true,"mismatch"],["t34c",false,null],["t34d",false,null],["t34e",true,"summary"],["t34f",false,null],["t34g",false,null],["t34b",false,null],["t20c",false,null]]'
-resolves "an answer led by the marker and 🤖 is the agent's" "t28 declined" NONE
-resolves "an answer led by the marker alone, where the person opted out of the 🤖, is the agent's" "t30 fixed" SUCCESS
-resolves "an older answer led by 🤖 alone is the agent's, and resolves once green" "t27 fixed" SUCCESS
-holds "an agent's 🤖 comment off the forms after its answer holds, as a finding would" "t29 declined" NONE "no answer of yours"
-holds "the token's account quoting a marked answer is the person's, and holds" "t31 declined" NONE "hasn.t accepted.*me"
-holds "a marker from another login is that person's own comment, and holds" "t32 declined" NONE "hasn.t accepted.*other"
-holds "a marker whose form disagrees with the opening words answers nothing" "t33 fixed" SUCCESS "names one form"
-holds "a marker below the first line, after a blank line, or indented into a code block doesn't make a comment the agent's" "t34 declined" NONE "no answer of yours"
-holds "a thumbs-up stops counting once that person writes again" "t21 declined" NONE "hasn.t accepted.*member"
+resolves "an answer led by the marker and 🤖 is the agent's" "t28 declined"
+resolves "an answer led by the marker alone, where the person opted out of the 🤖, is the agent's" "t30 fixed"
+resolves "an older answer led by 🤖 alone is the agent's" "t27 fixed"
+holds "an agent's 🤖 comment off the forms after its answer holds, as a finding would" "t29 declined" "no answer of yours"
+holds "the token's account quoting a marked answer is the person's, and holds" "t31 declined" "hasn.t accepted.*me"
+holds "a marker from another login is that person's own comment, and holds" "t32 declined" "hasn.t accepted.*other"
+holds "a marker whose form disagrees with the opening words answers nothing" "t33 fixed" "names one form"
+holds "a marker below the first line, after a blank line, or indented into a code block doesn't make a comment the agent's" "t34 declined" "no answer of yours"
+holds "a thumbs-up stops counting once that person writes again" "t21 declined" "hasn.t accepted.*member"
 approve 2026-02-02T12
-holds "an approval from before that person's own later reply doesn't count" "t22 declined" NONE "hasn.t accepted.*member"
+holds "an approval from before that person's own later reply doesn't count" "t22 declined" "hasn.t accepted.*member"
 approve 2026-03-01
-resolves "an approval after both your answer and their last reply resolves" "t22 declined" NONE
+resolves "an approval after both your answer and their last reply resolves" "t22 declined"
 approve 2026-01-01
-holds "fixed exempts only the person whose finding opened the thread" "t23 fixed" SUCCESS "hasn.t accepted.*other"
-holds "changed needs the person who asked to accept it" "t15 changed" SUCCESS "hasn.t accepted.*member"
-resolves "changed resolves once accepted and green" "t25 changed" SUCCESS
-holds "changed waits for the head's checks like fixed" "t25 changed" PENDING "haven't finished"
-holds "a ** pattern is read as reaching the base, so its required checks stay required" \
-  "t24 fixed" "req:gate=SUCCESS,missing:tests,pattern:refs/heads/**/main" "requires hasn.t reported"
-holds "a **/* pattern that could match with no directory between is read as reaching" \
-  "t24 fixed" "req:gate=SUCCESS,missing:tests,base:release/v1,pattern:refs/heads/release/**/*" "requires hasn.t reported"
-got=$(FX_HEAD_NOW=def resolve "t24 fixed" SUCCESS)
-check "a push after the checks were judged holds a fix" \
-  "$(status "$got") $(ran "$got") $(sed '$d' <<<"$got" | sed '$d' | jq -r '.refused | test("since its checks")')" "3 untouched true"
-holds "a flagged thread never resolves here" "t26 declined" NONE "flags the thread"
-holds "a Fixed answer can't resolve as declined, which skips the checks" "t24 declined" NONE "doesn.t match declined"
-holds "a Not doing this answer can't resolve as fixed" "t14 fixed" SUCCESS "doesn.t match fixed"
-holds "a thread holding an outside comment a person cleared is a person's to resolve" "t4 declined" NONE "cleared but not read"
-got=$(FX_REPLIES=1 resolve "t14 declined" NONE)
+holds "fixed exempts only the person whose finding opened the thread" "t23 fixed" "hasn.t accepted.*other"
+holds "changed needs the person who asked to accept it" "t15 changed" "hasn.t accepted.*member"
+resolves "changed resolves once accepted" "t25 changed"
+holds "a flagged thread never resolves here" "t26 declined" "flags the thread"
+holds "a Fixed answer can't resolve as declined" "t24 declined" "doesn.t match declined"
+holds "a Not doing this answer can't resolve as fixed" "t14 fixed" "doesn.t match fixed"
+holds "a thread holding an outside comment a person cleared is a person's to resolve" "t4 declined" "cleared but not read"
+got=$(FX_REPLIES=1 resolve "t14 declined")
 check "a reply posted while it runs holds the thread" \
   "$(status "$got") $(ran "$got") $(sed '$d' <<<"$got" | sed '$d' | jq -r '.refused | test("changed while")')" "3 untouched true"
-holds "a withheld thread can't be resolved" "t7 declined" NONE "no unresolved thread"
-holds "a thread not on the PR can't be resolved" "t99 declined" NONE "no unresolved thread"
-got=$(FX_FAIL=1 resolve "t14 declined" NONE)
+holds "a withheld thread can't be resolved" "t7 declined" "no unresolved thread"
+holds "a thread not on the PR can't be resolved" "t99 declined" "no unresolved thread"
+got=$(FX_FAIL=1 resolve "t14 declined")
 check "a failed fetch resolves nothing" "$(status "$got") $(ran "$got")" "3 untouched"
+check "resolve-thread read no checks, statuses, rulesets or branch protection, across every case above" \
+  "$(jq -sc '[.[].query | select(test("statusCheckRollup|StatusContext|CheckRun|checkSuites|isRequired|rulesets|branchProtectionRule"))] | length' "$tmp/resolve-queries") $(jq -s 'length > 0' "$tmp/resolve-queries")" \
+  "0 true"
 
 # wait-on-pr: REST only, a minute between polls, and it ends on a change, a
 # merge or close, a new head, the deadline, or a failed call. Its gh answers
