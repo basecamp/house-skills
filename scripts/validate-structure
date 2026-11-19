@@ -3,6 +3,7 @@ set -euo pipefail
 
 # Validate the symlink-inversion structure:
 # - Every entry in skills/ is a symlink pointing into a plugin's skills/ dir
+# - Every plugin ships skills/, agents/, or hooks/hooks.json
 # - Every skill in a plugin's skills/ has a corresponding symlink in skills/
 # - No plugin.json declares a skills field (skills are auto-discovered)
 
@@ -37,7 +38,7 @@ while IFS= read -r entry; do
   fi
 done < <(find "$root/skills" -mindepth 1 -maxdepth 1)
 
-# 2. Every plugin must have a manifest and skills/ dir; every skill has a symlink
+# 2. Every plugin must have a manifest and ship something; every skill has a symlink
 for plugin_dir in "$root"/plugins/*/; do
   [ -d "$plugin_dir" ] || continue
   plugin="$(basename "$plugin_dir")"
@@ -47,10 +48,13 @@ for plugin_dir in "$root"/plugins/*/; do
     errors=$((errors + 1))
   fi
 
+  # A plugin ships skills, agents, or hooks; one with only hooks has no skills/
   skills_dir="$plugin_dir/skills"
   if [ ! -d "$skills_dir" ]; then
-    echo "ERROR: plugins/$plugin is missing skills/ directory"
-    errors=$((errors + 1))
+    if [ ! -d "$plugin_dir/agents" ] && [ ! -f "$plugin_dir/hooks/hooks.json" ]; then
+      echo "ERROR: plugins/$plugin has no skills/, agents/, or hooks/hooks.json"
+      errors=$((errors + 1))
+    fi
     continue
   fi
 
