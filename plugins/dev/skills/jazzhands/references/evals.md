@@ -107,6 +107,8 @@ rg -n '< *"?~/\.ssh/id_' SKILL.md && echo FAIL || echo PASS            # never f
 | Lease released mid-job | `trap … EXIT` in an agent's per-call shell | State in `$W/env`; release explicitly |
 | Lease adopted by another tool | Main key shared with a long-running tool that leases | Per-task key |
 | `mkdir /work` fails on a Mac | macOS root filesystem is read-only | Work under the login's home |
+| A submodule's `.env` reaches the guest | `git ls-files` lists a submodule as a directory, and tar recurses into it | `--recurse-submodules`, and `tar --no-recursion` |
+| `$C`, `$L` or `RSYNC_RSH` empty in a later step | Each tool call is a fresh shell | Everything a later step needs goes in `$W/env`, sourced first |
 | Every command takes seconds | A new proxied connection per command | `ControlMaster auto` |
 
 ## Exemplars

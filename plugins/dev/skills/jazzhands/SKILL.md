@@ -73,11 +73,13 @@ a `trap ... EXIT` there, or the lease is released when that one call's shell exi
 ### 1. A key for this task alone
 
 ```sh
+C=${JAZZHANDS_CONTROLLER:?or the controller the user named}
 W=$(mktemp -d); echo "$W"            # task dir: key, ssh config, state
 ssh-keygen -q -t ed25519 -N '' -C "lease-$(basename "$PWD")" -f "$W/key"
+printf 'C=%s\nW=%s\n' "$C" "$W" > "$W/env"   # every later step starts with: . <W>/env
 ```
 
-Step by step, carry `$W` into each later call as the literal path it printed.
+Step by step, start each later call with `W=<the path it printed>; . "$W/env"`.
 
 Never request with your main key (`~/.ssh/id_ed25519.pub`): a long-running tool that
 leases with the same key can adopt leases made with it. A key made for the task is
@@ -86,6 +88,7 @@ yours alone, and is thrown away with `$W`.
 ### 2. Request
 
 ```sh
+. "$W/env"
 ssh lease@$C request --pool <pool> --minutes 60 --wait 5m < "$W/key.pub" > "$W/lease"
 echo "exit $?"; cat "$W/lease"
 ```
@@ -102,10 +105,11 @@ locally), **64** usage (wrong flag, minutes beyond the pool's limit), **69** una
 
 ### 3. Reach it
 
-The printed ssh line doesn't name your key. Write a config once per task (used only with `-F`, so
-`Host *` touches nothing else):
+The printed ssh line doesn't name your key. Write a config once per task (used only
+with `-F`, so `Host *` touches nothing else):
 
 ```sh
+. "$W/env"
 L=$(awk 'NR==1{print $1}' "$W/lease")
 cat > "$W/ssh_config" <<EOF
 Host *
@@ -120,8 +124,9 @@ Host *
   ControlPath ${XDG_RUNTIME_DIR:-$HOME/.ssh}/lease-%C
   ControlPersist 10m
 EOF
-printf 'C=%s W=%s L=%s G="ssh -F %s/ssh_config root@%s"\n' "$C" "$W" "$L" "$W" "$L" > "$W/env"
-. "$W/env"                            # root@ on Linux; admin@ for a Mac lease
+printf 'L=%s\nG="ssh -F %s/ssh_config root@%s"\nexport RSYNC_RSH="ssh -F %s/ssh_config"\n' \
+  "$L" "$W" "$L" "$W" >> "$W/env"     # root@ on Linux; admin@ for a Mac lease
+. "$W/env"
 for i in $(seq 30); do $G true 2>/dev/null && break; sleep 2; done
 ```
 
@@ -180,10 +185,12 @@ Into `work/` under the login's home (`/root/work`, or the admin's home on a Mac,
 root filesystem is read-only). Send tracked files only: it skips build output, and `.env` and other untracked secrets.
 
 ```sh
-export RSYNC_RSH="ssh -F $W/ssh_config"
-git ls-files -z | rsync -a --from0 --files-from=- ./ "root@$L:work/"
-# no rsync in the guest: tar over ssh
-git ls-files -z | tar --null -T - -cf - | $G 'mkdir -p work && tar -xf - -C work'
+. "$W/env"                            # sets RSYNC_RSH to the task's ssh config
+git ls-files -z --recurse-submodules | rsync -a --from0 --files-from=- ./ "root@$L:work/"
+# no rsync in the guest: tar over ssh; --no-recursion so a listed directory (a
+# submodule) can't pull in its untracked or ignored files
+git ls-files -z --recurse-submodules | tar --null --no-recursion -T - -cf - |
+  $G 'mkdir -p work && tar -xf - -C work'
 ```
 
 Uncommitted edits to tracked files go with it; new files need `git add` (or `git ls-files
@@ -209,7 +216,7 @@ $G 'cd work && { cat exit.status 2>/dev/null || tail -n 3 job.log; }'   # repeat
 ### 7. Copy results back
 
 ```sh
-rsync -a "root@$L:work/out/" ./results/          # or: $G 'tar -cf - -C work/out .' | tar -xf - -C ./results
+. "$W/env"; rsync -a "root@$L:work/out/" ./results/          # or: $G 'tar -cf - -C work/out .' | tar -xf - -C ./results
 ```
 
 Bring back the log and exit status too, into a directory outside the repo's tracked
