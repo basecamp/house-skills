@@ -22,6 +22,7 @@ npx skills add basecamp/house-skills
 | [consult-outside-expert](skills/consult-outside-expert) | dev | Explicitly launch an independent outside-expert consultation and refinement loop |
 | [git-activity](skills/git-activity/) | recap | Fetch git log from local repos into day-cached JSON atoms |
 | [github-activity](skills/github-activity/) | recap | Fetch GitHub PRs, reviews, issues, and commits into day-cached JSON atoms |
+| [jazzhands](skills/jazzhands) | dev | Borrow a disposable Linux or Mac guest from a Jazzhands lease controller for heavy, long, clean-room or other-OS work, and release it |
 | [ralph-lisa-loop](skills/ralph-lisa-loop) | dev | Explicitly launch the automated plan-implement-review loop with rope-length control |
 | [identity-security](skills/identity-security) | security | Judge sign-in, session, step-up, 2FA and passkey, recovery and app-grant changes from first principles, weighing friction, lockout and support load |
 | [harden-github-actions](skills/harden-github-actions) | security | Resolve zizmor warnings in GitHub Actions workflows, harden CI pipelines, and pin actions to SHA hashes |
