@@ -1,7 +1,8 @@
 #!/usr/bin/env ruby
 # Usage: gem-dates.rb CUTOFF gem=version ...
-# For each gem, prints the locked version's release date and the newest
-# release before CUTOFF (YYYY-MM-DD) in the same minor and major lines.
+# For each gem, prints the locked version's release date, the newest release
+# before CUTOFF (YYYY-MM-DD) in the same minor and major lines, and the newest
+# patch release in the same minor line, whenever it shipped.
 # Release data comes from the rubygems.org versions API.
 require "json"
 require "net/http"
@@ -23,7 +24,7 @@ ARGV.each do |pair|
   all = versions(name).reject { |v| v["prerelease"] }.select { |v| v["platform"] == "ruby" }
   mine = all.find { |v| v["number"] == version }
   before = all.select { |v| v["created_at"] < cutoff }
-  newest = ->(parts) { before.select { |v| v["number"].split(".")[0, parts] == version.split(".")[0, parts] }.max_by { |v| Gem::Version.new(v["number"]) }&.fetch("number") }
-  printf "%-16s %-9s %-10s  minor-at-cut: %-8s major-at-cut: %s\n",
-    name, version, mine && mine["created_at"][0, 10], newest.(2), newest.(1)
+  newest = ->(releases, parts) { releases.select { |v| v["number"].split(".")[0, parts] == version.split(".")[0, parts] }.max_by { |v| Gem::Version.new(v["number"]) }&.fetch("number") }
+  printf "%-16s %-9s %-10s  minor-at-cut: %-8s major-at-cut: %-8s newest-patch: %s\n",
+    name, version, mine && mine["created_at"][0, 10], newest.(before, 2), newest.(before, 1), newest.(all, 2)
 end

@@ -5,15 +5,26 @@
 #   integration: get "/x", {p}, {h}         -> get "/x", params: {p}, headers: {h}
 #   xhr :post, target, ...                  -> post target, ..., xhr: true
 # Files under test/integration are integration tests; the rest are functional.
+# A call whose hash mixes Rails 5 keywords with other keys, so that Rails 5
+# reads it differently from Rails 4, is left as is, with a warning.
 # Needs a Ruby with Prism (3.3 or later): run it from this directory, not the app.
 require "prism"
 
 VERBS = %i[get post put patch delete head].freeze
-NEW_KEYS = %w[params session flash headers xhr format env as body].freeze
+# The keywords each Rails 5 request helper accepts.
+FUNCTIONAL_KEYS = %w[params session flash body method format xhr as].freeze
+INTEGRATION_KEYS = %w[params headers env xhr as].freeze
+# Rails 5.0 reads a hash as keywords when it holds one of these; otherwise it
+# reads the hash as Rails 4 did.
+FUNCTIONAL_MARKERS = %w[params session flash method body xhr].freeze
+INTEGRATION_MARKERS = INTEGRATION_KEYS
 
-def keyword_style?(node)
-  node.is_a?(Prism::KeywordHashNode) &&
-    node.elements.all? { |e| e.is_a?(Prism::AssocNode) && e.key.is_a?(Prism::SymbolNode) && NEW_KEYS.include?(e.key.unescaped) }
+def keys_of(node)
+  return [] unless node.is_a?(Prism::KeywordHashNode)
+  node.elements.map do |e|
+    next e.slice unless e.is_a?(Prism::AssocNode)
+    e.key.is_a?(Prism::SymbolNode) ? e.key.unescaped : e.key.slice
+  end
 end
 
 def empty_hash?(node)
@@ -22,7 +33,10 @@ end
 
 ARGV.each do |path|
   source = File.read(path)
-  names = path.include?("test/integration") ? %w[params headers] : %w[params session flash]
+  integration = path.include?("test/integration")
+  names = integration ? %w[params headers] : %w[params session flash]
+  keys = integration ? INTEGRATION_KEYS : FUNCTIONAL_KEYS
+  markers = integration ? INTEGRATION_MARKERS : FUNCTIONAL_MARKERS
   edits = []
 
   visit = lambda do |node|
@@ -33,8 +47,13 @@ ARGV.each do |path|
       verb = xhr ? args.first.unescaped : node.name.to_s
       target = xhr ? args[1] : args[0]
       rest = xhr ? args[2..] : args[1..]
-      keywords = rest.size == 1 && keyword_style?(rest.first)
-      unless target.nil? || (keywords && !xhr) || (rest.empty? && !xhr)
+      hash_keys = rest.size == 1 ? keys_of(rest.first) : []
+      keywords = hash_keys.any? && hash_keys.all? { |k| keys.include?(k) }
+      mixed = !keywords && hash_keys.any? { |k| markers.include?(k) }
+      if mixed
+        warn "#{path}:#{node.location.start_line}: left as is: mixes Rails 5 keywords with #{(hash_keys - keys).join(", ")}"
+      end
+      unless target.nil? || mixed || (keywords && !xhr) || (rest.empty? && !xhr)
         parts = []
         parts << rest.first.slice if keywords
         rest.each_with_index do |arg, i|

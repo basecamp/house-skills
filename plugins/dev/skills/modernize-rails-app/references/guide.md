@@ -179,8 +179,9 @@ Procedure:
    its own dependencies a minor (on Target 1, Rails 8.0's `irb` and `rdoc`
    pin-back moved `psych` and `stringio`). Pin those too, and repeat until
    only forced moves remain. Then run `gem-dates.rb` on the lock again and
-   confirm each gem is at the newest patch of its line. A pin can hold a gem
-   below a patch that needs a newer dependency: on Target 1,
+   confirm each gem is at the newest patch of its line (the `newest-patch`
+   column). A pin can hold a gem below a patch that needs a newer
+   dependency: on Target 1,
    `rails-html-sanitizer` 1.6.2 (security fixes) needs `nokogiri` 1.15.7,
    and a `nokogiri` 1.14 pin left it at 1.6.0 without an error. Move the
    dependency's pin to the line the patch needs.

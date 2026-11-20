@@ -1,0 +1,161 @@
+#!/usr/bin/env ruby
+# Runs modernize-rails-app's scripts against fixtures: gem-dates.rb against a
+# stand-in rubygems.org, smoke.example.rb against a stand-in app server, and
+# kwargs-tests.rb on test files written to a temporary directory.
+require "minitest/autorun"
+require "open3"
+require "socket"
+require "tmpdir"
+require "fileutils"
+
+SCRIPTS = File.expand_path("../../plugins/dev/skills/modernize-rails-app/scripts", __dir__)
+FIXTURES = File.expand_path("fixtures", __dir__)
+
+class GemDatesTest < Minitest::Test
+  def gem_dates(*args)
+    out, err, status = Open3.capture3("ruby", "-r", "#{FIXTURES}/rubygems_stub.rb", "#{SCRIPTS}/gem-dates.rb", *args)
+    assert status.success?, err
+    out
+  end
+
+  def test_reports_the_newest_patch_in_the_locked_minor_even_after_the_cutoff
+    out = gem_dates("2021-01-01", "foo=1.2.0")
+
+    assert_match(/minor-at-cut: 1\.2\.1 /, out)
+    assert_match(/major-at-cut: 1\.3\.0 /, out)
+    assert_match(/newest-patch: 1\.2\.3$/, out)
+  end
+end
+
+class KwargsTestsTest < Minitest::Test
+  def convert(path, source, warning: nil)
+    Dir.mktmpdir do |dir|
+      file = File.join(dir, path)
+      FileUtils.mkdir_p(File.dirname(file))
+      File.write(file, source)
+      _, err, status = Open3.capture3("ruby", "#{SCRIPTS}/kwargs-tests.rb", file)
+      assert status.success?, err
+      assert_match warning, err if warning
+      File.read(file)
+    end
+  end
+
+  def test_integration_format_keyword_becomes_a_param
+    assert_equal %(get "/posts", params: { format: :json }\n),
+      convert("test/integration/posts_test.rb", %(get "/posts", format: :json\n))
+  end
+
+  def test_integration_functional_keywords_become_params
+    assert_equal %(get "/posts", params: { session: {}, flash: {}, body: "", method: :get, format: :json }\n),
+      convert("test/integration/posts_test.rb", %(get "/posts", session: {}, flash: {}, body: "", method: :get, format: :json\n))
+  end
+
+  def test_integration_keywords_stay
+    source = %(get "/posts", params: { a: 1 }, headers: { b: 2 }, env: {}, xhr: true, as: :json\n)
+    assert_equal source, convert("test/integration/posts_test.rb", source)
+  end
+
+  def test_integration_call_mixing_keywords_and_params_stays_with_a_warning
+    source = %(get "/posts", params: { a: 1 }, format: :json\n)
+    assert_equal source, convert("test/integration/posts_test.rb", source, warning: /posts_test\.rb:1: .*format/)
+  end
+
+  def test_functional_keywords_stay
+    source = %(get :index, params: { a: 1 }, session: {}, flash: {}, body: "", method: :get, format: :json, xhr: true, as: :json\n)
+    assert_equal source, convert("test/functional/posts_controller_test.rb", source)
+  end
+
+  def test_functional_headers_and_env_keywords_become_params
+    assert_equal %(get :index, params: { headers: { a: 1 }, env: {} }\n),
+      convert("test/functional/posts_controller_test.rb", %(get :index, headers: { a: 1 }, env: {}\n))
+  end
+
+  def test_functional_params_with_format_become_params
+    assert_equal %(get :show, params: { id: 1, format: :json }\nget :show, params: { id: 1, as: :json }\n),
+      convert("test/functional/posts_controller_test.rb", %(get :show, id: 1, format: :json\nget :show, id: 1, as: :json\n))
+  end
+
+  def test_functional_xhr_params_with_format_become_params
+    assert_equal %(get :show, params: { id: 1, format: :js }, xhr: true\n),
+      convert("test/functional/posts_controller_test.rb", %(xhr :get, :show, id: 1, format: :js\n))
+  end
+
+  def test_functional_call_mixing_keywords_and_params_stays_with_a_warning
+    source = %(get :index, params: { a: 1 }, headers: { b: 2 }\n)
+    assert_equal source, convert("test/functional/posts_controller_test.rb", source, warning: /posts_controller_test\.rb:1: .*headers/)
+  end
+end
+
+class SmokeExampleTest < Minitest::Test
+  def smoke(sign_in)
+    server = TCPServer.new("127.0.0.1", 0)
+    app = Thread.new { serve(server, sign_in) }
+    Dir.mktmpdir do |dir|
+      _, err, status = Open3.capture3("ruby", "#{SCRIPTS}/smoke.example.rb", server.addr[1].to_s, dir)
+      [status, err]
+    end
+  ensure
+    app&.kill
+    server&.close
+  end
+
+  SIGN_IN_RESPONSES = {
+    ok: [ "302 Found", "Location: /posts\r\nSet-Cookie: session=ok\r\n", "" ],
+    rejected: [ "422 Unprocessable Entity", "", "bad" ],
+    back_to_sign_in: [ "302 Found", "Location: /session/new\r\n", "" ],
+    no_cookie: [ "302 Found", "Location: /posts\r\n", "" ],
+  }
+
+  # Answers POST /session from SIGN_IN_RESPONSES; only :ok sets the session
+  # cookie. Serves /account only with that cookie, and redirects to
+  # /session/new without it.
+  def serve(server, sign_in)
+    loop do
+      client = server.accept
+      request_line = client.gets.to_s
+      headers = {}
+      while (line = client.gets) && line != "\r\n"
+        key, value = line.split(":", 2)
+        headers[key.downcase] = value.strip
+      end
+      client.read(headers["content-length"].to_i) if headers["content-length"]
+      method, path = request_line.split
+      signed_in = headers["cookie"].to_s.include?("session=ok")
+      status, extra, body =
+        if method == "POST" && path == "/session"
+          SIGN_IN_RESPONSES.fetch(sign_in)
+        elsif path == "/session/new"
+          [ "200 OK", "", %(<input name="authenticity_token" type="hidden" value="T">) ]
+        elsif path == "/account" && !signed_in
+          [ "302 Found", "Location: /session/new\r\n", "" ]
+        else
+          [ "200 OK", "", "page" ]
+        end
+      client.write "HTTP/1.1 #{status}\r\nContent-Type: text/html\r\nContent-Length: #{body.bytesize}\r\nConnection: close\r\n#{extra}\r\n#{body}"
+      client.close
+    end
+  end
+
+  def test_succeeds_when_sign_in_succeeds
+    status, err = smoke(:ok)
+    assert status.success?, err
+  end
+
+  def test_fails_when_sign_in_is_rejected
+    status, err = smoke(:rejected)
+    refute status.success?
+    assert_match(%r{sign-in failed: POST /session returned 422}, err)
+  end
+
+  def test_fails_when_sign_in_redirects_back_to_the_sign_in_page
+    status, err = smoke(:back_to_sign_in)
+    refute status.success?
+    assert_match(%r{sign-in failed: POST /session returned 302 /session/new}, err)
+  end
+
+  def test_fails_when_a_signed_in_page_redirects
+    status, err = smoke(:no_cookie)
+    refute status.success?
+    assert_match(%r{sign-in failed: GET /account returned 302 /session/new}, err)
+  end
+end
