@@ -15,4 +15,8 @@ echo "==> Testing address-pr-reviews' fetch-reviews gate…"
 "$ROOT/test/address-pr-reviews/run"
 
 echo ""
+echo "==> Testing modernize-rails-app's scripts…"
+"$ROOT/test/modernize-rails-app/run"
+
+echo ""
 echo "CI passed."

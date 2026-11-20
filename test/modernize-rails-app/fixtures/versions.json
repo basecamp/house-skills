@@ -1,0 +1,12 @@
+{
+  "foo": [
+    { "number": "2.0.0", "created_at": "2023-03-01T00:00:00.000Z", "prerelease": false, "platform": "ruby" },
+    { "number": "1.4.0", "created_at": "2023-02-01T00:00:00.000Z", "prerelease": false, "platform": "ruby" },
+    { "number": "1.2.4.rc1", "created_at": "2023-04-01T00:00:00.000Z", "prerelease": true, "platform": "ruby" },
+    { "number": "1.2.5", "created_at": "2023-05-01T00:00:00.000Z", "prerelease": false, "platform": "java" },
+    { "number": "1.2.3", "created_at": "2023-01-01T00:00:00.000Z", "prerelease": false, "platform": "ruby" },
+    { "number": "1.3.0", "created_at": "2020-07-01T00:00:00.000Z", "prerelease": false, "platform": "ruby" },
+    { "number": "1.2.1", "created_at": "2020-06-01T00:00:00.000Z", "prerelease": false, "platform": "ruby" },
+    { "number": "1.2.0", "created_at": "2020-01-01T00:00:00.000Z", "prerelease": false, "platform": "ruby" }
+  ]
+}

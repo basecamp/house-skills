@@ -46,6 +46,11 @@ login_page = request(:get, "/session/new", headers: { "Accept" => BROWSER_ACCEPT
 token = login_page.body[/name="authenticity_token" (?:type="hidden" )?value="([^"]*)"/, 1]
 res = request(:post, "/session", form: { "username" => "user", "password" => "password", "authenticity_token" => token.to_s }, headers: { "Accept" => BROWSER_ACCEPT })
 File.write("#{outdir}/_login.txt", "#{res.code} #{res["location"]}\n")
+# Without these checks, the captures of two runs that both fail to sign in
+# can match. Adapt them to the app's successful sign-in response and a signed-in page.
+abort "sign-in failed: POST /session returned #{res.code} #{res["location"]}" unless res.is_a?(Net::HTTPRedirection) && !res["location"].to_s.include?("/session")
+account = request(:get, "/account", headers: { "Accept" => BROWSER_ACCEPT })
+abort "sign-in failed: GET /account returned #{account.code} #{account["location"]}" unless account.is_a?(Net::HTTPSuccess)
 
 pages = {
   "posts" => "/posts",
