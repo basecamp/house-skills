@@ -505,14 +505,14 @@ that 3.4 removes it from the default gems; the warning reached
 `assert_equal nil` that it reports with `assert_nil`. Lock with Bundler
 2.5.22, Ruby 3.3's default.
 
-Then turn on YJIT, in its own commit. `load_defaults "8.1"` sets
-`config.yjit = !Rails.env.local?`. An app that calls no
-`load_defaults`, or calls it with a version below 7.2, keeps `false`,
-so production runs without YJIT. Set it in `config/application.rb`.
-Rails skips the setting
-without a word when Ruby has no `RubyVM::YJIT.enable`: before Ruby 3.3,
-or in a Ruby built without YJIT. A deploy image can lag the app's Ruby,
-so check that the built image prints `true` for
+Then try YJIT, in its own commit, and keep it only if requests get faster.
+`load_defaults "8.1"` sets `config.yjit = !Rails.env.local?`. An app
+that calls no `load_defaults`, or calls it with a version below 7.2,
+keeps `false`, so production runs without YJIT. Set it in
+`config/application.rb`. Rails skips the setting without a word when
+Ruby has no `RubyVM::YJIT.enable`: before Ruby 3.3, or in a Ruby built
+without YJIT. A deploy image can lag the app's Ruby, so check that the
+built image prints `true` for
 `docker run --rm -e SECRET_KEY_BASE=x IMAGE bin/rails runner 'print RubyVM::YJIT.enabled?'`.
 Test it in the suite: run
 `bin/rails runner 'print RubyVM::YJIT.enabled?'` in a child process,
@@ -521,8 +521,17 @@ once with `RAILS_ENV=production` and once with `RAILS_ENV=test`, with
 YJIT in each worker holds at most 48 MiB of machine code on Ruby 3.3
 (`--yjit-exec-mem-size`; its metadata is extra), and has a soft limit
 of 128 MiB of total memory on Ruby 3.4 and later (`--yjit-mem-size`).
-State the limit in the PR, and compare container memory and request
-time before and after the deploy.
+
+After the deploy, compare container memory at the same age after start,
+and request time minus database time, against the containers before.
+YJIT compiles a method only after 30 calls in a worker, or 120 once the
+process holds more than 40,000 instruction sequences, so a low-traffic
+app warms up slowly and starts over at each deploy. On
+Target 1, about 1 request per second over 4 workers, YJIT used about
+110 MiB more per host, and requests were slower for at least 18 minutes
+after the deploy. If request time does not drop, set
+`config.yjit = false` with a comment that says why, so nobody turns it
+back on without measuring.
 
 ### Ruby 4.0, when the owner asks for it
 
