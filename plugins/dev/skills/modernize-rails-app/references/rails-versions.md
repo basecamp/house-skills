@@ -566,3 +566,52 @@ and every unicorn release depends on it. On Target 1:
 - **Post through the server.** Sign in by form, then send an Ajax write
   with `X-CSRF-Token`, against the old server and the new one in
   production mode, and again through the image's `CMD`.
+
+### Fizzy's image: jemalloc, bootsnap and Thruster
+
+After the last step, add what Fizzy's `Dockerfile` (`basecamp/fizzy`,
+`main`) has and the app's lacks, one commit each. These change only the
+image, so test each one against a locally built image, and compare it
+with an image built from the base branch.
+
+- **jemalloc.** In the base stage, install `libjemalloc2`, link
+  `/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2` to
+  `/usr/local/lib/libjemalloc.so`, and set
+  `LD_PRELOAD="/usr/local/lib/libjemalloc.so"`. Every process in the
+  image runs with it. Check that `/proc/self/maps` of a Ruby process in
+  the image lists `libjemalloc.so.2`. On Target 1,
+  memory at boot fell only from 123 MB to 111 MB; compare steady-state
+  container memory before and after the deploy.
+- **bootsnap.** Add `gem "bootsnap", require: false` and
+  `require "bootsnap/setup"` after `require "bundler/setup"` in
+  `config/boot.rb`. In the build stage, run
+  `bundle exec bootsnap precompile -j 1 --gemfile` after
+  `bundle install`, and `bundle exec bootsnap precompile -j 1 app/ lib/`
+  after the code is copied. `-j 1` avoids a hang under QEMU
+  ([rails/bootsnap#495](https://github.com/rails/bootsnap/issues/495)),
+  which emulates amd64 when an arm64 machine builds the image. On Target 1,
+  production boot fell from 0.97 s to 0.67 s, and the cache added 42 MB
+  to the image. Measure boot with
+  `ruby -e 'require "./config/environment"'` in a fresh container, five
+  runs each.
+- **Thruster.** It starts the app through `bin/rails server`, which
+  needs Puma. If the app still runs unicorn, replace it with Puma first,
+  in its own commit, as under Ruby 4.0 above. Then add
+  `gem "thruster", require: false`, run `bundle binstubs thruster`, and
+  set `CMD ["bin/thrust", "bin/rails", "server"]` and `EXPOSE 80`. In
+  `config/deploy.yml`, set `app_port: 80` under `proxy:`. Thruster
+  listens on 80, starts Puma with `PORT=3000`, compresses with gzip and
+  caches responses marked public, up to 64 MB per container. On Target 1,
+  adding the gem also added `x86_64-linux` to the lock's `PLATFORMS`,
+  and the build then compiled `nokogiri` from source; remove the
+  platform as at 8.1. Check that a static file comes back with
+  `Content-Encoding: gzip` and, on the second request, `X-Cache: hit`.
+  Name in the PR:
+  - `bin/kamal rollback` to an image from before the change works only
+    from a checkout of that version, because Kamal takes `app_port`
+    from the current checkout.
+  - Thruster answers `304` only on an `ETag` match. Rails sends static
+    files with `Last-Modified` only, so a conditional request for one
+    gets `200` with the full body.
+  - Thruster logs one JSON line per request to standard output.
+    `LOG_REQUESTS=false` turns that off.
