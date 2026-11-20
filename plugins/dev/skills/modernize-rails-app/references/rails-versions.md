@@ -594,12 +594,14 @@ with an image built from the base branch.
   to the image. Measure boot with
   `ruby -e 'require "./config/environment"'` in a fresh container, five
   runs each.
-- **Thruster.** Add `gem "thruster", require: false`, run
-  `bundle binstubs thruster`, and set
-  `CMD ["bin/thrust", "bin/rails", "server"]` and `EXPOSE 80`. Set
-  `proxy: app_port: 80` in `config/deploy.yml`. Thruster listens on 80,
-  starts Puma with `PORT=3000`, compresses with gzip and caches
-  responses marked public, up to 64 MB per container. On Target 1,
+- **Thruster.** It starts the app through `bin/rails server`, which
+  needs Puma. If the app still runs unicorn, replace it with Puma first,
+  in its own commit, as under Ruby 4.0 above. Then add
+  `gem "thruster", require: false`, run `bundle binstubs thruster`, and
+  set `CMD ["bin/thrust", "bin/rails", "server"]` and `EXPOSE 80`. In
+  `config/deploy.yml`, set `app_port: 80` under `proxy:`. Thruster
+  listens on 80, starts Puma with `PORT=3000`, compresses with gzip and
+  caches responses marked public, up to 64 MB per container. On Target 1,
   adding the gem also added `x86_64-linux` to the lock's `PLATFORMS`,
   and the build then compiled `nokogiri` from source; remove the
   platform as at 8.1. Check that a static file comes back with
