@@ -528,11 +528,15 @@ and every unicorn release depends on it. On Target 1:
   test it in the suite through
   `Puma::Configuration.new(config_files: [...]).clamp` inside
   `Rails.stub(:env, ActiveSupport::EnvironmentInquirer.new("production"))`.
-  Fizzy's `Process.warmup` needs Ruby 3.3, and its
-  `GC.config(rgengc_allow_full_mark: false)` and `out_of_band` GC need Ruby
-  3.4, so add them in a commit after the Ruby bump. Rename the worker-count
-  variable in `config/deploy.yml`, and name in the PR the lost request
-  timeout and any log tag that changed.
+  Fizzy's `Process.warmup` needs Ruby 3.3, so add it in a commit after the
+  Ruby bump, with Fizzy's `out_of_band` hook
+  (`GC.start if GC.latest_gc_info(:need_major_by)`). Do not add
+  `GC.config(rgengc_allow_full_mark: false)`. With it, CRuby never runs a
+  full mark on its own
+  ([`gc/default/default.c`](https://github.com/ruby/ruby/blob/caf4f279d15bac633083cba3fd53c8ed62162032/gc/default/default.c#L8949-L8952)),
+  so dead objects in the old generation keep their memory until something
+  calls `GC.start`. Rename the worker-count variable in `config/deploy.yml`,
+  and name in the PR the lost request timeout and any log tag that changed.
 - **`bin/bundle`.** Current Rails apps have none, and Fizzy has none.
   Delete it if nothing runs it (`rg bin/bundle`).
 - **Forced gems.** `rake` 13.0 and `json` before 2.7.2 require `ostruct`
