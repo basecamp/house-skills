@@ -477,6 +477,41 @@ the flash text on the new server's page. Target 1's first replay looked for
 `Flash` in the Base64 cookie, a check that can never pass, and the run looked
 like a success.
 
+### Cookie flags
+
+Old apps often send cookies without `Secure` or `HttpOnly`, and the upgrade
+keeps them that way. Rails adds `Secure` to every cookie only under
+`config.force_ssl`, in `ActionDispatch::SSL`. An app behind a
+TLS-terminating proxy that marks requests HTTPS another way, with its own
+middleware or `config.assume_ssl`, sends cookies without it unless the app
+sets `secure:` on each one.
+
+In each deployed environment, the session cookie and every login cookie (a
+"Remember me" token, say) need `Secure` and `HttpOnly`. The session cookie
+is `HttpOnly` by default. Set `secure: true` on the session store in each
+deployed environment's file. If the app has
+`config/initializers/session_store.rb`, set it there instead, only for the
+deployed environments (`secure: !Rails.env.local?` from Rails 7.1): the
+initializer runs after the environment file, and its
+`config.session_store` replaces every option. Set `httponly: true, secure:
+request.ssl?` on each login cookie the controllers write. A literal
+`secure: true` in a controller also applies in the test environment, where
+Rails does not write a `Secure` cookie on an HTTP request. Make the change
+in a commit of its own. On Target 1, the saved-login cookie lacked both
+flags, and the session cookie lacked `Secure`.
+
+Rails also skips a `Secure` cookie on an HTTP request in a deployed
+environment, so first confirm that each one marks requests HTTPS. If
+nothing does, a `Secure` session cookie breaks login.
+
+Test the header, not the setting. For the session cookie, run
+`bin/rails runner` locally with `RAILS_ENV` set to each deployed
+environment, send a `Rack::MockRequest` to `Rails.application` for a page
+that writes the session, and assert on its `Set-Cookie`. Send the request
+the way the proxy does: add `"HTTP_X_FORWARDED_PROTO" => "https"` if the
+app relies on that header. For a login cookie, assert on `Set-Cookie` in
+an integration test that calls `https!`.
+
 ## Plan file
 
 One Markdown file per step, named
