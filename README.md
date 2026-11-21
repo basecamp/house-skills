@@ -1,3 +1,7 @@
+<!-- yarkr:badges:start -->
+[![Indexed on Yarkr](https://api.yarkr.com/functions/v1/api/api/v1/badges/repos/basecamp/house-skills/version.svg)](https://yarkr.com/arks/basecamp/house-skills)
+<!-- yarkr:badges:end -->
+
 ## Install
 
 **Claude Code** — install as plugins via the [37signals marketplace](https://github.com/basecamp/claude-plugins):
@@ -12,6 +16,40 @@ claude plugin install dev        # or: security, ai, recap
 ```bash
 npx skills add basecamp/house-skills
 ```
+
+<!-- yarkr:install:start -->
+## Install with Yarkr
+
+This repo is indexed on [Yarkr](https://yarkr.com/arks/basecamp/house-skills) as the ark [basecamp/house-skills](https://yarkr.com/arks/basecamp/house-skills), so its skills install into Claude Code, Codex, Cursor and other agent harnesses with one command.
+
+### CLI
+
+Install the whole ark, which Yarkr keeps equal to this repo:
+
+```bash
+npx yarkr-cli sync basecamp/house-skills
+```
+
+Or add individual skills:
+
+```bash
+npx yarkr-cli add skill:basecamp/house-skills/address-pr-reviews
+npx yarkr-cli add skill:basecamp/house-skills/agents-md
+npx yarkr-cli add skill:basecamp/house-skills/basecamp-activity
+```
+
+No Node.js? `curl -fsSL https://yarkr.com/install.sh | sh` (macOS, Linux) or `irm https://yarkr.com/install.ps1 | iex` (Windows PowerShell) installs `yarkr` as a standalone binary; then type `yarkr` in place of `npx yarkr-cli`.
+
+### MCP
+
+Connect your agent to the ark over MCP:
+
+```bash
+npx yarkr-cli mcp add basecamp/house-skills
+```
+
+Or point any MCP client at `https://api.yarkr.com/functions/v1/api/mcp/o/basecamp/house-skills`.
+<!-- yarkr:install:end -->
 
 ## Skills
 
