@@ -190,9 +190,12 @@ workflow.
 action: on each run GitHub builds it from the pinned commit's `Dockerfile`, which pulls
 `golang:latest`, `alpine:latest` and `koalaman/shellcheck-alpine:stable`. Pinning the action's
 SHA pins that `Dockerfile`, not those images, so the audit's toolchain can change with no diff in
-the repository. That is accepted here: the failure is a broken or changed audit run, which shows
-as a red check, and an attacker who can tamper with those official images has far wider reach
-than this job. Reviewers will keep flagging it; answer with this paragraph rather than patching
+the repository. That is accepted here, for two different failures. Ordinary drift, a new Go or
+Alpine release that breaks the build or changes a result, shows as a red or changed audit run.
+Tampering is quieter: a poisoned image could ship an actionlint that reports success without
+checking anything, so the audit stays green while it is bypassed. Accepting that rests on who
+could do it, since an attacker able to replace Docker's official images reaches far more than
+this job, and on the audit being a lint, not the control that keeps a bad workflow out. Reviewers will keep flagging it; answer with this paragraph rather than patching
 one repository. Where a stable audit toolchain matters more than Dependabot bumps, use the
 checksum-verified release binary in `references/rule-unpinned-images.md` instead (Dependabot
 updates neither that nor a digest-pinned `docker://` image, so either is a manual bump).
