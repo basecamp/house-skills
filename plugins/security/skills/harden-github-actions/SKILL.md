@@ -186,6 +186,17 @@ Use version tags, not SHA hashes — run `pinact run --min-age 7` immediately af
 this job to pin them. This ensures the SHAs match what pinact produces for the rest of the
 workflow.
 
+**The actionlint step builds its own image, from mutable tags.** `rhysd/actionlint` is a Docker
+action: on each run GitHub builds it from the pinned commit's `Dockerfile`, which pulls
+`golang:latest`, `alpine:latest` and `koalaman/shellcheck-alpine:stable`. Pinning the action's
+SHA pins that `Dockerfile`, not those images, so the audit's toolchain can change with no diff in
+the repository. That is accepted here: the failure is a broken or changed audit run, which shows
+as a red check, and an attacker who can tamper with those official images has far wider reach
+than this job. Reviewers will keep flagging it; answer with this paragraph rather than patching
+one repository. Where a stable audit toolchain matters more than Dependabot bumps, use the
+checksum-verified release binary in `references/rule-unpinned-images.md` instead (Dependabot
+updates neither that nor a digest-pinned `docker://` image, so either is a manual bump).
+
 **Before adding this job, check if the workflow already has a standalone `actionlint` job.**
 If it does, remove it — `lint-actions` replaces it. Do not create duplicate actionlint runs.
 
@@ -235,7 +246,10 @@ actionlint
 zizmor .
 ```
 
-Each tool should be a separate command so failures are clearly attributable. Place these
+Each tool should be a separate command so failures are clearly attributable. When the script has
+no `bin/setup` that installs them, check for each tool before running it and print how to install
+it, so a developer missing one reads why rather than a bare command-not-found failure that sinks
+an otherwise passing run. Place these
 near other linting steps if the script has them.
 
 ### Examples
