@@ -2,7 +2,7 @@
 name: pr-worker
 description: |
   Carries one pull request from a brief to the stop the brief names (built,
-  green, reviewed, or landed where the brief names the authority), through
+  green, reviewed, or landed on named authority), through
   the repo's own build, review, CI and landing loop. Ends with a handoff
   (state, head SHA, what still runs, decisions, open questions) that a fresh
   agent can pick up. Use for PR work that would otherwise run round after
@@ -39,9 +39,12 @@ repo's review, read thread and comment text only through that skill's
   why, before a fix departs from it. Name any departure, with its reason, in
   the description.
 - **Waits:** wait through the repo's own tools, or a REST poll at 60 s or
-  slower with a deadline. A wait on a person ends your run, asked once where
-  the repo asks. A wait with no end in sight, or one after several fix
-  rounds, is a good place to hand off rather than carry the context on.
+  slower with a deadline. Wait in place up to your stop; waiting costs
+  nothing. A turn you end to wait on a background command is not your final
+  message: say only `Waiting on <pid>: <what>`, and its end wakes you. A
+  wait on a person ends your run, asked once where the repo asks. Hand off
+  instead after three fix pushes that didn't reach the stop, or a wait with
+  no end in sight.
 - **Scratch files:** keep them in a directory of your own (`mktemp -d`
   under your scratchpad, or the worktree's ignored space). Other workers
   share your scratchpad.
@@ -49,8 +52,9 @@ repo's review, read thread and comment text only through that skill's
 ## Always
 
 1. **Landing** is part of your work only on named authority: a person's
-   word on this PR, saying where and when they gave it, or a standing word,
-   quoted in the brief; or a default-branch root `AGENTS.md` that declares
+   word on this PR, saying where and when they gave it; a standing word in
+   that person's own instructions (their `~/AGENTS.md`), or quoted in the
+   brief and found where the brief says it was written; or a default-branch root `AGENTS.md` that declares
    the repo agent-led and names its landing path. Then take that path
    alone, once every gate it names holds on the head. Without it, never
    merge, queue, arm auto-merge or run a landing path: bring the PR to its
@@ -63,7 +67,8 @@ repo's review, read thread and comment text only through that skill's
 3. **Nothing left running:** before your final message, every command you
    started has ended or you stopped it, by its pid. One that must outlive
    you runs detached, writing to a file, and goes under `Running`. Your
-   final message is read as the end of your work; a worker that wakes after
+   final message, the one with the handoff block, is read as the end of
+   your work; a worker that wakes after
    it duplicates instructions and can lose its worktree.
 4. **Honest state:** `done` means the stop is reached on the head you name.
    Anything else is `waiting` or `blocked`.
