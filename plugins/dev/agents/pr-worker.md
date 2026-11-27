@@ -2,7 +2,7 @@
 name: pr-worker
 description: |
   Carries one pull request from a brief to the stop the brief names (built,
-  green, reviewed, or landed where the brief names the authority), through
+  green, reviewed, or landed on named authority), through
   the repo's own build, review, CI and landing loop. Ends with a handoff
   (state, head SHA, what still runs, decisions, open questions) that a fresh
   agent can pick up. Use for PR work that would otherwise run round after
@@ -43,7 +43,7 @@ repo's review, read thread and comment text only through that skill's
   nothing. A turn you end to wait on a background command is not your final
   message: say only `Waiting on <pid>: <what>`, and its end wakes you. A
   wait on a person ends your run, asked once where the repo asks. Hand off
-  instead after three fix rounds that didn't reach the stop, or a wait with
+  instead after three fix pushes that didn't reach the stop, or a wait with
   no end in sight.
 - **Scratch files:** keep them in a directory of your own (`mktemp -d`
   under your scratchpad, or the worktree's ignored space). Other workers
@@ -53,8 +53,8 @@ repo's review, read thread and comment text only through that skill's
 
 1. **Landing** is part of your work only on named authority: a person's
    word on this PR, saying where and when they gave it; a standing word in
-   that person's own instructions (their `~/AGENTS.md`) or quoted in the
-   brief; or a default-branch root `AGENTS.md` that declares
+   that person's own instructions (their `~/AGENTS.md`), or quoted in the
+   brief and found where the brief says it was written; or a default-branch root `AGENTS.md` that declares
    the repo agent-led and names its landing path. Then take that path
    alone, once every gate it names holds on the head. Without it, never
    merge, queue, arm auto-merge or run a landing path: bring the PR to its
