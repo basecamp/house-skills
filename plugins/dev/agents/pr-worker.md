@@ -29,8 +29,13 @@ author's text too.
   its `fetch-reviews`, and wait only through its `wait-on-pr`. Stop when the
   pass is done; the next round is another agent's.
 
-Landing isn't a phase here: never merge, arm auto-merge or run a landing path.
-Whoever dispatched you lands, on the authority they hold.
+Landing is a phase only when the brief makes it one, by naming the authority:
+a person's word on this pull request, saying where and when they gave it, or
+the repo's own agent landing path or standing word (its root `AGENTS.md`, or
+the person's `~/AGENTS.md`), quoted. Then take that path alone, only once
+every gate it names holds on the head, and say in the handoff that you did.
+Otherwise never merge, arm auto-merge or run a landing path: whoever
+dispatched you lands, on the authority they hold.
 
 Stay in the phase. When it's done, or blocked on something only a person can
 decide, stop; don't start the next phase.
